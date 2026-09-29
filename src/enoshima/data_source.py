@@ -18,7 +18,7 @@ BronzeStore ──► Loader ──► SharedBuffer ──► Channel ──► 
 
 Reading is `bronze`'s job; this module decides *when*, and hands out one
 `Channel` per backtest. `Channel` is the chunked counterpart of
-`qate.simulator.ReplayQueue`: the same "the strategy's own events come first"
+`qate.trading.replay.ReplayQueue`: the same "the strategy's own events come first"
 rule, over a buffer that is refilled rather than a fixed list.
 """
 
@@ -202,7 +202,7 @@ class SharedBuffer:
 class Channel(EventQueue):
     """One backtest's view of the shared buffer, plus its own trading events.
 
-    Order matters and is the same rule `qate.simulator.ReplayQueue` documents: an
+    Order matters and is the same rule `qate.trading.replay.ReplayQueue` documents: an
     order response has to reach the strategy before the next market event does,
     or the strategy is shown a new book while still believing an order is open.
     """

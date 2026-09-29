@@ -20,7 +20,7 @@ from logging import getLogger
 from qate.core.ev_q import EventQueue
 from qate.core.ev_type import EventType
 from qate.core.model import ExchangeName
-from qate.simulator import SimulatorGateway
+from qate.trading.gateways import SimulatorGateway
 from qate.trading.strategy import Strategy
 from qate.trading.trader import Trader
 
