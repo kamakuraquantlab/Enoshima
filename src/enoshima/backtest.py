@@ -20,7 +20,7 @@ from logging import getLogger
 from qate.core.ev_q import EventQueue
 from qate.core.ev_type import EventType
 from qate.core.model import ExchangeName
-from qate.simulator import SimulatorGateway, SyncEventQueue
+from qate.simulator import SimulatorGateway
 from qate.trading.strategy import Strategy
 from qate.trading.trader import Trader
 
@@ -44,11 +44,10 @@ class Backtest:
         self.trader = Trader(strategy, channel)
 
         for exchange_name in exchanges:
+            # No queue and no thread: the simulator answers inside the caller's
+            # call. Slippage is 0 here because the evaluations apply their own
+            # rates -- see result.ResultCollector.
             gateway = SimulatorGateway(exchange_name, slippage_rate=0.0)
-            # Dispatch in place: an order created by the strategy is matched and
-            # answered inside the strategy's own call, as it would be by a venue,
-            # rather than waiting for a thread to wake.
-            gateway.set_event_queue(SyncEventQueue(gateway.handlers))
             gateway.add_order_listener(self.result)
             self.trader.add_gateway(gateway)
             # Books reach the gateway through the trader's own loop, so the
