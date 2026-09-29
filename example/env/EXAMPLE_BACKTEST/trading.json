@@ -1,6 +1,5 @@
 {
   "chat_config_key": null,
-  "gateway_name": "SIMULATOR",
   "strategy_module_name": "example.strategy",
   "trading_config_key": "DEFAULT",
   "variant": "v1"

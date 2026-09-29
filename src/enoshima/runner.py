@@ -14,6 +14,17 @@ split into batches, each of which replays the range again.
 So the cost of a sweep is `ceil(combos / MAX_CONCURRENCY)` passes over the data,
 not `combos` passes.
 
+## Which parameters a single run uses
+
+`params.json`, the same file a live run reads. That is what makes "backtest exactly
+what production is running" one command rather than a comparison of two files.
+
+It was `param_grid.json`'s default values, which meant an environment had two
+sources of truth for its parameters and nothing kept them in step -- in practice
+the backtest envs left `params.json` empty and the live envs left the grid alone.
+A grid is a search space, an input to `--optimize`, not a description of the
+environment.
+
 ## Warmup
 
 Every run is fed `WARMUP_HOURS` of data from before the requested range so
@@ -30,7 +41,7 @@ from datetime import timedelta
 from logging import getLogger
 from pathlib import Path
 
-from qate.boot.config import BootConfig, TradingProfile
+from qate.boot.config import PARAM_GRID_FILE, PARAMS_FILE, load_trading_env
 from qate.boot.run_log import RunLogger
 from qate.boot.strategy_loader import get_strategy_class
 from qate.core.features import FEATURES
@@ -76,6 +87,8 @@ class Runner:
         chunk_days: int = DEFAULT_CHUNK_DAYS,
         max_concurrency: int = MAX_CONCURRENCY,
         force: bool = False,
+        output_root: str | None = None,
+        variant: str | None = None,
     ):
         self.env = env
         self.dt_range = dt_range
@@ -83,22 +96,21 @@ class Runner:
         self.chunk_days = chunk_days
         self.max_concurrency = max_concurrency
         self.force = force
-        self.batch_id = self._next_batch_id(env)
+        self.output_root = Path(output_root) if output_root else Path(env.work_dir)
+        self.batch_id = self._next_batch_id(self.output_root)
 
-        FEATURES.load_from_dict(self.env.get("features"))
-        self.config: BootConfig = self.env.get("config")
-        self.profile: TradingProfile = self.env.get("trading")
-        if self.config is None or self.profile is None:
-            raise RuntimeError(
-                f"Environment {self.env.name} has no config.json or trading.json. "
-                f"See the example environment in the Enoshima repository."
-            )
+        self.definition = load_trading_env(env)
+        if variant:
+            self.definition.profile.variant = variant
+        FEATURES.load_from_dict(self.definition.features)
+        self.config = self.definition.config
+        self.profile = self.definition.profile
 
         self.store = BronzeStore(data_root)
-        self.run_logger = RunLogger(str(self.env.work_dir))
+        self.run_logger = RunLogger(str(self.output_root))
 
     @staticmethod
-    def _next_batch_id(env: Env) -> int:
+    def _next_batch_id(output_root: Path) -> int:
         """A unix timestamp, advanced until it names a batch that does not exist.
 
         The id groups one sweep's runs together and `post_analysis` ranks within
@@ -107,7 +119,7 @@ class Runner:
         collides whenever two runs start inside the same second, which is
         ordinary when they are launched from a script.
         """
-        result_root = Path(env.work_dir) / "result"
+        result_root = output_root / "result"
         batch_id = int(time.time())
         while (result_root / str(batch_id)).exists():
             batch_id += 1
@@ -116,18 +128,40 @@ class Runner:
     # ---------------------------------------------------------------- planning
 
     def param_sets(self) -> list[dict]:
-        param_grid = ParamGrid.from_object(self.env.get("param_grid"))
         if self.optimize == MODE_GRID:
-            return param_grid.get_all()
+            return self._param_grid().get_all()
         if self.optimize == MODE_COMBO:
             combo_file = Path(self.env.work_dir) / COMBO_FILE
             if not combo_file.is_file():
                 raise RuntimeError(f"--optimize combo needs {combo_file}")
             return json.loads(combo_file.read_text())
-        return [param_grid.get_default()]
+        return [self._single_params()]
+
+    def _param_grid(self) -> ParamGrid:
+        if self.definition.param_grid is None:
+            raise RuntimeError(f"--optimize needs {PARAM_GRID_FILE} in {self.env.work_dir}")
+        return ParamGrid.from_object(self.definition.param_grid)
+
+    def _single_params(self) -> dict:
+        """The parameters for one run: `params.json`, as a live run reads it."""
+        if self.definition.params:
+            return self.definition.params
+
+        # Backtest environments written before this were never read from
+        # params.json and left it empty, so fall back rather than refuse -- but say
+        # so, because the two files can disagree and only one is now authoritative.
+        if self.definition.param_grid is not None:
+            defaults = ParamGrid.from_object(self.definition.param_grid).get_default()
+            LOG.warning(
+                f"{PARAMS_FILE} in {self.env.work_dir} is empty; using {PARAM_GRID_FILE}'s "
+                f"default values. Write them to {PARAMS_FILE} to run the same parameters "
+                f"a live run would: {defaults}"
+            )
+            return defaults
+        raise RuntimeError(f"No parameters: {self.env.work_dir} has neither {PARAMS_FILE} nor {PARAM_GRID_FILE}")
 
     def result_dir(self, param_set_id: str) -> Path:
-        return Path(self.env.work_dir) / "result" / str(self.batch_id) / param_set_id
+        return self.output_root / "result" / str(self.batch_id) / param_set_id
 
     # ----------------------------------------------------------------- running
 
@@ -313,7 +347,7 @@ class Runner:
         results.sort(key=lambda x: x[0], reverse=True)
         best_pnl, best = results[0]
 
-        best_dir = Path(self.env.work_dir) / "best_result"
+        best_dir = self.output_root / "best_result"
         best_dir.mkdir(parents=True, exist_ok=True)
         best_path = best_dir / f"{self.batch_id}.json"
         best_path.write_text(json.dumps(best, indent=2))

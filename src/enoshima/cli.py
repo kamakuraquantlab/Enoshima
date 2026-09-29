@@ -23,7 +23,6 @@ import logging
 import sys
 from pathlib import Path
 
-from qate.boot.config import TradingProfile
 from qate.env import sys_env
 from qate.env.env import Env
 from qate.env.env_name import EnvName
@@ -71,7 +70,21 @@ def basic_logging() -> None:
 
 
 def load_env(env_name: EnvName) -> Env:
-    return Env.load_env(sys_env.get_env_root_dir(), env_name)
+    """The environment, not yet read. `load_trading_env` reads the files it needs.
+
+    Deliberately not `Env.load_env`, which goes through `desc.json`'s module map.
+    Nothing here needs that indirection: `qate.boot.config.load_trading_env` knows
+    which classes it wants and resolves the strategy's `Config` from the strategy
+    module, so an env whose `desc.json` has gone stale still loads.
+    """
+    return Env(sys_env.get_env_root_dir(), env_name)
+
+
+def _output_dir(args) -> Path:
+    """Where a run's results are: the `--output-root` it used, or the env dir."""
+    if getattr(args, "output_root", None):
+        return Path(args.output_root).expanduser() / args.env
+    return Path(load_env(args.env).work_dir)
 
 
 def add_launch_dir_to_path() -> str:
@@ -100,18 +113,28 @@ def add_launch_dir_to_path() -> str:
 def cmd_run(args) -> int:
     launch_dir = add_launch_dir_to_path()
     env = load_env(args.env)
-    if args.variant:
-        profile: TradingProfile = env.get("trading")
-        profile.variant = args.variant
-
     dt_range = DtRange.from_strings(args.from_dt, args.to_dt)
 
+    # Where a run *writes*, as opposed to where its definition is read from.
+    # Defaulting to the environment directory keeps a self-contained backtest env
+    # behaving as before; pointing it elsewhere is what lets the same environment a
+    # live process is running from be backtested -- without writing into it and
+    # without contending for its lock.
+    output = Env(
+        sys_env.get_env_root_dir(),
+        args.env,
+        work_dir=Path(args.output_root).expanduser() / args.env if args.output_root else None,
+    )
+    Path(output.work_dir).mkdir(parents=True, exist_ok=True)
+
     try:
-        # Takes the environment's lock and chdirs into it, so two runs of one
-        # environment cannot interleave their results.
-        env.enter()
+        # chdir into the output directory, log there, and lock it, so two runs
+        # cannot interleave their results.
+        output.enter()
         setup_terminal_logging()
         LOG.info(f"Loading strategies from {launch_dir}")
+        if output.work_dir != env.work_dir:
+            LOG.info(f"Definition from {env.work_dir}, writing to {output.work_dir}")
         runner = Runner(
             env,
             dt_range,
@@ -120,12 +143,14 @@ def cmd_run(args) -> int:
             chunk_days=args.chunk_days,
             max_concurrency=args.max_concurrency,
             force=args.force,
+            output_root=output.work_dir,
+            variant=args.variant or None,
         )
         runner.run()
         if args.optimize:
             runner.post_analysis()
     finally:
-        env.leave()
+        output.leave()
     return 0
 
 
@@ -152,8 +177,7 @@ def cmd_results(args) -> int:
     import json
 
     basic_logging()
-    env = load_env(args.env)
-    run_log_dir = Path(env.work_dir) / "run_log"
+    run_log_dir = _output_dir(args) / "run_log"
     if not run_log_dir.is_dir():
         print(f"No runs recorded for {args.env}")
         return 1
@@ -199,9 +223,8 @@ def cmd_export(args) -> int:
 
     from .influx import export_env
 
-    env = load_env(args.env)
     store = InfluxdbStore(sys_env.get_influxdb(args.keys), org=args.org)
-    written = export_env(env.work_dir, store, str(env.name), args.batch_id)
+    written = export_env(_output_dir(args), store, str(args.env), args.batch_id)
     print(f"Exported {written} metric objects")
     return 0
 
@@ -210,11 +233,11 @@ def cmd_clean(args) -> int:
     import shutil
 
     basic_logging()
-    env = load_env(args.env)
-    targets = [Path(env.work_dir) / "result", Path(env.work_dir) / "run_log", Path(env.work_dir) / "best_result"]
+    out = _output_dir(args)
+    targets = [out / "result", out / "run_log", out / "best_result"]
     existing = [t for t in targets if t.exists()]
     if not existing:
-        print(f"Nothing to remove under {env.work_dir}")
+        print(f"Nothing to remove under {out}")
         return 0
 
     print("This will permanently delete:")
@@ -253,6 +276,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--chunk-days", type=int, default=DEFAULT_CHUNK_DAYS, help="days loaded at once (memory)")
     run.add_argument("--max-concurrency", type=int, default=MAX_CONCURRENCY, help="parameter sets per data pass")
     run.add_argument("--force", action="store_true", help="re-run parameter sets that already have a result")
+    run.add_argument(
+        "--output-root",
+        default=None,
+        help="where results go; defaults to the env dir. Point it elsewhere to backtest "
+        "an environment a live process is using",
+    )
     run.set_defaults(func=cmd_run)
 
     markets = sub.add_parser("markets", help="what market data is on disk")
@@ -262,6 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
     results = sub.add_parser("results", help="list recorded runs, best first")
     results.add_argument("--env", required=True, type=EnvName)
     results.add_argument("--limit", type=int, default=25)
+    results.add_argument("--output-root", default=None, help="where the runs were written")
     results.set_defaults(func=cmd_results)
 
     export = sub.add_parser("export", help="load a run's metrics into InfluxDB")
@@ -269,11 +299,13 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--batch-id", type=int, default=None, help="one batch; defaults to every batch")
     export.add_argument("--keys", default="DEFAULT", help="section in ~/.qate/influxdb.keys")
     export.add_argument("--org", default="qate", help="InfluxDB organisation")
+    export.add_argument("--output-root", default=None, help="where the runs were written")
     export.set_defaults(func=cmd_export)
 
     clean = sub.add_parser("clean", help="delete an environment's results and run logs")
     clean.add_argument("--env", required=True, type=EnvName)
     clean.add_argument("--yes", action="store_true", help="required; results are not deleted without it")
+    clean.add_argument("--output-root", default=None, help="where the runs were written")
     clean.set_defaults(func=cmd_clean)
 
     return parser

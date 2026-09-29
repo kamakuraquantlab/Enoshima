@@ -81,6 +81,19 @@ but it is easy to break from here:
 - **`post_analysis` ranks across every run log with the same strategy and range**,
   not just the current batch. A resumed sweep must be able to pick a best from
   results it did not just compute.
+- **A single run's parameters come from `params.json`**, the same file a live run
+  reads, so "backtest what production runs" is one command. `param_grid.json` is a
+  search space and only `--optimize` consults it. These were one source once -- the
+  grid's defaults -- which meant an environment had two answers and nothing kept
+  them in step; the backtest envs left `params.json` empty and the live envs left
+  the grid alone. An empty `params.json` still falls back, with a warning.
+- **A run writes under `--output-root`, defaulting to the env dir.** Pointing it
+  elsewhere is what lets one environment serve a live process and a backtest at the
+  same time: the definition is read, not written, and the env's lock is left alone.
+  `results`, `export` and `clean` take the same flag.
+- **The strategy's `Config` class is resolved from the strategy module**, by
+  `qate.boot.config.resolve_config_class`, not from `desc.json`'s module map. That
+  map went stale whenever code moved. Do not reintroduce a dependency on it.
 - **`--optimize` ranks on `pnl5`**, the middle slippage assumption. Ranking on
   `pnl0` selects for strategies whose edge is thinnest.
 - **Never delete a user's results on a schedule.** `enoshima clean` requires

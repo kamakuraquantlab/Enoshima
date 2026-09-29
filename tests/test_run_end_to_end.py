@@ -231,6 +231,77 @@ def test_a_resumed_sweep_ranks_the_combinations_it_skipped(run_env):
     assert best_second["params"] == best_first["params"]
 
 
+def test_a_single_run_uses_params_json_not_the_grid_defaults(run_env):
+    """The same file a live run reads, so "backtest what prod runs" is one command."""
+    env, dt_range, data_root = run_env
+
+    # Make the two sources disagree, then check which one won.
+    params_path = Path(env.work_dir) / "params.json"
+    params_path.write_text(json.dumps({"fast_period": 30, "slow_period": 90}))
+
+    runner = Runner(env, dt_range, data_root=str(data_root), chunk_days=1)
+    assert runner.param_sets() == [{"fast_period": 30, "slow_period": 90}]
+
+    runner.run()
+    log = json.loads(next((Path(env.work_dir) / "run_log").glob("*.json")).read_text())
+    assert log["params"] == {"fast_period": 30, "slow_period": 90}
+
+
+def test_an_empty_params_json_falls_back_to_the_grid_and_says_so(run_env, caplog):
+    """Backtest envs written before this left params.json empty; do not just refuse."""
+    env, dt_range, data_root = run_env
+    (Path(env.work_dir) / "params.json").write_text("{}")
+
+    runner = Runner(env, dt_range, data_root=str(data_root), chunk_days=1)
+    with caplog.at_level("WARNING"):
+        params = runner.param_sets()
+
+    assert params == [{"fast_period": 20, "slow_period": 120}]
+    assert any("params.json" in r.message for r in caplog.records)
+
+
+def test_optimize_still_reads_the_grid(run_env):
+    """A grid is a search space, and only --optimize consults it."""
+    env, dt_range, data_root = run_env
+    (Path(env.work_dir) / "params.json").write_text(json.dumps({"fast_period": 30, "slow_period": 90}))
+
+    runner = Runner(env, dt_range, optimize="grid", data_root=str(data_root), chunk_days=1)
+    combos = runner.param_sets()
+    assert len(combos) == 6
+    assert {"fast_period": 30, "slow_period": 90} not in combos
+
+
+def test_output_root_keeps_a_run_out_of_the_environment(run_env, tmp_path):
+    """What makes one environment safe for a live process and a backtest at once."""
+    env, dt_range, data_root = run_env
+    out = tmp_path / "backtests" / str(ENV_NAME)
+    out.mkdir(parents=True)
+
+    before = sorted(p.name for p in Path(env.work_dir).iterdir())
+
+    runner = Runner(env, dt_range, data_root=str(data_root), chunk_days=1, output_root=str(out))
+    runner.run()
+
+    # Everything a run produces is under the output root.
+    assert (out / "run_log").is_dir()
+    assert (out / "result").is_dir()
+    # And the environment is untouched.
+    assert sorted(p.name for p in Path(env.work_dir).iterdir()) == before
+
+
+def test_a_stale_desc_json_does_not_stop_a_run(run_env):
+    """The Config class comes from the strategy module, not from desc.json's map."""
+    env, dt_range, data_root = run_env
+    desc = Path(env.work_dir) / "desc.json"
+    stale = json.loads(desc.read_text())
+    stale.setdefault("modules", {})["config"] = "some.module.that.moved.Config"
+    desc.write_text(json.dumps(stale))
+
+    runner = Runner(env, dt_range, data_root=str(data_root), chunk_days=1)
+    runner.run()
+    assert list((Path(env.work_dir) / "run_log").glob("*.json"))
+
+
 def test_a_range_with_no_data_is_reported_not_silently_empty(run_env, caplog):
     env, _, data_root = run_env
     empty_range = DtRange.from_strings("20260201", "20260202")

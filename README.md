@@ -128,14 +128,24 @@ One directory per named run configuration, under `~/env` (or `QATE_ENV_ROOT`):
 
 | File | Holds |
 |---|---|
-| `desc.json` | Which class loads each of the files below |
-| `config.json` | The strategy's `Config` — market, order size |
 | `trading.json` | Which strategy module and variant to run |
-| `param_grid.json` | The default parameters, and the values a sweep walks |
-| `params_combo.json` | An explicit parameter list, for `--optimize combo` |
-| `features.json` | Feature flags |
+| `config.json` | The strategy's `Config` — market, order size |
+| `params.json` | **The parameters one run uses.** The same file a live run reads |
+| `param_grid.json` | The search space `--optimize grid` walks. Optional |
+| `params_combo.json` | An explicit parameter list, for `--optimize combo`. Optional |
+| `features.json` | Feature flags. Optional |
+| `desc.json` | The environment's name. The class-per-file map it used to carry is no longer read |
 
-A run writes back into the same directory:
+**`params.json` is what a single run uses**, so backtesting exactly what a live
+process is running is one command rather than a comparison of two files. A grid is
+a search space — an input to `--optimize` — not a description of the environment.
+An env whose `params.json` is empty falls back to the grid's defaults and warns.
+
+The strategy's `Config` class is resolved from the strategy module
+(`<strategy_module>.config.Config`), not from `desc.json`, so an environment
+written when a strategy lived somewhere else still loads.
+
+By default a run writes back into the same directory:
 
 ```text
 EXAMPLE_BACKTEST/
@@ -145,6 +155,22 @@ EXAMPLE_BACKTEST/
     ├── Metrics_20260901.msgpack        orders, PnL, evaluations
     └── dataset=Pnl/.../data.parquet    per-trade PnL
 ```
+
+## Backtesting an environment something else is using
+
+`--output-root` separates where a run's *definition* is read from and where its
+*results* go:
+
+```bash
+enoshima run --env LIVE_ENV --from 2026-09-01 --to 2026-09-07 --output-root ~/backtests
+```
+
+The environment is then read and not written, and its lock is left alone — so a
+live process can be running from it at the same time. Pass the same
+`--output-root` to `results`, `export` and `clean` to look there.
+
+That is the point of one environment serving both: the thing you backtest is the
+thing that runs, file for file.
 
 ## Results are local, and a database is optional
 
@@ -182,8 +208,9 @@ ranks on `pnl5` for the same reason.
 | `enoshima clean` | Delete an environment's results (needs `--yes`) |
 
 Useful flags on `run`: `--optimize grid|combo`, `--variant`, `--data-root`,
-`--chunk-days` (memory), `--max-concurrency` (parameter sets per data pass),
-`--force` (re-run a parameter set that already has a result).
+`--output-root` (see above), `--chunk-days` (memory), `--max-concurrency`
+(parameter sets per data pass), `--force` (re-run a parameter set that already has
+a result).
 
 ## Memory, and how a sweep is cheap
 
