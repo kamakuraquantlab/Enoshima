@@ -1,5 +1,4 @@
 {
-  "chat_config_key": null,
   "strategy_module_name": "example.strategy",
   "trading_config_key": "DEFAULT",
   "variant": "v1"
