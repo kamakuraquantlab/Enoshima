@@ -10,6 +10,7 @@ exchange, and writes what happened to disk.
 | `data_source` | Chunked replay: reads bronze a few days at a time, one copy shared |
 | `backtest` | One strategy, one parameter set, one replay |
 | `result` | Receiving a run's events and writing them locally |
+| `timeseries` | The Hive-partitioned parquet a run's PnL and bars are written to |
 | `eval` | Turning fills and PnL into Sharpe, drawdown, win rate |
 | `run_log` | What a run recorded about itself, and why its id is deterministic |
 | `influx` | The optional export of finished results into InfluxDB |

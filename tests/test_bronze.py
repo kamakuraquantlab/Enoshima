@@ -1,7 +1,7 @@
 """Reading the bronze layer: paths, schemas, and the ragged edges of a book.
 
 The fixtures are written with pyarrow directly rather than through
-`qate.store.timeseries`, so a change to the writer cannot quietly redefine what
+`enoshima.timeseries`, so a change to the writer cannot quietly redefine what
 the reader is being tested against.
 
 Paths and the list of complete days come from `komachi`, so the tests that cover

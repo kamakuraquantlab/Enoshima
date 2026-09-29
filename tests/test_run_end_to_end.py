@@ -131,7 +131,7 @@ def test_a_run_trades_and_writes_its_results(run_env):
 def test_metrics_are_readable_back_without_a_database(run_env):
     """Local-first: a finished run's metrics are on disk and parseable as they are."""
     from qate.core.model import Measurement
-    from qate.store.metrics import read_metrics_dir
+    from qate.trading.metric_log import read_metrics_dir
 
     env, dt_range, data_root = run_env
     runner = Runner(env, dt_range, data_root=str(data_root), chunk_days=1)

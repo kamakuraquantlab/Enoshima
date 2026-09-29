@@ -189,7 +189,7 @@ def cmd_results(args) -> int:
 def cmd_export(args) -> int:
     basic_logging()
     try:
-        from qate.store.influx import InfluxdbStore
+        from .influx import InfluxdbStore
     except ImportError:
         print(
             "Exporting needs the influx extra: pip install 'kamakuraquantlab-enoshima[influx]'",

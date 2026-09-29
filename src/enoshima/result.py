@@ -3,10 +3,10 @@
 The strategy publishes metrics, order fills and PnL updates as events. This is
 what receives them.
 
-Everything is written locally. Metric objects go to msgpack exactly as the
-strategy emitted them, and per-trade PnL and strategy bars go to parquet. Nothing
-here contacts a database: exporting to InfluxDB is `enoshima export`, afterwards,
-from these same files.
+Everything is written locally. Metric records go to a `qate.trading.metric_log`
+exactly as the strategy emitted them, and per-trade PnL and strategy bars go to
+parquet through `timeseries`. Nothing here contacts a database: exporting to
+InfluxDB is `enoshima export`, afterwards, from these same files.
 
 That ordering is deliberate and it replaced the opposite one. Writing straight to
 InfluxDB during a run meant a backtest could not finish without a reachable
@@ -30,12 +30,12 @@ from qate.core.ev_type import EventType
 from qate.core.model import ExchangeName, Market, Measurement, SettleType
 from qate.core.order import OrderResponse
 from qate.core.symbol import Symbol
-from qate.store.metrics import MsgpackWriter, RotationInterval, WriterObject
-from qate.store.timeseries import ResultStore
+from qate.trading.metric_log import MetricLog, MetricRecord, RotationInterval
 from qate.trading.pnl_tracker import PnlUpdate
 from qate.util.dt_range import DtRange
 
 from .eval import Evaluation
+from .timeseries import ResultStore
 
 LOG = getLogger(__name__)
 
@@ -75,7 +75,7 @@ class ResultCollector(EventQueue):
         self.strategy_name = strategy_name
         self.param_set_id = param_set_id
 
-        self.metrics_writer = MsgpackWriter(
+        self.metrics_writer = MetricLog(
             RotationInterval.ONE_DAY,
             METRICS_FLUSH,
             str(self.result_dir / METRICS_PREFIX),
@@ -109,7 +109,7 @@ class ResultCollector(EventQueue):
         return ts >= self.dt_range.start_ts
 
     def _add_metric(self, metric_object: list) -> None:
-        self.metrics_writer.add(WriterObject(metric_object[1], metric_object))
+        self.metrics_writer.add(MetricRecord(metric_object[1], metric_object))
 
     def handle_metrics(self, objects: list) -> None:
         for metrics in objects:

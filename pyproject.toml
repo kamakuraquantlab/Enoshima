@@ -43,7 +43,7 @@ dependencies = [
 # Charting results in Grafana. A run writes its results locally either way; see
 # enoshima.influx.
 influx = [
-    "kamakuraquantlab-qate[influx]>=0.1",
+    "influxdb-client>=1.49",
 ]
 dev = [
     "pytest>=8.0",
