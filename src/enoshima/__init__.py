@@ -6,6 +6,7 @@ exchange, and writes what happened to disk.
 | Module | Holds |
 |---|---|
 | `runner` | Which parameter sets to run, and one shared pass over the data for all of them |
+| `bronze` | Turning bronze parquet into qate events: the join between komachi and qate |
 | `data_source` | Chunked replay: reads bronze a few days at a time, one copy shared |
 | `backtest` | One strategy, one parameter set, one replay |
 | `result` | Receiving a run's events and writing them locally |
@@ -14,9 +15,11 @@ exchange, and writes what happened to disk.
 | `influx` | The optional export of finished results into InfluxDB |
 | `cli` | The `enoshima` command |
 
-Everything sits on `qate`, which supplies the event loop, the strategy base class
-and the simulator — and which cannot reach an exchange. A backtest here is
-offline and deterministic by construction.
+Enoshima is the join between two packages that know nothing about each other.
+`komachi` owns the data: it writes the bronze layer, so it is asked where a file
+is and which days are complete. `qate` owns the model and the machinery: the event
+loop, the strategy base class, the simulator — and no way to reach an exchange. A
+backtest here is offline and deterministic by construction.
 """
 
 __all__ = ["__version__"]

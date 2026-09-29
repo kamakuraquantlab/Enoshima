@@ -14,10 +14,31 @@ page stayed private, because they name a production strategy's dashboard, spawn
 subprocesses, and exist to operate one particular machine. If a public reason to
 publish a results UI appears, it should be written fresh rather than ported.
 
+## Where the pieces live
+
+Enoshima is the join between two packages that know nothing about each other.
+`komachi` owns the data and answers where it is; `qate` owns the model and the
+replay machinery. Neither depends on the other, and neither should.
+
+`bronze.py` is that join and the only place that speaks both vocabularies —
+komachi's `"EX:SYM"` strings and qate's `Market`.
+
+**Never reimplement what komachi already answers.** Paths, which days are
+complete, which markets are on disk: ask `komachi.bronze` and `komachi.layout`.
+This module was originally `qate.data.bronze`, which globbed the tree itself and
+duplicated those answers with a docstring promising by hand that the two agreed.
+That promise is not maintained by anything. `komachi.bronze`'s own docstring is
+the argument, and it is worth reading before changing this file.
+
+A consequence worth protecting: `qate` now installs no networking library at all,
+because dropping the data reader dropped its komachi dependency and with it the
+transitive `httpx`. Do not put a data dependency back into `qate` to make
+something here easier.
+
 ## The invariant it inherits
 
 **A backtest must never be able to reach an exchange.** Enoshima does not enforce
-this itself — `qate` does, by having no WebSocket client in its dependency tree —
+this itself — `qate` does, by having no networking library in its dependency tree —
 but it is easy to break from here:
 
 1. **Never add a venue client, an exchange SDK, or a WebSocket library to
@@ -73,7 +94,7 @@ but it is easy to break from here:
 | A generic indicator, chart, risk rule, or store | `qate`, not here |
 | A venue, or anything that connects | `qate-exchanges`, and not on a backtest's path |
 | A production strategy | its own private repository |
-| A way of reading recorded data | `qate.data` |
+| A way of reading recorded data | `bronze.py` here, delegating to komachi |
 | Replay scheduling, batching, evaluation, the CLI | here |
 
 The example strategy is documentation. Keep it the most ordinary thing that works

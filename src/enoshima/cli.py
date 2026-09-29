@@ -24,12 +24,12 @@ import sys
 from pathlib import Path
 
 from qate.boot.config import TradingProfile
-from qate.data.bronze import BronzeStore, data_root
 from qate.env import sys_env
 from qate.env.env import Env
 from qate.env.env_name import EnvName
 from qate.util.dt_range import DtRange
 
+from .bronze import BronzeStore, data_root
 from .data_source import DEFAULT_CHUNK_DAYS
 from .runner import MAX_CONCURRENCY, Runner
 

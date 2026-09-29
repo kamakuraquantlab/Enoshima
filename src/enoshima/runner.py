@@ -34,12 +34,12 @@ from qate.boot.config import BootConfig, TradingProfile
 from qate.boot.run_log import RunLogger
 from qate.boot.strategy_loader import get_strategy_class
 from qate.core.features import FEATURES
-from qate.data.bronze import BronzeStore
 from qate.env.env import Env
 from qate.trading.param import ParamGrid
 from qate.util.dt_range import DtRange
 
 from .backtest import Backtest
+from .bronze import BronzeStore
 from .data_source import DEFAULT_CHUNK_DAYS, DataSource, market_data_event_types
 from .result import ResultCollector
 from .run_log import BacktestLog

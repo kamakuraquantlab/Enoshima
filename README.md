@@ -6,9 +6,9 @@ writes what happened next to them.
 
 It cannot reach an exchange. That is a property of what it is built on:
 [`qate`](https://github.com/kamakuraquantlab/qate) supplies the event loop, the
-strategy base class and the simulator, and has no WebSocket client anywhere in
-its dependency tree. A backtest here is offline and deterministic because there
-is no other kind of run available.
+strategy base class and the simulator, and installs no networking library at all —
+not an HTTP client, not a WebSocket client. A backtest here is offline and
+deterministic because there is no other kind of run available.
 
 ```bash
 pip install kamakuraquantlab-enoshima
@@ -17,6 +17,23 @@ pip install kamakuraquantlab-enoshima
 Named for the island off the Shonan coast, the far end of the line. Komachi is
 where you get the data, Hase is where you look at it, Enoshima is where you find
 out whether an idea would have worked.
+
+## How the three fit together
+
+Enoshima is the join between two packages that know nothing about each other, and
+that is deliberate:
+
+| | Owns | Knows nothing about |
+|---|---|---|
+| [`komachi`](https://github.com/kamakuraquantlab/Komachi) | The data. It writes the bronze layer, so it answers where a file is and which days are complete | Trading |
+| [`qate`](https://github.com/kamakuraquantlab/qate) | The model and the machinery: `OrderBook`, `Trade`, the event loop, the simulator | Storage layouts, and where data lives |
+| **Enoshima** | The replay: asks komachi where, reads the rows, hands qate its events | — |
+
+`enoshima/bronze.py` is that join, and it is the only place that speaks both
+vocabularies. It asks komachi for paths and for the list of complete days rather
+than globbing the tree, because two implementations of one question drift — and
+the day they disagree is the day a backtest silently skips a date the downloader
+thinks it has.
 
 ## Where the data comes from
 

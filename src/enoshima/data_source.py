@@ -16,8 +16,8 @@ BronzeStore ──► Loader ──► SharedBuffer ──► Channel ──► 
                 of days    of the events    backtest    one param set
 ```
 
-Reading is `qate.data.bronze`'s job; this module decides *when*, and hands out
-one `Channel` per backtest. `Channel` is the chunked counterpart of
+Reading is `bronze`'s job; this module decides *when*, and hands out one
+`Channel` per backtest. `Channel` is the chunked counterpart of
 `qate.simulator.ReplayQueue`: the same "the strategy's own events come first"
 rule, over a buffer that is refilled rather than a fixed list.
 """
@@ -29,8 +29,9 @@ from logging import getLogger
 from qate.core.ev_q import EventQueue
 from qate.core.ev_type import EventType
 from qate.core.model import Market, TimeSeriesData
-from qate.data.bronze import BronzeReader, BronzeStore
 from qate.util.dt_range import DtRange
+
+from .bronze import BronzeReader, BronzeStore
 
 LOG = getLogger(__name__)
 

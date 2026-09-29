@@ -16,10 +16,10 @@ import pytest
 from qate.core.ev_type import EventType
 from qate.core.model import ExchangeName, Market
 from qate.core.symbol import Symbol
-from qate.data.bronze import ORDER_BOOK, TRADE, BronzeStore, data_path
 from qate.util.dt_range import DtRange
 
-from enoshima.data_source import DataSource, Loader, SharedBuffer, merge, market_data_event_types
+from enoshima.bronze import ORDER_BOOK, TRADE, BronzeStore, data_path
+from enoshima.data_source import DataSource, Loader, SharedBuffer, market_data_event_types, merge
 
 MARKET = Market(ExchangeName.COINCHECK, Symbol.BTC_SPOT)
 OTHER = Market(ExchangeName.BITBANK, Symbol.BTC_SPOT)

@@ -27,11 +27,15 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 
-# qate brings the event loop, the strategy base class, the simulator and the
-# bronze reader -- and no exchange connectivity. A backtest is offline because
-# the library underneath it has no way not to be.
+# Enoshima is the join between two things that do not know about each other:
+# komachi owns the data and answers where it is, qate owns the model and the
+# replay machinery. Neither depends on the other; this does, on both.
+#
+# qate brings no exchange connectivity, so a backtest is offline because the
+# library underneath it has no way not to be.
 dependencies = [
     "kamakuraquantlab-qate>=0.1",
+    "kamakuraquantlab-komachi>=0.7",
     "numpy>=2.0",
 ]
 

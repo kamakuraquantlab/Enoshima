@@ -23,11 +23,11 @@ import pytest
 
 from qate.core.model import ExchangeName, Market
 from qate.core.symbol import Symbol
-from qate.data.bronze import ORDER_BOOK, data_path
 from qate.env.env import Env
 from qate.env.env_name import EnvName
 from qate.util.dt_range import DtRange
 
+from enoshima.bronze import ORDER_BOOK, data_path
 from enoshima.result import METRICS_PREFIX
 from enoshima.runner import WARMUP_HOURS, Runner
 
