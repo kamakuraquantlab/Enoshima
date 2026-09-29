@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kamakuraquantlab-enoshima"
+version = "0.1.0"
+description = "Kamakura Quant Lab backtest engine for recorded order-book and trade data"
+readme = "README.md"
+requires-python = ">=3.11"
+
+license = "Apache-2.0"
+license-files = ["LICENSE.md"]
+authors = [{name = "Kamakura Quant Lab", email = "support@kamakuraquantlab.jp"}]
+keywords = ["backtesting", "quantitative-finance", "market-data", "order-book", "trading", "cryptocurrency"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+
+# qate brings the event loop, the strategy base class, the simulator and the
+# bronze reader -- and no exchange connectivity. A backtest is offline because
+# the library underneath it has no way not to be.
+dependencies = [
+    "kamakuraquantlab-qate>=0.1",
+    "numpy>=2.0",
+]
+
+[project.optional-dependencies]
+# Charting results in Grafana. A run writes its results locally either way; see
+# enoshima.influx.
+influx = [
+    "kamakuraquantlab-qate[influx]>=0.1",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.1",
+]
+
+[project.urls]
+Homepage = "https://kamakuraquantlab.jp"
+Source = "https://github.com/kamakuraquantlab/Enoshima"
+"The data" = "https://kamakuraquantlab.jp/data/"
+
+[project.scripts]
+enoshima = "enoshima.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["enoshima*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[tool.pytest.ini_options]
+# `example` is on the path so the tests can load the example strategy the same
+# way a run does -- by module name, through the strategy loader.
+pythonpath = ["src", "."]
+testpaths = ["tests"]

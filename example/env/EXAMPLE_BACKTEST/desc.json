@@ -1,0 +1,10 @@
+{
+  "modules": {
+    "config": "example.strategy.config.Config",
+    "features": "builtins.dict",
+    "param_grid": "builtins.dict",
+    "params": "builtins.dict",
+    "trading": "qate.boot.config.TradingProfile"
+  },
+  "name": "EXAMPLE_BACKTEST"
+}

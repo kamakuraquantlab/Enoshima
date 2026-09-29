@@ -1,0 +1,93 @@
+"""What a run recorded about itself, as one JSON file.
+
+A run log is the provenance of a number. It holds the environment, the library
+revision, the config, the exact parameters, the date range, and the evaluation
+results, so a figure in a notebook or an article can be traced back to the run
+that produced it and re-run.
+
+## The id is deterministic, and that is what makes a run resumable
+
+The id is a hash of everything that decides what a run computes: the
+environment, the strategy and variant, the parameter set, and the date range.
+Two runs that would compute the same thing therefore have the same id, so
+`Runner` can see that a result already exists and skip it. An optimize sweep over
+two hundred parameter sets that dies at number ninety resumes at ninety rather
+than starting again.
+
+It was a random UUID before, which meant the "a run log exists for this range"
+check could never once have fired — every fresh log had a new id and every
+combination was recomputed. `--force` is now the way to say recompute anyway.
+"""
+
+import hashlib
+import json
+import time
+
+from qate.boot.run_log import RunLog
+from qate.env.env import Env
+from qate.util.dt_range import DtRange
+from qate.util.encoder import Encoder
+
+
+class BacktestLog(RunLog):
+    def __init__(
+        self,
+        env: Env,
+        result_dir: str,
+        params: dict,
+        dt_range: DtRange,
+        strategy_name: str,
+        is_temporary_run: bool = False,
+        batch_id: int = None,
+    ):
+        super().__init__(env)
+        self.result_dir = result_dir
+        self.params = params
+        self.dt_range = dt_range
+        self.strategy_name = strategy_name
+        self.is_temporary_run = is_temporary_run
+        self.batch_id = batch_id
+        self.param_set_id = None
+        self.result = None
+        self.end_ts = None
+
+    def get_id(self) -> str:
+        """A hash of what the run computes, so an identical run is recognisable.
+
+        Deliberately excludes the batch id, the timestamps and the output
+        location: those differ between two runs that would produce the same
+        numbers, and the point is to notice that they would.
+        """
+        identity = {
+            "env": str(self.env.name),
+            "strategy": self.strategy_name,
+            "params": self.params,
+            "start": self.dt_range.start_str,
+            "end": self.dt_range.end_str,
+        }
+        raw = json.dumps(identity, sort_keys=True, cls=Encoder)
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+    def to_dict(self) -> dict:
+        data = super().to_dict()
+        data.update(
+            {
+                "batch_id": self.batch_id,
+                "result_dir": self.result_dir,
+                "param_set_id": self.param_set_id,
+                "params": self.params,
+                "strategy": self.strategy_name,
+                "start_str": self.dt_range.start_str,
+                "end_str": self.dt_range.end_str,
+                "is_temporary_run": self.is_temporary_run,
+            }
+        )
+        if self.result:
+            data["result"] = self.result
+            data["end_ts"] = self.end_ts
+            data["execution_time"] = str(int(self.end_ts - self.start_ts)) + "s"
+        return data
+
+    def set_result(self, result: dict) -> None:
+        self.result = result
+        self.end_ts = time.time()

@@ -1,0 +1,12 @@
+[
+  {
+    "name": "fast_period",
+    "default_value": 20,
+    "values": [10, 20, 40]
+  },
+  {
+    "name": "slow_period",
+    "default_value": 120,
+    "values": [120, 240]
+  }
+]
