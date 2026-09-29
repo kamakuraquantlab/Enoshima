@@ -29,7 +29,6 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-
 from qate.core.model import Market
 from qate.util.dt_range import DtRange, TimeFormat
 

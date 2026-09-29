@@ -32,6 +32,7 @@ retention, because a quick idea test should not need remembering to clean up aft
 `delete_tmp_buckets` removes the expired ones.
 """
 
+import time
 from logging import getLogger
 from pathlib import Path
 from typing import Iterable
@@ -39,8 +40,6 @@ from typing import Iterable
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import WriteOptions, WriteType
 from influxdb_client.domain import BucketRetentionRules
-
-from qate.util.buffer import BufferedWriter
 from qate.core.model import (
     DataType,
     ExchangeName,
@@ -54,6 +53,7 @@ from qate.core.model import (
 from qate.core.order import OrderType
 from qate.core.symbol import Symbol
 from qate.trading.metrics import metrics_files, read_metrics_dir
+from qate.util.buffer import BufferedWriter
 
 from .result import METRICS_PREFIX
 

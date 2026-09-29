@@ -13,7 +13,6 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-
 from qate.core.ev_type import EventType
 from qate.core.model import ExchangeName, Market, Side
 from qate.core.symbol import Symbol

@@ -9,7 +9,6 @@ and not needing one is exactly what the local files exist for.
 """
 
 import pytest
-
 from qate.core.model import ExchangeName, Field, Market, Measurement, Metric, Side, Tag
 from qate.core.symbol import Symbol
 from qate.util.dt_range import DtRange
