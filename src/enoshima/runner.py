@@ -229,6 +229,8 @@ class Runner:
             self.dt_range,
             self.profile.strategy_name,
             batch_id=self.batch_id,
+            config=self.config,
+            profile=self.profile,
         )
         run_log.param_set_id = param_set_id
 

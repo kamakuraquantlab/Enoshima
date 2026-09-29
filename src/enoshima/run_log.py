@@ -39,10 +39,14 @@ class BacktestLog(RunLog):
         strategy_name: str,
         is_temporary_run: bool = False,
         batch_id: int = None,
+        config=None,
+        profile=None,
     ):
-        super().__init__(env)
+        # config and profile go to RunLog, which records them: they are the
+        # provenance of the result, and a run log without them cannot say which
+        # market or order size produced a number.
+        super().__init__(env, config=config, profile=profile, params=params)
         self.result_dir = result_dir
-        self.params = params
         self.dt_range = dt_range
         self.strategy_name = strategy_name
         self.is_temporary_run = is_temporary_run

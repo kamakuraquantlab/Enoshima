@@ -134,7 +134,10 @@ One directory per named run configuration, under `~/env` (or `QATE_ENV_ROOT`):
 | `param_grid.json` | The search space `--optimize grid` walks. Optional |
 | `params_combo.json` | An explicit parameter list, for `--optimize combo`. Optional |
 | `features.json` | Feature flags. Optional |
-| `desc.json` | The environment's name. The class-per-file map it used to carry is no longer read |
+
+There is no index file. Each file is read by whatever wants it, with the class
+named by the reader — so an environment written when a strategy lived somewhere
+else still loads.
 
 **`params.json` is what a single run uses**, so backtesting exactly what a live
 process is running is one command rather than a comparison of two files. A grid is
@@ -142,8 +145,7 @@ a search space — an input to `--optimize` — not a description of the environ
 An env whose `params.json` is empty falls back to the grid's defaults and warns.
 
 The strategy's `Config` class is resolved from the strategy module
-(`<strategy_module>.config.Config`), not from `desc.json`, so an environment
-written when a strategy lived somewhere else still loads.
+(`<strategy_module>.config.Config`).
 
 By default a run writes back into the same directory:
 

@@ -95,7 +95,7 @@ def run_env(tmp_path, monkeypatch):
     data_root = tmp_path / "data"
     write_books(data_root, start_ts)
 
-    env = Env.load_env(str(env_root), ENV_NAME)
+    env = Env(str(env_root), ENV_NAME)
     monkeypatch.chdir(tmp_path)
     return env, dt_range, data_root
 
@@ -289,17 +289,27 @@ def test_output_root_keeps_a_run_out_of_the_environment(run_env, tmp_path):
     assert sorted(p.name for p in Path(env.work_dir).iterdir()) == before
 
 
-def test_a_stale_desc_json_does_not_stop_a_run(run_env):
-    """The Config class comes from the strategy module, not from desc.json's map."""
+def test_an_env_needs_no_desc_json(run_env):
+    """The Config class comes from the strategy module. There is no index file."""
     env, dt_range, data_root = run_env
-    desc = Path(env.work_dir) / "desc.json"
-    stale = json.loads(desc.read_text())
-    stale.setdefault("modules", {})["config"] = "some.module.that.moved.Config"
-    desc.write_text(json.dumps(stale))
+    assert not (Path(env.work_dir) / "desc.json").exists()
 
     runner = Runner(env, dt_range, data_root=str(data_root), chunk_days=1)
     runner.run()
     assert list((Path(env.work_dir) / "run_log").glob("*.json"))
+
+
+def test_a_run_log_records_the_config_that_produced_it(run_env):
+    """Provenance: a result you cannot attribute to a configuration is not a result."""
+    env, dt_range, data_root = run_env
+    Runner(env, dt_range, data_root=str(data_root), chunk_days=1).run()
+
+    log = json.loads(next((Path(env.work_dir) / "run_log").glob("*.json")).read_text())
+    assert log["env"] == str(ENV_NAME)
+    assert log["config"]["market"] == "COINCHECK:BTC_SPOT"
+    assert log["config"]["order_size"] == 0.002
+    assert log["trading"]["variant"] == "v1"
+    assert log["params"] == {"fast_period": 20, "slow_period": 120}
 
 
 def test_a_range_with_no_data_is_reported_not_silently_empty(run_env, caplog):

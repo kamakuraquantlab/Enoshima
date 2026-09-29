@@ -92,8 +92,15 @@ but it is easy to break from here:
   same time: the definition is read, not written, and the env's lock is left alone.
   `results`, `export` and `clean` take the same flag.
 - **The strategy's `Config` class is resolved from the strategy module**, by
-  `qate.boot.config.resolve_config_class`, not from `desc.json`'s module map. That
-  map went stale whenever code moved. Do not reintroduce a dependency on it.
+  `qate.boot.config.resolve_config_class`. There is no `desc.json` and no index of
+  any kind; the map that used to be one went stale whenever code moved. Do not
+  reintroduce one.
+- **A run log is given what it records, never asked for it.** `RunLog` used to read
+  `env.get("config")`, which returned something only if the env had been loaded
+  through the old map -- so when Enoshima stopped doing that, run logs silently
+  recorded `"config": null` for two commits. `tests/test_run_end_to_end.py` now
+  holds the provenance fields, because a result you cannot attribute to a
+  configuration is not a result.
 - **`--optimize` ranks on `pnl5`**, the middle slippage assumption. Ranking on
   `pnl0` selects for strategies whose edge is thinnest.
 - **Never delete a user's results on a schedule.** `enoshima clean` requires
