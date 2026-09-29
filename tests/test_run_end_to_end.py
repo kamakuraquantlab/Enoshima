@@ -131,7 +131,7 @@ def test_a_run_trades_and_writes_its_results(run_env):
 def test_metrics_are_readable_back_without_a_database(run_env):
     """Local-first: a finished run's metrics are on disk and parseable as they are."""
     from qate.core.model import Measurement
-    from qate.trading.metric_log import read_metrics_dir
+    from qate.trading.metrics import read_metrics_dir
 
     env, dt_range, data_root = run_env
     runner = Runner(env, dt_range, data_root=str(data_root), chunk_days=1)
@@ -141,7 +141,7 @@ def test_metrics_are_readable_back_without_a_database(run_env):
     objects = list(read_metrics_dir(log["result_dir"], METRICS_PREFIX))
     assert objects
 
-    measurements = {obj[0] for obj in objects}
+    measurements = {m.measurement for m in objects}
     assert Measurement.ORDER.value in measurements
     assert Measurement.PNL.value in measurements
     # Skipped on purpose: they are per-snapshot and already in the bronze layer.
@@ -152,15 +152,15 @@ def test_metrics_are_readable_back_without_a_database(run_env):
     # A position opened during warmup and closed inside the range is a real trade
     # and is reported, and its open-aligned copy carries the entry timestamp,
     # which is earlier than the range. Every other metric is inside it.
-    early = [obj for obj in objects if obj[1] < dt_range.start_ts]
+    early = [m for m in objects if m.ts < dt_range.start_ts]
     assert all(
-        obj[0] == Measurement.PNL.value and _tag(obj, "time_align") == "open" for obj in early
-    ), f"unexpected metrics before the range: {[(obj[0], _tag(obj, 'time_align')) for obj in early]}"
+        m.measurement == Measurement.PNL.value and _tag(m, "time_align") == "open" for m in early
+    ), f"unexpected metrics before the range: {[(m.measurement, _tag(m, 'time_align')) for m in early]}"
 
 
-def _tag(metric_object: list, key: str):
-    """A tag's value from a metric object's flat [k, v, k, v, ...] tag list."""
-    tags = metric_object[2]
+def _tag(metric, key: str):
+    """A tag's value from a metric's flat [k, v, k, v, ...] tag list."""
+    tags = metric.tags
     for i in range(0, len(tags) - 1, 2):
         if tags[i] == key:
             return tags[i + 1]

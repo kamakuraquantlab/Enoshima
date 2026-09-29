@@ -40,19 +40,20 @@ from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import WriteOptions, WriteType
 from influxdb_client.domain import BucketRetentionRules
 
-from qate.core.metric import BufferedWriter
+from qate.util.buffer import BufferedWriter
 from qate.core.model import (
     DataType,
     ExchangeName,
     Field,
     Measurement,
+    Metric,
     SettleType,
     Side,
     Tag,
 )
 from qate.core.order import OrderType
 from qate.core.symbol import Symbol
-from qate.trading.metric_log import metrics_files, read_metrics_dir
+from qate.trading.metrics import metrics_files, read_metrics_dir
 
 from .result import METRICS_PREFIX
 
@@ -159,17 +160,17 @@ def _get_tag_value(tag: Tag, value: int) -> str:
     return enum(value).name if enum else str(value)
 
 
-def convert_to_point(obj: list) -> Point:
-    """One metric object -- `[measurement, ts, tags, fields]` -- as a Point.
+def convert_to_point(metric: Metric) -> Point:
+    """One `Metric` as an InfluxDB Point.
 
-    Tag and field keys arrive as enum values rather than strings, because the
-    hot path packs integers. They are resolved back to names here, which is the
-    only place a human ever reads them.
+    Tag and field keys arrive as enum values rather than strings, because the hot
+    path packs integers. They are resolved back to names here, which is the only
+    place a human ever reads them.
     """
-    measurement = Measurement(obj[0])
-    ts = obj[1]
-    tags = _regroup_pairs(obj[2])
-    fields = _regroup_pairs(obj[3])
+    measurement = Measurement(metric.measurement)
+    ts = metric.ts
+    tags = _regroup_pairs(metric.tags)
+    fields = _regroup_pairs(metric.fields)
     point = Point(measurement.name).time(int(ts * 1000), WritePrecision.MS)
     for k, v in tags:
         if type(k) is int:
@@ -253,15 +254,15 @@ class InfluxdbStore:
 
 
 def export_metric_objects(
-    objects: Iterable[list],
+    metrics: Iterable[Metric],
     writer: InfluxdbWriter,
     batch_size: int = 2048,
 ) -> int:
-    """Write metric objects through a writer. Returns how many were written."""
+    """Write metrics through a writer. Returns how many were written."""
     count = 0
     points: list[Point] = []
-    for obj in objects:
-        points.append(convert_to_point(obj))
+    for metric in metrics:
+        points.append(convert_to_point(metric))
         count += 1
         if len(points) >= batch_size:
             writer.write(points)
@@ -281,7 +282,7 @@ def export_metrics(
     """Load a directory of local msgpack metrics into a bucket.
 
     The second half of the local-first arrangement described in
-    `qate.trading.metric_log`. Returns the number of metric objects written.
+    `qate.trading.metrics`. Returns the number of metrics written.
     """
     writer = store.create_writer(bucket_name, retention_seconds=retention_seconds)
     try:

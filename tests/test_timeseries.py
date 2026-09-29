@@ -10,7 +10,7 @@ and not needing one is exactly what the local files exist for.
 
 import pytest
 
-from qate.core.model import ExchangeName, Field, Market, Measurement, Side, Tag
+from qate.core.model import ExchangeName, Field, Market, Measurement, Metric, Side, Tag
 from qate.core.symbol import Symbol
 from qate.util.dt_range import DtRange
 
@@ -22,13 +22,13 @@ DAY_ONE = DtRange.from_strings("20260115", "20260115").start_ts
 DAY_TWO = DtRange.from_strings("20260116", "20260116").start_ts
 
 
-def metric(ts: float, price: float) -> list:
-    return [
+def metric(ts: float, price: float) -> Metric:
+    return Metric(
         Measurement.TRADE.value,
         ts,
         [Tag.EXCHANGE_NAME.value, ExchangeName.COINCHECK.value, Tag.SIDE.value, Side.BUY.value],
         [Field.PRICE.value, price, Field.SIZE.value, 0.01],
-    ]
+    )
 
 
 def test_timeseries_writes_one_file_per_day(tmp_path):

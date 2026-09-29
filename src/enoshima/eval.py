@@ -1,5 +1,5 @@
 import numpy as np
-from qate.core.model import Measurement, Tag
+from qate.core.model import Measurement, Metric, Tag
 from qate.core.order import OrderResponse
 from qate.trading.pnl_tracker import PnlUpdate
 from qate.util.counter import Counter
@@ -102,7 +102,7 @@ class Evaluation:
     def on_open_pnl_update(self, pnl_update: PnlUpdate):
         self._on_pnl_update(pnl_update)
 
-    def on_close_pnl_update(self, pnl_update: PnlUpdate) -> list:
+    def on_close_pnl_update(self, pnl_update: PnlUpdate) -> Metric:
         self._on_pnl_update(pnl_update)
 
         last_pnl = self.overall_pnl
@@ -124,7 +124,7 @@ class Evaluation:
         else:
             self.loss.add(pnl_change)
 
-        return [
+        return Metric(
             Measurement.EVAL.value,
             pnl_update.get_ts(),
             [
@@ -137,7 +137,7 @@ class Evaluation:
                 f"pnl_change{self.suffix}",
                 pnl_change,
             ],
-        ]
+        )
 
     def get_result(self) -> dict:
         return_result = evaluate_strategy(self.updates)

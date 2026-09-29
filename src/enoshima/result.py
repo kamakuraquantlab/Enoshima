@@ -3,7 +3,7 @@
 The strategy publishes metrics, order fills and PnL updates as events. This is
 what receives them.
 
-Everything is written locally. Metric records go to a `qate.trading.metric_log`
+Everything is written locally. Metrics go to a `qate.trading.metrics.MetricLog`
 exactly as the strategy emitted them, and per-trade PnL and strategy bars go to
 parquet through `timeseries`. Nothing here contacts a database: exporting to
 InfluxDB is `enoshima export`, afterwards, from these same files.
@@ -27,10 +27,10 @@ from pathlib import Path
 
 from qate.core.ev_q import EventQueue
 from qate.core.ev_type import EventType
-from qate.core.model import ExchangeName, Market, Measurement, SettleType
+from qate.core.model import ExchangeName, Market, Measurement, Metric, SettleType
 from qate.core.order import OrderResponse
 from qate.core.symbol import Symbol
-from qate.trading.metric_log import MetricLog, MetricRecord, RotationInterval
+from qate.trading.metrics import MetricLog, RotationInterval
 from qate.trading.pnl_tracker import PnlUpdate
 from qate.util.dt_range import DtRange
 
@@ -108,29 +108,28 @@ class ResultCollector(EventQueue):
         """
         return ts >= self.dt_range.start_ts
 
-    def _add_metric(self, metric_object: list) -> None:
-        self.metrics_writer.add(MetricRecord(metric_object[1], metric_object))
+    def _add_metric(self, metric: Metric) -> None:
+        self.metrics_writer.add(metric)
 
-    def handle_metrics(self, objects: list) -> None:
-        for metrics in objects:
-            # [measurement, ts, tags, fields]
-            if metrics[0] in self._SKIP_MEASUREMENTS:
+    def handle_metrics(self, metrics: list[Metric]) -> None:
+        for metric in metrics:
+            if metric.measurement in self._SKIP_MEASUREMENTS:
                 continue
-            if not self._should_emit(metrics[1]):
+            if not self._should_emit(metric.ts):
                 continue
-            self._add_metric(metrics)
+            self._add_metric(metric)
 
-            if metrics[0] == Measurement.BAR.value:
-                self._add_bar(metrics)
+            if metric.measurement == Measurement.BAR.value:
+                self._add_bar(metric)
 
-    def _add_bar(self, metrics: list) -> None:
-        market = Market(ExchangeName(metrics[2][1]), Symbol(metrics[2][3]))
+    def _add_bar(self, metric: Metric) -> None:
+        market = Market(ExchangeName(metric.tags[1]), Symbol(metric.tags[3]))
         store = self.bar_stores.get(market.id)
         if store is None:
             store = self.store.create_bar(market)
             self.bar_stores[market.id] = store
-        fields = dict(zip(metrics[3][::2], metrics[3][1::2]))
-        store.add(metrics[1], fields)
+        fields = dict(zip(metric.fields[::2], metric.fields[1::2]))
+        store.add(metric.ts, fields)
 
     def handle_order(self, order_response: OrderResponse) -> None:
         # Evaluations see every fill, warmup included, so the reported slippage
@@ -139,7 +138,7 @@ class ResultCollector(EventQueue):
             evaluation.on_order(order_response)
 
         if self._should_emit(order_response.get_ts()):
-            self._add_metric(order_response.to_metric_object())
+            self._add_metric(order_response.to_metric())
 
     def handle_pnl_update(self, pnl_update: PnlUpdate) -> None:
         if not self._should_emit(pnl_update.get_ts()):
@@ -160,15 +159,14 @@ class ResultCollector(EventQueue):
         # The same close written at both ends of the position, tagged, so a chart
         # can align PnL either to when a trade was entered or to when it settled.
         for align, ts in (("close", pnl_update.get_ts()), ("open", pnl_update.open_ts)):
-            metric_object = pnl_update.to_metric_object()
-            metric_object[1] = ts
-            metric_object[2].extend(["time_align", align])
-            self._add_metric(metric_object)
+            metric = pnl_update.to_metric()
+            metric.ts = ts
+            self._add_metric(metric.tag("time_align", align))
 
         self._add_pnl(pnl_update, pnl_inc, drawdown)
 
-        for metric_object in eval_metrics:
-            self._add_metric(metric_object)
+        for metric in eval_metrics:
+            self._add_metric(metric)
 
     def _add_pnl(self, pnl_update: PnlUpdate, pnl_inc: float, drawdown: float) -> None:
         market = pnl_update.market
