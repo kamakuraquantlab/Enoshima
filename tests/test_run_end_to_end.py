@@ -22,9 +22,9 @@ import pyarrow.parquet as pq
 import pytest
 from qate.core.model import ExchangeName, Market
 from qate.core.symbol import Symbol
-from qate.env.env import Env
-from qate.env.env_name import EnvName
 from qate.util.dt_range import DtRange
+from qate_env.env import Env
+from qate_env.env_name import EnvName
 
 from enoshima.bronze import ORDER_BOOK, data_path
 from enoshima.result import METRICS_PREFIX

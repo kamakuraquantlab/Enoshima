@@ -32,9 +32,13 @@ classifiers = [
 # replay machinery. Neither depends on the other; this does, on both.
 #
 # qate brings no exchange connectivity, so a backtest is offline because the
-# library underneath it has no way not to be.
+# library underneath it has no way not to be. qate-env is the third: the run
+# directory a backtest reads its configuration from, which qate deliberately knows
+# nothing about. It is also what a live runner reads, which is the point -- "backtest
+# what production runs" is one environment read by two processes.
 dependencies = [
     "kamakuraquantlab-qate>=0.1",
+    "kamakuraquantlab-qate-env>=0.1",
     "kamakuraquantlab-komachi>=0.7",
     "numpy>=2.0",
 ]

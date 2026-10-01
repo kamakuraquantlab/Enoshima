@@ -189,7 +189,7 @@ class InfluxdbStore:
     """A connection's worth of configuration, and the operations on it.
 
     `config` is the `(token, write_url, read_url)` triple
-    `qate.env.sys_env.get_influxdb` returns.
+    `qate_env.sys_env.get_influxdb` returns.
     """
 
     def __init__(self, config: tuple[str, str, str], org: str = "qate"):

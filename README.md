@@ -26,8 +26,13 @@ that is deliberate:
 | | Owns | Knows nothing about |
 |---|---|---|
 | [`komachi`](https://github.com/kamakuraquantlab/Komachi) | The data. It writes the bronze layer, so it answers where a file is and which days are complete | Trading |
-| [`qate`](https://github.com/kamakuraquantlab/qate) | The model and the machinery: `OrderBook`, `Trade`, the event loop, the simulator | Storage layouts, and where data lives |
+| [`qate`](https://github.com/kamakuraquantlab/qate) | The model and the machinery: `OrderBook`, `Trade`, the event loop, the simulator | Storage layouts, where data lives, and where a run is configured |
+| [`qate-env`](https://github.com/kamakuraquantlab/qate-env) | The run directory: the strategy an environment names, its config and params, and the lock | Data, and replay |
 | **Enoshima** | The replay: asks komachi where, reads the rows, hands qate its events | — |
+
+`qate-env` is the one a live runner shares, and that is what makes "backtest what
+production runs" a single command: the same `~/env/<NAME>` directory, read rather
+than written, with the backtest's own output root and its own lock.
 
 `enoshima/bronze.py` is that join, and it is the only place that speaks both
 vocabularies. It asks komachi for paths and for the list of complete days rather
@@ -95,7 +100,7 @@ enoshima results --env EXAMPLE_BACKTEST
 
 Copy `example/strategy/`. Two files, and the contract is small:
 
-- **`config.py`** — a `BootConfig` saying which markets and event types to replay.
+- **`config.py`** — a `StrategyConfig` saying which markets and event types to replay.
   This is what makes a run *a different run*: a market, an order size.
 - **`v1.py`** — exactly one class named `Variant`, constructed with
   `(config, params)`. `params` is what an optimize sweep varies.

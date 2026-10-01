@@ -41,13 +41,17 @@ from datetime import timedelta
 from logging import getLogger
 from pathlib import Path
 
-from qate.boot.config import PARAM_GRID_FILE, PARAMS_FILE, load_trading_env
-from qate.boot.run_log import RunLogger
-from qate.boot.strategy_loader import get_strategy_class
 from qate.core.features import FEATURES
-from qate.env.env import Env
 from qate.trading.param import ParamGrid
 from qate.util.dt_range import DtRange
+from qate_env.env import Env
+from qate_env.run_log import RunLogger
+from qate_env.trading_env import (
+    PARAM_GRID_FILE,
+    PARAMS_FILE,
+    get_strategy_class,
+    load_trading_env,
+)
 
 from .backtest import Backtest
 from .bronze import BronzeStore

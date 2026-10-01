@@ -20,6 +20,13 @@ Enoshima is the join between two packages that know nothing about each other.
 `komachi` owns the data and answers where it is; `qate` owns the model and the
 replay machinery. Neither depends on the other, and neither should.
 
+A third, `qate-env`, owns the run directory: `Env`, the credential lookup, and the
+`trading.json` / `config.json` / `params.json` loader. It was `qate.env` and
+`qate.boot` until the split, so an import error naming either of those is a stale
+checkout rather than a missing feature. A live runner reads the same package, which
+is the reason a backtest can be pointed at a production environment at all --
+keep reading it, and keep writing results somewhere else.
+
 `bronze.py` is that join and the only place that speaks both vocabularies —
 komachi's `"EX:SYM"` strings and qate's `Market`.
 
@@ -92,7 +99,7 @@ but it is easy to break from here:
   same time: the definition is read, not written, and the env's lock is left alone.
   `results`, `export` and `clean` take the same flag.
 - **The strategy's `Config` class is resolved from the strategy module**, by
-  `qate.boot.config.resolve_config_class`. There is no `desc.json` and no index of
+  `qate_env.trading_env.resolve_config_class`. There is no `desc.json` and no index of
   any kind; the map that used to be one went stale whenever code moved. Do not
   reintroduce one.
 - **A run log is given what it records, never asked for it.** `RunLog` used to read
@@ -112,6 +119,7 @@ but it is easy to break from here:
 | Adding | Goes in |
 |---|---|
 | A generic indicator, chart, risk rule, or store | `qate`, not here |
+| Anything about the run directory, its files, or credentials | `qate-env`, not here |
 | A venue, or anything that connects | `qate-exchanges`, and not on a backtest's path |
 | A production strategy | its own private repository |
 | A way of reading recorded data | `bronze.py` here, delegating to komachi |

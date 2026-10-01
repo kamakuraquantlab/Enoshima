@@ -23,10 +23,10 @@ import logging
 import sys
 from pathlib import Path
 
-from qate.env import sys_env
-from qate.env.env import Env
-from qate.env.env_name import EnvName
 from qate.util.dt_range import DtRange
+from qate_env import sys_env
+from qate_env.env import Env
+from qate_env.env_name import EnvName
 
 from .bronze import BronzeStore, data_root
 from .data_source import DEFAULT_CHUNK_DAYS
@@ -73,7 +73,7 @@ def load_env(env_name: EnvName) -> Env:
     """The environment, not yet read. `load_trading_env` reads the files it needs.
 
     Deliberately not `Env.load_env`, which goes through `desc.json`'s module map.
-    Nothing here needs that indirection: `qate.boot.config.load_trading_env` knows
+    Nothing here needs that indirection: `qate_env.trading_env.load_trading_env` knows
     which classes it wants and resolves the strategy's `Config` from the strategy
     module, so an env whose `desc.json` has gone stale still loads.
     """
