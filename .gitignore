@@ -169,3 +169,4 @@ example/env/*/best_result/
 example/env/*/result/
 example/env/*/env.log*
 example/env/*/.lock
+.vscode/
