@@ -21,6 +21,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from hase.bronze import DataType
 from hase.layout import data_path
 from qate.core.model import ExchangeName, Market
 from qate.core.symbol import Symbol
@@ -28,7 +29,6 @@ from qate.util.dt_range import DtRange
 from qate_env.env import Env
 from qate_env.env_name import EnvName
 
-from enoshima.bronze import ORDER_BOOK
 from enoshima.runner import WARMUP_HOURS, Runner
 
 EXAMPLE_ROOT = Path(__file__).resolve().parent.parent / "example"
@@ -74,7 +74,7 @@ def write_books(root: Path, start_ts: float) -> None:
             row[f"ask{i}_qty"] = 1.0
         rows.append(row)
 
-    path = data_path(root, MARKET.id, ORDER_BOOK, DATE)
+    path = data_path(root, MARKET.id, DataType.ORDER_BOOK, DATE)
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pandas(pd.DataFrame(rows, columns=columns), preserve_index=False), path)
 

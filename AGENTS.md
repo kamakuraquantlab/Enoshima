@@ -16,10 +16,20 @@ publish a results UI appears, it should be written fresh rather than ported.
 
 ## Where the pieces live
 
-Enoshima is the join between two packages that know nothing about each other.
-`komachi` owns the data and answers where it is, and `hase` reads it; `qate` owns
-the model and the replay machinery. Neither side depends on the other, and neither
-should.
+The data path is a chain, and each link talks only to the next:
+
+    enoshima ──► hase.bronze ──► komachi.bronze
+     replay       Market, Trade,   which file holds a market-day,
+                  OrderBook        and whether it is complete
+
+- `komachi` downloads files and places them in the data lake layout. It knows the
+  root, the paths and the checksums, and never what is inside a file. It depends
+  on nothing else in the ecosystem.
+- `hase` is the data lake operator, and speaks trading: it depends on `qate`,
+  lists markets as `Market`s, and turns a request for "these order books, these
+  days" into `komachi.bronze.file(...)` calls, opens them, and returns `Trade`s
+  and `OrderBook`s. It also builds silver and gold from bronze.
+- `qate` owns the model and the replay machinery, and depends on neither.
 
 A third, `qate-env`, owns the run directory: `Env`, the credential lookup, and the
 `trading.json` / `config.json` / `params.json` loader. It was `qate.env` and
@@ -28,18 +38,16 @@ checkout rather than a missing feature. A live runner reads the same package, wh
 is the reason a backtest can be pointed at a production environment at all --
 keep reading it, and keep writing results somewhere else.
 
-`bronze.py` is that join and the only place that speaks both vocabularies —
-komachi's `"EX:SYM"` strings and qate's `Market`. It turns hase's frames into qate
-events and does nothing else.
-
-**Never reimplement what komachi or hase already answers.** Paths, which days are
-complete, which markets are on disk: ask `komachi.bronze` and `hase.layout`.
-Opening a market-day's parquet: `hase.store`. Reading is shared across the
-ecosystem, so a change to how bronze is read goes in hase, not here.
-This module was originally `qate.data.bronze`, which globbed the tree itself and
-duplicated those answers with a docstring promising by hand that the two agreed.
-That promise is not maintained by anything. `komachi.bronze`'s own docstring is
-the argument, and it is worth reading before changing this file.
+**Enoshima calls `hase.bronze` and nothing below it.** `data_source.Stream` asks
+it for a market-day, tags each object with its `EventType`, and that is all the
+data code here. No `import komachi`, no path, no parquet, no frame conversion:
+komachi is not even a direct dependency. Which markets are on disk, which days
+are complete, how a book's depth is read -- each is hase's answer, and a change
+to any of it goes in hase.
+This was `qate.data.bronze` once, which globbed the tree itself, and then
+`enoshima/bronze.py`, which still converted frames and asked komachi for the
+root. Each was a second copy of an answer that belongs elsewhere.
+`komachi.bronze`'s docstring is the argument.
 
 A consequence worth protecting: `qate` now installs no networking library at all,
 because dropping the data reader dropped its komachi dependency and with it the
@@ -114,8 +122,8 @@ but it is easy to break from here:
   grid's defaults -- which meant an environment had two answers and nothing kept
   them in step; the backtest envs left `params.json` empty and the live envs left
   the grid alone. An empty `params.json` still falls back, with a warning.
-- **The command takes no locations.** Data is komachi's (`komachi.data_root`,
-  which honours `ROOT_PATH` for one run), output is the env dir, the variant is
+- **The command takes no locations.** Data is komachi's (asked as
+  `hase.bronze.data_root(env=True)`, which honours `ROOT_PATH` for one run), output is the env dir, the variant is
   `trading.json`'s, and recording and sizing are `enoshima.json`'s
   (`enoshima.settings`). Do not add `--data-root`, `--output-root`, `--variant` or
   `--influx` back: each was a second answer to a question a file already answers.
@@ -148,7 +156,8 @@ but it is easy to break from here:
 | Anything about the run directory, its files, or credentials | `qate-env`, not here |
 | A venue, or anything that connects | `qate-exchanges`, and not on a backtest's path |
 | A production strategy | its own private repository |
-| A way of reading recorded data | `hase`; `bronze.py` here only converts its frames to qate events |
+| A way of reading recorded data, or converting it to qate objects | `hase` |
+| Where a file lives, or whether a day is complete | `komachi` |
 | Replay scheduling, batching, evaluation, the CLI | here |
 
 The example strategy is documentation. Keep it the most ordinary thing that works

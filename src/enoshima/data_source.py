@@ -11,35 +11,79 @@ buffer, every backtest reads from that same buffer, and the next chunk is not
 loaded until all of them have finished the current one.
 
 ```
-BronzeStore ──► Loader ──► SharedBuffer ──► Channel ──► Backtest
-  (parquet)     chunks     one copy         one per     one strategy,
-                of days    of the events    backtest    one param set
+hase.bronze ──► Loader ──► SharedBuffer ──► Channel ──► Backtest
+ (Trade,         chunks     one copy         one per     one strategy,
+  OrderBook)     of days    of the events    backtest    one param set
 ```
 
-Reading is `bronze`'s job; this module decides *when*, and hands out one
-`Channel` per backtest. `Channel` is the chunked counterpart of
+Reading is `hase.bronze`'s job: it is asked for a market-day and hands back
+qate's `Trade`s and `OrderBook`s. Nothing here opens a file, knows a path, or
+asks komachi anything. This module decides *when* to read, tags what comes back
+with its event type, and hands out one `Channel` per backtest. `Channel` is the chunked counterpart of
 `qate.trading.replay.ReplayQueue`: the same "the strategy's own events come first"
 rule, over a buffer that is refilled rather than a fixed list.
 """
 
 import threading
 from logging import getLogger
+from pathlib import Path
 
+from hase import bronze
+from hase.bronze import DataType, MissingDataError
 from qate.core.ev_q import EventQueue
 from qate.core.ev_type import EventType
 from qate.core.model import Market, TimeSeriesData
 from qate.util.dt_range import DtRange
 
-from .bronze import BronzeReader, BronzeStore
-
 LOG = getLogger(__name__)
 
 Event = tuple[str, TimeSeriesData]
+
+# The market-data events bronze can supply, and the dataset behind each.
+DATA_TYPES = {
+    EventType.MARKET_TRADE: DataType.TRADE,
+    EventType.MARKET_ORDER_BOOK: DataType.ORDER_BOOK,
+}
 
 # Days loaded per chunk. Low on purpose: full-depth order books are heavy, and a
 # seven-day chunk of 20-level books has been measured at over 100GB resident.
 # Raising this trades memory for fewer parquet reads.
 DEFAULT_CHUNK_DAYS = 2
+
+
+class Stream:
+    """One market's events of one type, read a day at a time.
+
+    A day that is not on disk reads as empty rather than raising, so a gap in
+    the archive costs that day and not the run; `DataSource.check_coverage` is
+    how a run says so before it starts.
+    """
+
+    def __init__(self, root: Path, market: Market, event_type: str):
+        if event_type not in DATA_TYPES:
+            raise ValueError(f"No bronze dataset for event type {event_type}")
+        self.root = root
+        self.market = market
+        self.event_type = event_type
+        self.data_type = DATA_TYPES[event_type]
+
+    def available_dates(self) -> list[str]:
+        return bronze.dates(self.market, self.data_type, self.root)
+
+    def load(self, day: str) -> list[Event]:
+        try:
+            data = bronze.load_day(self.market, self.data_type, day, self.root)
+        except MissingDataError:
+            LOG.warning(f"No {self.data_type} data for {self.market.id} on {day}")
+            return []
+        LOG.info(f"Loaded {len(data)} {self.data_type} rows for {self.market.id} {day}")
+        return [(self.event_type, x) for x in data]
+
+    def load_days(self, days: list[str]) -> list[Event]:
+        events: list[Event] = []
+        for day in days:
+            events.extend(self.load(day))
+        return events
 
 
 class Series:
@@ -102,11 +146,11 @@ class Loader:
         self._dt_range = dt_range
         self._days = dt_range.days
         self._chunk_days = chunk_days
-        self._readers: list[BronzeReader] = []
+        self._streams: list[Stream] = []
         self.reset()
 
-    def add_reader(self, reader: BronzeReader) -> None:
-        self._readers.append(reader)
+    def add_stream(self, stream: Stream) -> None:
+        self._streams.append(stream)
 
     def _trim(self, data: list[Event]) -> list[Event]:
         """Drop events outside the exact range.
@@ -137,10 +181,10 @@ class Loader:
         days = self._days[self._pos : self._pos + self._chunk_days]
         self._pos += self._chunk_days
 
-        # One series per reader, then merged: a strategy may subscribe to books
+        # One series per stream, then merged: a strategy may subscribe to books
         # and trades from more than one market, and all of them have to arrive in
         # timestamp order.
-        series_list = [self._trim(reader.load_days(days)) for reader in self._readers]
+        series_list = [self._trim(stream.load_days(days)) for stream in self._streams]
         events = merge(series_list)
         LOG.info(f"Loaded {days[0]}..{days[-1]}: {len(events)} events")
         return events
@@ -239,17 +283,17 @@ class DataSource:
     def __init__(
         self,
         dt_range: DtRange,
-        store: BronzeStore,
+        root: Path,
         chunk_days: int = DEFAULT_CHUNK_DAYS,
     ):
-        self.store = store
+        self.root = Path(root)
         self.dt_range = dt_range
         self._loader = Loader(dt_range, chunk_days)
         self._shared_buffer = SharedBuffer(self._loader)
 
     def add_source(self, market: Market, event_types: list[str]) -> None:
         for event_type in event_types:
-            self._loader.add_reader(self.store.create_reader(market, event_type))
+            self._loader.add_stream(Stream(self.root, market, event_type))
 
     def create_channel(self) -> Channel:
         self._shared_buffer.increment_ref()
@@ -271,14 +315,14 @@ class DataSource:
         missing: set[str] = set()
         for market, event_types in markets:
             for event_type in event_types:
-                reader = self.store.create_reader(market, event_type)
-                have = set(reader.available_dates())
+                stream = Stream(self.root, market, event_type)
+                have = set(stream.available_dates())
                 for day in sorted(wanted - have):
-                    missing.add(f"{market.id} {reader.dataset} {day}")
+                    missing.add(f"{market.id} {stream.data_type} {day}")
         return sorted(missing)
 
 
 def market_data_event_types(event_types: list[str]) -> list[str]:
     """Only the event types bronze can supply."""
-    return [x for x in event_types if x in (EventType.MARKET_ORDER_BOOK, EventType.MARKET_TRADE)]
+    return [x for x in event_types if x in DATA_TYPES]
 

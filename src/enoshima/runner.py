@@ -41,6 +41,7 @@ from datetime import timedelta
 from logging import getLogger
 from pathlib import Path
 
+from hase import bronze
 from qate.core.features import FEATURES
 from qate.trading.param import ParamGrid
 from qate.util.dt_range import DtRange
@@ -54,7 +55,6 @@ from qate_env.trading_env import (
 )
 
 from .backtest import Backtest
-from .bronze import BronzeStore
 from .data_source import DEFAULT_CHUNK_DAYS, DataSource, market_data_event_types
 from .result import ResultReporter
 from .run_log import BacktestLog
@@ -113,7 +113,9 @@ class Runner:
         self.config = self.definition.config
         self.profile = self.definition.profile
 
-        self.store = BronzeStore(data_root)
+        # Komachi's answer, asked through hase: `env=True` lets ROOT_PATH point
+        # one run at another tree, which is the command-line rule.
+        self.data_root = bronze.data_root(data_root, env=True)
         self.run_logger = RunLogger(str(self.output_root))
 
     @staticmethod
@@ -179,7 +181,7 @@ class Runner:
         markets = [(m, market_data_event_types(t)) for m, t in self.config.get_markets()]
         data_source = DataSource(
             DtRange(self.dt_range.start_dt - timedelta(hours=WARMUP_HOURS), self.dt_range.end_dt),
-            self.store,
+            self.data_root,
             self.chunk_days,
         )
         for market, event_types in markets:

@@ -20,28 +20,27 @@ out whether an idea would have worked.
 
 ## How the three fit together
 
-Enoshima is the join between two packages that know nothing about each other, and
-that is deliberate:
+Each layer asks the one below it in its own vocabulary, and nothing skips a layer:
 
 | | Owns | Knows nothing about |
 |---|---|---|
-| [`komachi`](https://github.com/kamakuraquantlab/Komachi) | The data. It writes the bronze layer, so it answers where a file is and which days are complete | Trading |
-| [`hase`](https://github.com/kamakuraquantlab/Hase) | Reading the data: a market-day of bronze as a dataframe, for every tool | Trading |
+| [`komachi`](https://github.com/kamakuraquantlab/Komachi) | The files. It downloads them, places them in the data lake layout, and answers which file holds a market-day and whether it is complete | What is inside a file, and trading |
+| [`hase`](https://github.com/kamakuraquantlab/Hase) | The data lake as trading data: markets as qate `Market`s, a range of bronze as `Trade`s and `OrderBook`s, and silver and gold derived from it | Replay, and where a run is configured |
 | [`qate`](https://github.com/kamakuraquantlab/qate) | The model and the machinery: `OrderBook`, `Trade`, the event loop, the simulator | Storage layouts, where data lives, and where a run is configured |
 | [`qate-env`](https://github.com/kamakuraquantlab/qate-env) | The run directory: the strategy an environment names, its config and params, and the lock | Data, and replay |
-| **Enoshima** | The replay: asks hase for the rows, hands qate its events | — |
+| **Enoshima** | The replay: asks hase for `Trade`s and `OrderBook`s, tags them as events, runs them through qate | Files, paths, and komachi |
 
 `qate-env` is the one a live runner shares, so a backtest environment holds the
 same files a live one does, `params.json` included: backtesting what production
 runs is copying its definition into a backtest env. A run writes into its own
 environment and takes its lock, so it is never pointed at a live one.
 
-`enoshima/bronze.py` is that join, and it is the only place that speaks both
-vocabularies. It reads nothing itself: hase reads a market-day into a frame and
-komachi says which days are complete, and bronze.py turns frames into qate events.
-Reading is shared rather than reimplemented here, because two implementations of
-one question drift — and the day they disagree is the day a backtest silently
-skips a date the downloader thinks it has.
+A backtest's request for "these books, these days" is
+`hase.bronze.load_day(market, DataType.ORDER_BOOK, day)`; hase turns it into
+`komachi.bronze.file(...)`, opens what it is handed, and converts. Enoshima holds
+no data-loading code of its own, because two implementations of one question
+drift — and the day they disagree is the day a backtest silently skips a date
+the downloader thinks it has.
 
 ## Where the data comes from
 

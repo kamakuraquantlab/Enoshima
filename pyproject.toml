@@ -25,10 +25,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 
-# Enoshima is the join between two things that do not know about each other:
-# komachi owns the data and answers where it is, hase reads it, qate owns the
-# model and the replay machinery. Neither side depends on the other; this does,
-# on both. Hase is why Python is 3.13.
+# Enoshima asks hase for market data and gets qate objects back; hase asks
+# komachi which file holds a market-day. Enoshima never asks komachi directly,
+# so komachi is not listed here -- it arrives through hase. qate owns the model
+# and the replay machinery and depends on neither. Hase is why Python is 3.13.
 #
 # qate brings no exchange connectivity, so a backtest is offline because the
 # library underneath it has no way not to be. qate-env is the third: the run
@@ -38,8 +38,7 @@ classifiers = [
 dependencies = [
     "kamakuraquantlab-qate>=0.1",
     "kamakuraquantlab-qate-env>=0.1",
-    "kamakuraquantlab-komachi>=0.7",
-    "kamakuraquantlab-hase>=0.6",
+    "kamakuraquantlab-hase>=0.7",
     "numpy>=2.0",
 ]
 

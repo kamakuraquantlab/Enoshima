@@ -12,14 +12,14 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from hase.bronze import DataType
 from hase.layout import data_path
 from qate.core.ev_type import EventType
 from qate.core.model import ExchangeName, Market
 from qate.core.symbol import Symbol
 from qate.util.dt_range import DtRange
 
-from enoshima.bronze import ORDER_BOOK, TRADE, BronzeStore
-from enoshima.data_source import DataSource, Loader, SharedBuffer, market_data_event_types, merge
+from enoshima.data_source import DataSource, Loader, SharedBuffer, Stream, market_data_event_types, merge
 
 MARKET = Market(ExchangeName.COINCHECK, Symbol.BTC_SPOT)
 OTHER = Market(ExchangeName.BITBANK, Symbol.BTC_SPOT)
@@ -46,7 +46,7 @@ def day_start(date_str: str) -> float:
 
 
 def write_trades(root, market, date_str, timestamps):
-    path = data_path(root, market.id, TRADE, date_str)
+    path = data_path(root, market.id, DataType.TRADE, date_str)
     path.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(
         [{"ts": ts, "side": 0, "price": 100.0 + i, "size": 0.01} for i, ts in enumerate(timestamps)],
@@ -98,9 +98,8 @@ def test_loader_reads_the_range_in_chunks(tmp_path):
     for date_str in ("2026-01-01", "2026-01-02", "2026-01-03"):
         write_trades(tmp_path, MARKET, date_str, [day_start(date_str) + 1])
 
-    store = BronzeStore(tmp_path)
     loader = Loader(DtRange.from_strings("20260101", "20260103"), chunk_days=2)
-    loader.add_reader(store.create_trade(MARKET))
+    loader.add_stream(Stream(tmp_path, MARKET, EventType.MARKET_TRADE))
 
     first = loader.load_more()
     assert len(first) == 2  # 01-01 and 01-02
@@ -111,9 +110,8 @@ def test_loader_reads_the_range_in_chunks(tmp_path):
 
 def test_loader_reset_replays_from_the_start(tmp_path):
     write_trades(tmp_path, MARKET, "2026-01-01", [day_start("2026-01-01") + 1])
-    store = BronzeStore(tmp_path)
     loader = Loader(DtRange.from_strings("20260101", "20260101"), chunk_days=1)
-    loader.add_reader(store.create_trade(MARKET))
+    loader.add_stream(Stream(tmp_path, MARKET, EventType.MARKET_TRADE))
 
     assert len(loader.load_more()) == 1
     assert loader.load_more() is None
@@ -126,9 +124,8 @@ def test_loader_trims_to_the_exact_range(tmp_path):
     start = day_start("2026-01-01")
     write_trades(tmp_path, MARKET, "2026-01-01", [start + 60, start + 3600 + 60, start + 7200 + 60])
 
-    store = BronzeStore(tmp_path)
     loader = Loader(DtRange.from_strings("20260101_0030", "20260101_0130"), chunk_days=1)
-    loader.add_reader(store.create_trade(MARKET))
+    loader.add_stream(Stream(tmp_path, MARKET, EventType.MARKET_TRADE))
 
     events = loader.load_more()
     assert [e[1].get_ts() for e in events] == [start + 3600 + 60]
@@ -139,10 +136,9 @@ def test_loader_merges_two_markets(tmp_path):
     write_trades(tmp_path, MARKET, "2026-01-01", [start + 1, start + 3])
     write_trades(tmp_path, OTHER, "2026-01-01", [start + 2, start + 4])
 
-    store = BronzeStore(tmp_path)
     loader = Loader(DtRange.from_strings("20260101", "20260101"), chunk_days=1)
-    loader.add_reader(store.create_trade(MARKET))
-    loader.add_reader(store.create_trade(OTHER))
+    loader.add_stream(Stream(tmp_path, MARKET, EventType.MARKET_TRADE))
+    loader.add_stream(Stream(tmp_path, OTHER, EventType.MARKET_TRADE))
 
     events = loader.load_more()
     assert [e[1].get_ts() for e in events] == [start + 1, start + 2, start + 3, start + 4]
@@ -150,9 +146,8 @@ def test_loader_merges_two_markets(tmp_path):
 
 def test_a_missing_day_costs_that_day_not_the_run(tmp_path):
     write_trades(tmp_path, MARKET, "2026-01-01", [day_start("2026-01-01") + 1])
-    store = BronzeStore(tmp_path)
     loader = Loader(DtRange.from_strings("20260101", "20260102"), chunk_days=2)
-    loader.add_reader(store.create_trade(MARKET))
+    loader.add_stream(Stream(tmp_path, MARKET, EventType.MARKET_TRADE))
 
     assert len(loader.load_more()) == 1
 
@@ -222,7 +217,7 @@ def test_channel_puts_trading_events_before_market_events(tmp_path):
     start = day_start("2026-01-01")
     write_trades(tmp_path, MARKET, "2026-01-01", [start + 1, start + 2])
 
-    ds = DataSource(DtRange.from_strings("20260101", "20260101"), BronzeStore(tmp_path), chunk_days=1)
+    ds = DataSource(DtRange.from_strings("20260101", "20260101"), tmp_path, chunk_days=1)
     ds.add_source(MARKET, [EventType.MARKET_TRADE])
     channel = ds.create_channel()
 
@@ -237,7 +232,7 @@ def test_channel_puts_trading_events_before_market_events(tmp_path):
 
 def test_check_coverage_names_the_missing_days(tmp_path):
     write_trades(tmp_path, MARKET, "2026-01-01", [day_start("2026-01-01") + 1])
-    ds = DataSource(DtRange.from_strings("20260101", "20260103"), BronzeStore(tmp_path))
+    ds = DataSource(DtRange.from_strings("20260101", "20260103"), tmp_path)
     missing = ds.check_coverage([(MARKET, [EventType.MARKET_TRADE])])
     assert missing == [
         "COINCHECK:BTC_SPOT Trade 2026-01-02",
@@ -248,7 +243,7 @@ def test_check_coverage_names_the_missing_days(tmp_path):
 def test_check_coverage_is_empty_when_everything_is_there(tmp_path):
     for date_str in ("2026-01-01", "2026-01-02"):
         write_trades(tmp_path, MARKET, date_str, [day_start(date_str) + 1])
-    ds = DataSource(DtRange.from_strings("20260101", "20260102"), BronzeStore(tmp_path))
+    ds = DataSource(DtRange.from_strings("20260101", "20260102"), tmp_path)
     assert ds.check_coverage([(MARKET, [EventType.MARKET_TRADE])]) == []
 
 
@@ -267,7 +262,7 @@ def test_only_event_types_bronze_can_supply_are_replayed(given, expected):
 def test_reset_allows_a_second_batch_over_the_same_range(tmp_path):
     start = day_start("2026-01-01")
     write_trades(tmp_path, MARKET, "2026-01-01", [start + 1, start + 2])
-    ds = DataSource(DtRange.from_strings("20260101", "20260101"), BronzeStore(tmp_path), chunk_days=1)
+    ds = DataSource(DtRange.from_strings("20260101", "20260101"), tmp_path, chunk_days=1)
     ds.add_source(MARKET, [EventType.MARKET_TRADE])
 
     def drain_one_channel():
@@ -282,8 +277,20 @@ def test_reset_allows_a_second_batch_over_the_same_range(tmp_path):
     assert drain_one_channel() == 2
 
 
-def test_order_book_and_trade_readers_are_both_added(tmp_path):
-    ds = DataSource(DtRange.from_strings("20260101", "20260101"), BronzeStore(tmp_path))
+def test_order_book_and_trade_streams_are_both_added(tmp_path):
+    ds = DataSource(DtRange.from_strings("20260101", "20260101"), tmp_path)
     ds.add_source(MARKET, [EventType.MARKET_ORDER_BOOK, EventType.MARKET_TRADE])
-    datasets = {r.dataset for r in ds._loader._readers}
-    assert datasets == {ORDER_BOOK, TRADE}
+    datasets = {s.data_type for s in ds._loader._streams}
+    assert datasets == {DataType.ORDER_BOOK, DataType.TRADE}
+
+
+def test_events_are_tagged_with_their_type(tmp_path):
+    write_trades(tmp_path, MARKET, "2026-01-01", [day_start("2026-01-01") + 1])
+    [(event_type, trade)] = Stream(tmp_path, MARKET, EventType.MARKET_TRADE).load("2026-01-01")
+    assert event_type == EventType.MARKET_TRADE
+    assert trade.market == MARKET
+
+
+def test_a_stream_refuses_an_event_type_bronze_cannot_supply(tmp_path):
+    with pytest.raises(ValueError):
+        Stream(tmp_path, MARKET, EventType.MARKET_BAR)
