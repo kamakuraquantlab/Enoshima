@@ -1,4 +1,4 @@
-"""A real run, from parquet on disk to results on disk.
+"""A real run, from parquet on disk to a run log on disk.
 
 Writes a synthetic bronze tree, copies the example environment into a temporary
 env root, and drives `Runner` exactly as `enoshima run` does. If this passes, the
@@ -21,13 +21,14 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from hase.layout import data_path
 from qate.core.model import ExchangeName, Market
 from qate.core.symbol import Symbol
 from qate.util.dt_range import DtRange
 from qate_env.env import Env
 from qate_env.env_name import EnvName
 
-from enoshima.bronze import ORDER_BOOK, data_path
+from enoshima.bronze import ORDER_BOOK
 from enoshima.runner import WARMUP_HOURS, Runner
 
 EXAMPLE_ROOT = Path(__file__).resolve().parent.parent / "example"
@@ -73,7 +74,7 @@ def write_books(root: Path, start_ts: float) -> None:
             row[f"ask{i}_qty"] = 1.0
         rows.append(row)
 
-    path = data_path(root, ORDER_BOOK, MARKET, DATE)
+    path = data_path(root, MARKET.id, ORDER_BOOK, DATE)
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pandas(pd.DataFrame(rows, columns=columns), preserve_index=False), path)
 
@@ -120,10 +121,8 @@ def test_a_run_trades_and_writes_its_results(run_env):
         assert f"sharpe_ratio_annualized{suffix}" in result
     assert result["pnl_cnt0"] >= 1, "the strategy closed no position; the test data is not forcing a trade"
 
-    # Results on disk, under the batch and parameter set that produced them.
-    result_dir = Path(log["result_dir"])
-    assert result_dir.is_dir()
-    assert list(result_dir.glob("dataset=Pnl/**/data.parquet")), "no PnL parquet was written"
+    # Trading data goes to InfluxDB or nowhere; a run writes no local copy.
+    assert not (Path(env.work_dir) / "result").exists()
 
 
 class MemoryWriter:
@@ -212,23 +211,24 @@ def test_a_second_identical_run_is_skipped(run_env):
     env, dt_range, data_root = run_env
 
     Runner(env, dt_range, data_root=str(data_root), chunk_days=1).run()
-    assert len(list((Path(env.work_dir) / "run_log").glob("*.json"))) == 1
+    [log_path] = (Path(env.work_dir) / "run_log").glob("*.json")
+    first = json.loads(log_path.read_text())
 
-    second = Runner(env, dt_range, data_root=str(data_root), chunk_days=1)
-    second.run()
-    # Same identity, so no second log and no second result directory.
-    assert len(list((Path(env.work_dir) / "run_log").glob("*.json"))) == 1
-    assert not (Path(env.work_dir) / "result" / str(second.batch_id)).exists()
+    Runner(env, dt_range, data_root=str(data_root), chunk_days=1).run()
+    # Same identity, so no second log, and the first was not rewritten.
+    assert list((Path(env.work_dir) / "run_log").glob("*.json")) == [log_path]
+    assert json.loads(log_path.read_text())["start_ts"] == first["start_ts"]
 
 
 def test_force_reruns_a_completed_parameter_set(run_env):
     env, dt_range, data_root = run_env
 
     Runner(env, dt_range, data_root=str(data_root), chunk_days=1).run()
-    forced = Runner(env, dt_range, data_root=str(data_root), chunk_days=1, force=True)
-    forced.run()
+    [log_path] = (Path(env.work_dir) / "run_log").glob("*.json")
+    first = json.loads(log_path.read_text())
 
-    assert (Path(env.work_dir) / "result" / str(forced.batch_id)).is_dir()
+    Runner(env, dt_range, data_root=str(data_root), chunk_days=1, force=True).run()
+    assert json.loads(log_path.read_text())["start_ts"] > first["start_ts"]
 
 
 def test_optimize_grid_runs_every_combination_and_picks_a_best(run_env):

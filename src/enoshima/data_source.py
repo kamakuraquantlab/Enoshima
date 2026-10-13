@@ -23,7 +23,6 @@ rule, over a buffer that is refilled rather than a fixed list.
 """
 
 import threading
-import time
 from logging import getLogger
 
 from qate.core.ev_q import EventQueue
@@ -283,21 +282,3 @@ def market_data_event_types(event_types: list[str]) -> list[str]:
     """Only the event types bronze can supply."""
     return [x for x in event_types if x in (EventType.MARKET_ORDER_BOOK, EventType.MARKET_TRADE)]
 
-
-if __name__ == "__main__":
-    # Read one market's trades straight through, to check a data root and see
-    # what the throughput is: python -m enoshima.data_source COINCHECK:BTC_SPOT
-    import logging
-    import sys
-
-    logging.basicConfig(level=logging.INFO, format="{asctime} {message}", style="{")
-    market = Market.from_str(sys.argv[1] if len(sys.argv) > 1 else "COINCHECK:BTC_SPOT")
-    started = time.time()
-
-    ds = DataSource(DtRange.from_strings("2026-01-03", "2026-01-04"), BronzeStore())
-    ds.add_source(market, [EventType.MARKET_TRADE])
-    channel = ds.create_channel()
-    count = 0
-    while channel.get() is not None:
-        count += 1
-    print(f"{count} events in {time.time() - started:.1f}s")

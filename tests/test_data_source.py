@@ -12,12 +12,13 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from hase.layout import data_path
 from qate.core.ev_type import EventType
 from qate.core.model import ExchangeName, Market
 from qate.core.symbol import Symbol
 from qate.util.dt_range import DtRange
 
-from enoshima.bronze import ORDER_BOOK, TRADE, BronzeStore, data_path
+from enoshima.bronze import ORDER_BOOK, TRADE, BronzeStore
 from enoshima.data_source import DataSource, Loader, SharedBuffer, market_data_event_types, merge
 
 MARKET = Market(ExchangeName.COINCHECK, Symbol.BTC_SPOT)
@@ -45,7 +46,7 @@ def day_start(date_str: str) -> float:
 
 
 def write_trades(root, market, date_str, timestamps):
-    path = data_path(root, TRADE, market, date_str)
+    path = data_path(root, market.id, TRADE, date_str)
     path.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(
         [{"ts": ts, "side": 0, "price": 100.0 + i, "size": 0.01} for i, ts in enumerate(timestamps)],

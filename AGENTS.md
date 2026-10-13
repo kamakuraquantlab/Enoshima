@@ -17,8 +17,9 @@ publish a results UI appears, it should be written fresh rather than ported.
 ## Where the pieces live
 
 Enoshima is the join between two packages that know nothing about each other.
-`komachi` owns the data and answers where it is; `qate` owns the model and the
-replay machinery. Neither depends on the other, and neither should.
+`komachi` owns the data and answers where it is, and `hase` reads it; `qate` owns
+the model and the replay machinery. Neither side depends on the other, and neither
+should.
 
 A third, `qate-env`, owns the run directory: `Env`, the credential lookup, and the
 `trading.json` / `config.json` / `params.json` loader. It was `qate.env` and
@@ -28,10 +29,13 @@ is the reason a backtest can be pointed at a production environment at all --
 keep reading it, and keep writing results somewhere else.
 
 `bronze.py` is that join and the only place that speaks both vocabularies —
-komachi's `"EX:SYM"` strings and qate's `Market`.
+komachi's `"EX:SYM"` strings and qate's `Market`. It turns hase's frames into qate
+events and does nothing else.
 
-**Never reimplement what komachi already answers.** Paths, which days are
-complete, which markets are on disk: ask `komachi.bronze` and `komachi.layout`.
+**Never reimplement what komachi or hase already answers.** Paths, which days are
+complete, which markets are on disk: ask `komachi.bronze` and `hase.layout`.
+Opening a market-day's parquet: `hase.store`. Reading is shared across the
+ecosystem, so a change to how bronze is read goes in hase, not here.
 This module was originally `qate.data.bronze`, which globbed the tree itself and
 duplicated those answers with a docstring promising by hand that the two agreed.
 That promise is not maintained by anything. `komachi.bronze`'s own docstring is
@@ -76,6 +80,14 @@ but it is easy to break from here:
   `InfluxReporter` is attached only when the env's `enoshima.json` has an
   `"influx"` entry. A run without InfluxDB must still finish with its result, so
   nothing outside `influx.py` and that path may import `influxdb_client`.
+- **Trading data goes to InfluxDB and nowhere else.** Orders, PnL and bars are
+  `InfluxReporter`'s; `ResultReporter` only evaluates. There was a parquet copy
+  under `result/` (`timeseries.py`); it duplicated the metric stream and was
+  removed. Do not bring it back.
+- **Enoshima does not configure logging.** Every command enters its env, and
+  `qate_env.Env` attaches the `env.log` handler. Each module takes
+  `LOG = getLogger(__name__)` and logs; nothing calls `print`, `basicConfig` or
+  adds a handler, and nothing goes to stdout.
 - **There is no msgpack log.** That is the live system's intermediate format --
   written in real time, uploaded, then loaded into InfluxDB -- because a trading
   process must never wait on a database. A backtest can, so it writes InfluxDB
@@ -136,7 +148,7 @@ but it is easy to break from here:
 | Anything about the run directory, its files, or credentials | `qate-env`, not here |
 | A venue, or anything that connects | `qate-exchanges`, and not on a backtest's path |
 | A production strategy | its own private repository |
-| A way of reading recorded data | `bronze.py` here, delegating to komachi |
+| A way of reading recorded data | `hase`; `bronze.py` here only converts its frames to qate events |
 | Replay scheduling, batching, evaluation, the CLI | here |
 
 The example strategy is documentation. Keep it the most ordinary thing that works

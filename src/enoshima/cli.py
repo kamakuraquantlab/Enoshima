@@ -24,18 +24,18 @@ a flag here:
   `enoshima.settings`. `--chunk-days` and `--max-concurrency` still override the
   file for one run.
 
-Logging is split three ways on purpose: progress to stdout, errors to stderr, and
-everything including the strategy's own logging to `env.log` inside the
-environment directory. A backtest is long-running and mostly silent, so the
-terminal should carry what is happening and nothing else, while the full record
-stays on disk next to the results.
+Nothing is written to the terminal. Every command enters its environment, and
+`qate_env.Env` sends the root logger to `env.log` there -- Enoshima's own
+logging, the strategy's, and the libraries' -- so the record of a run sits next
+to the run. Enoshima configures no handler of its own. `tail -f env.log` in the
+environment directory is how a run is watched.
 """
 
 import argparse
 import json
-import logging
 import shutil
 import sys
+from logging import getLogger
 from pathlib import Path
 
 from qate.util.dt_range import DtRange
@@ -46,41 +46,7 @@ from qate_env.env_name import EnvName
 from enoshima.runner import Runner
 from enoshima.settings import SETTINGS_FILE, InfluxSettings, load_settings
 
-LOG = logging.getLogger("enoshima.cli")
-
-
-class _EnoshimaOnly(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        return record.name.startswith("enoshima")
-
-
-def setup_terminal_logging() -> None:
-    """Progress on stdout, errors on stderr. The file handler is env.enter()'s."""
-    stdout = logging.StreamHandler(sys.stdout)
-    stdout.setLevel(logging.INFO)
-    stdout.setFormatter(logging.Formatter("[{asctime}] {message}", style="{", datefmt="%H:%M:%S"))
-    stdout.addFilter(_EnoshimaOnly())
-
-    stderr = logging.StreamHandler(sys.stderr)
-    stderr.setLevel(logging.ERROR)
-    stderr.setFormatter(
-        logging.Formatter("[{asctime}] {levelname} {name} - {message}", style="{", datefmt="%H:%M:%S")
-    )
-
-    root = logging.getLogger()
-    root.addHandler(stdout)
-    root.addHandler(stderr)
-
-
-def basic_logging() -> None:
-    """For subcommands that do not enter an environment."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="[{asctime}] {message}",
-        style="{",
-        datefmt="%H:%M:%S",
-        stream=sys.stdout,
-    )
+LOG = getLogger(__name__)
 
 
 def load_env(env_name: EnvName) -> Env:
@@ -118,25 +84,23 @@ def influx_store(settings: InfluxSettings, work_dir: str):
     try:
         from enoshima.influx import InfluxdbStore
     except ImportError:
-        print(
+        LOG.error(
             f"{SETTINGS_FILE} in {work_dir} asks for InfluxDB, which needs the influx extra: "
-            "pip install 'kamakuraquantlab-enoshima[influx]'",
-            file=sys.stderr,
+            "pip install 'kamakuraquantlab-enoshima[influx]'"
         )
         return None
 
     store = InfluxdbStore(sys_env.get_influxdb(settings.keys), org=settings.org)
     if not store.ping():
-        print(
+        LOG.error(
             f"InfluxDB is not answering at {store._write_url}. Start it, or remove "
-            f'"influx" from {SETTINGS_FILE} in {work_dir}.',
-            file=sys.stderr,
+            f'"influx" from {SETTINGS_FILE} in {work_dir}.'
         )
         return None
     try:
         store.org
     except Exception as e:
-        print(f'{e}. Set "org" under "influx" in {SETTINGS_FILE} in {work_dir}.', file=sys.stderr)
+        LOG.error(f'{e}. Set "org" under "influx" in {SETTINGS_FILE} in {work_dir}.')
         return None
     return store
 
@@ -148,19 +112,18 @@ def cmd_run(args) -> int:
     launch_dir = add_launch_dir_to_path()
     env = load_env(args.env)
     dt_range = DtRange.from_strings(args.from_dt, args.to_dt)
-    settings = load_settings(env.work_dir)
 
-    influx = None
-    if settings.influx is not None:
-        influx = influx_store(settings.influx, env.work_dir)
-        if influx is None:
-            return 1
-
+    # chdir into the environment, log there, and lock it, so two runs cannot
+    # interleave their results. First, so that everything after is in env.log.
+    env.enter()
     try:
-        # chdir into the environment, log there, and lock it, so two runs cannot
-        # interleave their results.
-        env.enter()
-        setup_terminal_logging()
+        settings = load_settings(env.work_dir)
+        influx = None
+        if settings.influx is not None:
+            influx = influx_store(settings.influx, env.work_dir)
+            if influx is None:
+                return 1
+
         LOG.info(f"Loading strategies from {launch_dir}")
         if influx is not None:
             LOG.info(f"Recording to InfluxDB, organisation {influx.org}")
@@ -176,16 +139,20 @@ def cmd_run(args) -> int:
         runner.run()
         if args.optimize:
             runner.post_analysis()
+    except Exception:
+        LOG.exception("Run failed")
+        return 1
     finally:
         env.leave()
     return 0
 
 
 def cmd_results(args) -> int:
-    basic_logging()
-    run_log_dir = Path(load_env(args.env).work_dir) / "run_log"
+    env = load_env(args.env)
+    env.visit()
+    run_log_dir = Path(env.work_dir) / "run_log"
     if not run_log_dir.is_dir():
-        print(f"No runs recorded for {args.env}")
+        LOG.info(f"No runs recorded for {args.env}")
         return 1
 
     rows = []
@@ -195,19 +162,19 @@ def cmd_results(args) -> int:
         except (json.JSONDecodeError, OSError):
             continue
     if not rows:
-        print(f"No runs recorded for {args.env}")
+        LOG.info(f"No runs recorded for {args.env}")
         return 1
 
     # Best first, on the middle slippage assumption -- see Runner.post_analysis.
     rows.sort(key=lambda r: r.get("result", {}).get("pnl5") or float("-inf"), reverse=True)
-    print(f"{'pnl5':>12s} {'trades':>7s} {'sharpe':>8s}  {'range':23s} params")
+    LOG.info(f"{'pnl5':>12s} {'trades':>7s} {'sharpe':>8s}  {'range':23s} params")
     for row in rows[: args.limit]:
         result = row.get("result", {})
         pnl = result.get("pnl5")
         sharpe = result.get("sharpe_ratio_annualized0")
         params = " ".join(f"{k}={v}" for k, v in (row.get("params") or {}).items())
         date_range = f"{row.get('start_str', '?')}..{row.get('end_str', '?')}"
-        print(
+        LOG.info(
             f"{'n/a' if pnl is None else f'{pnl:+12.2f}':>12s} "
             f"{result.get('pnl_cnt0', 0):7d} "
             f"{'n/a' if sharpe is None else f'{sharpe:8.3f}':>8s}  "
@@ -217,25 +184,27 @@ def cmd_results(args) -> int:
 
 
 def cmd_clean(args) -> int:
-    basic_logging()
-    out = Path(load_env(args.env).work_dir)
+    env = load_env(args.env)
+    env.visit()
+    out = Path(env.work_dir)
+    # `result/` is what versions that wrote parquet left behind.
     targets = [out / "result", out / "run_log", out / "best_result"]
     existing = [t for t in targets if t.exists()]
     if not existing:
-        print(f"Nothing to remove under {out}")
+        LOG.info(f"Nothing to remove under {out}")
         return 0
 
-    print("This will permanently delete:")
+    LOG.info("This will permanently delete:")
     for t in existing:
-        print(f"  {t}")
+        LOG.info(f"  {t}")
     if not args.yes:
         # Results are the whole product of a long run. Never removed without a
         # yes, and never on a schedule.
-        print("Re-run with --yes to confirm.")
+        LOG.info("Re-run with --yes to confirm.")
         return 1
     for t in existing:
         shutil.rmtree(t)
-        print(f"Removed {t}")
+        LOG.info(f"Removed {t}")
     return 0
 
 

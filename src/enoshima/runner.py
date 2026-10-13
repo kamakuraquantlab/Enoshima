@@ -120,15 +120,14 @@ class Runner:
     def _next_batch_id(output_root: Path) -> int:
         """A unix timestamp, advanced until it names a batch that does not exist.
 
-        The id groups one sweep's runs together and `post_analysis` ranks within
-        it, so two sweeps sharing an id would have their results merged and a
-        "best parameter set" chosen across both. A bare `int(time.time())`
-        collides whenever two runs start inside the same second, which is
-        ordinary when they are launched from a script.
+        The id groups one sweep's runs together and names its `best_result` file,
+        so two sweeps sharing an id would overwrite each other's best. A bare
+        `int(time.time())` collides whenever two runs start inside the same
+        second, which is ordinary when they are launched from a script.
         """
-        result_root = output_root / "result"
+        best_root = output_root / "best_result"
         batch_id = int(time.time())
-        while (result_root / str(batch_id)).exists():
+        while (best_root / f"{batch_id}.json").exists():
             batch_id += 1
         return batch_id
 
@@ -166,9 +165,6 @@ class Runner:
             )
             return defaults
         raise RuntimeError(f"No parameters: {self.env.work_dir} has neither {PARAMS_FILE} nor {PARAM_GRID_FILE}")
-
-    def result_dir(self, param_set_id: str) -> Path:
-        return self.output_root / "result" / str(self.batch_id) / param_set_id
 
     # ----------------------------------------------------------------- running
 
@@ -231,7 +227,6 @@ class Runner:
 
         run_log = BacktestLog(
             self.env,
-            str(self.result_dir(param_set_id)),
             params,
             self.dt_range,
             self.profile.strategy_name,
@@ -245,15 +240,8 @@ class Runner:
             LOG.info(f"Skipping {param_set_id}: a result for this range already exists (--force to redo)")
             return None
 
-        # Recording first: it is the half that can fail on a server, and failing
-        # before the result directory exists leaves nothing half-made behind.
         reporters = self._recording_reporters(run_log, param_set_id)
-        result = ResultReporter(
-            self.result_dir(param_set_id),
-            self.dt_range,
-            self.profile.strategy_name,
-            param_set_id,
-        )
+        result = ResultReporter(self.dt_range)
         return Backtest(
             strategy,
             self.config.get_exchanges(),

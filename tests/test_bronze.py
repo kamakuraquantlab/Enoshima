@@ -1,18 +1,16 @@
-"""Reading the bronze layer: paths, schemas, and the ragged edges of a book.
+"""Turning bronze into events: schemas, and the ragged edges of a book.
 
-The fixtures are written with pyarrow directly rather than through
-`enoshima.timeseries`, so a change to the writer cannot quietly redefine what
-the reader is being tested against.
-
-Paths and the list of complete days come from `komachi`, so the tests that cover
-them are really checking that this module asks it correctly and converts between
-the two vocabularies — komachi's `"EX:SYM"` strings and qate's `Market`.
+Paths, the list of complete days and the reading itself come from komachi and
+hase, so the tests that cover them are really checking that this module asks
+them correctly and converts between the two vocabularies — komachi's `"EX:SYM"`
+strings and qate's `Market`.
 """
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from hase.layout import data_path
 from qate.core.ev_type import EventType
 from qate.core.model import ExchangeName, Market, Side
 from qate.core.symbol import Symbol
@@ -24,7 +22,7 @@ DATE = "2026-01-15"
 
 
 def write_parquet(root, dataset, market, date_str, rows: list[dict], columns: list[str]):
-    path = bronze.data_path(root, dataset, market, date_str)
+    path = data_path(root, market.id, dataset, date_str)
     path.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows, columns=columns)
     pq.write_table(pa.Table.from_pandas(df, preserve_index=False), path)
@@ -47,19 +45,6 @@ def book_row(ts: float, bids: list[tuple], asks: list[tuple], depth: int) -> dic
             row[f"{side}{i}_price"] = price
             row[f"{side}{i}_qty"] = qty
     return row
-
-
-def test_data_path_is_the_hive_layout(tmp_path):
-    path = bronze.data_path(tmp_path, bronze.TRADE, MARKET, DATE)
-    assert path == (
-        tmp_path
-        / "bronze"
-        / "dataset=Trade"
-        / "exchange=COINCHECK"
-        / "symbol=BTC_SPOT"
-        / f"date={DATE}"
-        / "data.parquet"
-    )
 
 
 def test_trades_are_read_in_file_order(tmp_path):
@@ -123,12 +108,6 @@ def test_a_short_book_stops_at_the_absent_level(tmp_path):
     assert len(book.asks) == 1
 
 
-def test_book_depth_reads_the_columns():
-    assert bronze.book_depth(book_columns(20)) == 20
-    assert bronze.book_depth(book_columns(1)) == 1
-    assert bronze.book_depth(["ts", "side", "price", "size"]) == 0
-
-
 def test_a_book_file_with_no_levels_is_an_error(tmp_path):
     write_parquet(tmp_path, bronze.ORDER_BOOK, MARKET, DATE, [{"ts": 1.0}], ["ts"])
     with pytest.raises(bronze.MarketDataNotFound):
@@ -143,7 +122,7 @@ def test_a_missing_day_reads_as_empty(tmp_path):
 def test_available_dates_ignores_a_partial_download(tmp_path):
     write_parquet(tmp_path, bronze.TRADE, MARKET, "2026-01-15", [{"ts": 1.0, "side": 0, "price": 1.0, "size": 1.0}], ["ts", "side", "price", "size"])
     # A date directory with no data.parquet: interrupted mid-download.
-    bronze.data_path(tmp_path, bronze.TRADE, MARKET, "2026-01-16").parent.mkdir(parents=True)
+    data_path(tmp_path, MARKET.id, bronze.TRADE, "2026-01-16").parent.mkdir(parents=True)
 
     reader = bronze.TradeReader(tmp_path, MARKET)
     assert reader.available_dates() == ["2026-01-15"]

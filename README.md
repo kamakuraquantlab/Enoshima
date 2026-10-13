@@ -26,9 +26,10 @@ that is deliberate:
 | | Owns | Knows nothing about |
 |---|---|---|
 | [`komachi`](https://github.com/kamakuraquantlab/Komachi) | The data. It writes the bronze layer, so it answers where a file is and which days are complete | Trading |
+| [`hase`](https://github.com/kamakuraquantlab/Hase) | Reading the data: a market-day of bronze as a dataframe, for every tool | Trading |
 | [`qate`](https://github.com/kamakuraquantlab/qate) | The model and the machinery: `OrderBook`, `Trade`, the event loop, the simulator | Storage layouts, where data lives, and where a run is configured |
 | [`qate-env`](https://github.com/kamakuraquantlab/qate-env) | The run directory: the strategy an environment names, its config and params, and the lock | Data, and replay |
-| **Enoshima** | The replay: asks komachi where, reads the rows, hands qate its events | — |
+| **Enoshima** | The replay: asks hase for the rows, hands qate its events | — |
 
 `qate-env` is the one a live runner shares, so a backtest environment holds the
 same files a live one does, `params.json` included: backtesting what production
@@ -36,10 +37,11 @@ runs is copying its definition into a backtest env. A run writes into its own
 environment and takes its lock, so it is never pointed at a live one.
 
 `enoshima/bronze.py` is that join, and it is the only place that speaks both
-vocabularies. It asks komachi for paths and for the list of complete days rather
-than globbing the tree, because two implementations of one question drift — and
-the day they disagree is the day a backtest silently skips a date the downloader
-thinks it has.
+vocabularies. It reads nothing itself: hase reads a market-day into a frame and
+komachi says which days are complete, and bronze.py turns frames into qate events.
+Reading is shared rather than reimplemented here, because two implementations of
+one question drift — and the day they disagree is the day a backtest silently
+skips a date the downloader thinks it has.
 
 ## Where the data comes from
 
@@ -70,10 +72,17 @@ export QATE_ENV_ROOT=$PWD/example/env
 enoshima run --env EXAMPLE_BACKTEST --from 2026-09-01 --to 2026-09-01
 ```
 
+Nothing is printed: every command logs to `env.log` in the environment directory,
+and that is where to watch a run.
+
+```bash
+tail -f example/env/EXAMPLE_BACKTEST/env.log
+```
+
 ```text
-[13:48:54] START env=EXAMPLE_BACKTEST strategy=example.strategy.v1 range=2026-09-01 00:00:00..2026-09-01 23:59:59 mode=single combos=1
-[13:49:14] Loaded 2026-08-31..2026-09-01: 269463 events
-[13:49:16] RESULT params=(fast_period=20 slow_period=120) pnl5=-7474.41 trades=1292 sharpe=-261.631
+... INFO     enoshima.runner START env=EXAMPLE_BACKTEST strategy=example.strategy.v1 range=2026-09-01 00:00:00..2026-09-01 23:59:59 mode=single combos=1
+... INFO     enoshima.data_source Loaded 2026-08-31..2026-09-01: 269463 events
+... INFO     enoshima.runner RESULT params=(fast_period=20 slow_period=120) pnl5=-7474.41 trades=1292 sharpe=-261.631
 ```
 
 It loses money, and it is supposed to: a crossover that crosses 1,292 times in a
@@ -85,6 +94,8 @@ Then sweep the grid in `param_grid.json`:
 enoshima run --env EXAMPLE_BACKTEST --from 2026-09-01 --to 2026-09-01 --optimize grid
 enoshima results --env EXAMPLE_BACKTEST
 ```
+
+`results` writes its table to `env.log` too:
 
 ```text
         pnl5  trades   sharpe  range                                     params
@@ -153,12 +164,13 @@ A run writes back into the same directory:
 
 ```text
 EXAMPLE_BACKTEST/
+├── env.log                            everything a command logged
 ├── run_log/<id>.json                  one per parameter set: provenance + results
-├── best_result/<batch_id>.json         the winner of a sweep
-└── result/<batch_id>/<param_set_id>/
-    ├── dataset=Pnl/.../data.parquet    per-trade PnL
-    └── dataset=Bar/.../data.parquet    the strategy's bars
+└── best_result/<batch_id>.json        the winner of a sweep
 ```
+
+Orders, per-trade PnL and the strategy's bars are not written locally. They go to
+InfluxDB when the environment asks for it — see below.
 
 ## `enoshima.json`
 

@@ -33,7 +33,6 @@ class BacktestLog(RunLog):
     def __init__(
         self,
         env: Env,
-        result_dir: str,
         params: dict,
         dt_range: DtRange,
         strategy_name: str,
@@ -46,7 +45,6 @@ class BacktestLog(RunLog):
         # provenance of the result, and a run log without them cannot say which
         # market or order size produced a number.
         super().__init__(env, config=config, profile=profile, params=params)
-        self.result_dir = result_dir
         self.dt_range = dt_range
         self.strategy_name = strategy_name
         self.is_temporary_run = is_temporary_run
@@ -59,8 +57,7 @@ class BacktestLog(RunLog):
     def get_id(self) -> str:
         """A hash of what the run computes, so an identical run is recognisable.
 
-        Deliberately excludes the batch id, the timestamps and the output
-        location: those differ between two runs that would produce the same
+        Deliberately excludes the batch id and the timestamps: those differ between two runs that would produce the same
         numbers, and the point is to notice that they would.
         """
         identity = {
@@ -78,7 +75,6 @@ class BacktestLog(RunLog):
         data.update(
             {
                 "batch_id": self.batch_id,
-                "result_dir": self.result_dir,
                 "param_set_id": self.param_set_id,
                 "params": self.params,
                 "strategy": self.strategy_name,

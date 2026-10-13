@@ -7,7 +7,7 @@ name = "kamakuraquantlab-enoshima"
 version = "0.1.0"
 description = "Kamakura Quant Lab backtest engine for recorded order-book and trade data"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 
 license = "Apache-2.0"
 license-files = ["LICENSE.md"]
@@ -18,8 +18,6 @@ classifiers = [
     "Intended Audience :: Financial and Insurance Industry",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
@@ -28,8 +26,9 @@ classifiers = [
 ]
 
 # Enoshima is the join between two things that do not know about each other:
-# komachi owns the data and answers where it is, qate owns the model and the
-# replay machinery. Neither depends on the other; this does, on both.
+# komachi owns the data and answers where it is, hase reads it, qate owns the
+# model and the replay machinery. Neither side depends on the other; this does,
+# on both. Hase is why Python is 3.13.
 #
 # qate brings no exchange connectivity, so a backtest is offline because the
 # library underneath it has no way not to be. qate-env is the third: the run
@@ -40,6 +39,7 @@ dependencies = [
     "kamakuraquantlab-qate>=0.1",
     "kamakuraquantlab-qate-env>=0.1",
     "kamakuraquantlab-komachi>=0.7",
+    "kamakuraquantlab-hase>=0.6",
     "numpy>=2.0",
 ]
 
@@ -74,7 +74,7 @@ include = ["enoshima*"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py313"
 
 [tool.ruff.lint]
 # Pinned rather than `extend-select`, which inherits ruff's default set. That

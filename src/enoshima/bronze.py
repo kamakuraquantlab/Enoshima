@@ -1,18 +1,20 @@
-"""Turning bronze parquet into the events a strategy sees.
+"""Turning bronze data into the events a strategy sees.
 
 Two vocabularies meet here, and this is the only place that speaks both.
 
-`komachi` owns the data. It writes the bronze layer, so it is what knows where a
-file is, which days are complete, and what a market is called on disk — and it is
-asked, never reimplemented. Globbing the tree here instead would be a second
-implementation of one question, and the day the two disagree is the day a backtest
-silently skips a date the downloader thinks it has.
+Reading bronze is shared, so it is not done here. `komachi` writes the layer and
+says where it is and which days are complete; `hase` reads a market-day into a
+dataframe, for every tool in the ecosystem. Both take komachi's `"EX:SYM"`
+strings. A second reader here -- globbing the tree, opening parquet itself --
+would be a second implementation of one question, and the day the two disagree is
+the day a backtest silently skips a date the downloader thinks it has.
 
 `qate` owns the model: `OrderBook`, `Trade`, `EventType`. It knows nothing about
-parquet, or about where data lives, and should not — it is a trading library.
+parquet, or about where data lives, and should not -- it is a trading library. And
+`hase` knows nothing about `qate`, because an analysis tool must not depend on
+trading code.
 
-So Enoshima does the join: ask komachi where, read the rows, hand back qate
-objects. Neither dependency has to know about the other.
+So Enoshima does only the join: ask hase for a frame, hand back qate objects.
 
 ## The two datasets
 
@@ -37,7 +39,10 @@ from abc import ABC, abstractmethod
 from logging import getLogger
 from pathlib import Path
 
+import komachi
 import pandas as pd
+from hase import layout, store
+from hase.store import MissingDataError, book_depth
 from qate.core.ev_type import EventType
 from qate.core.model import Market, OrderBook, OrderLevel, Side, TimeSeriesData, Trade
 
@@ -54,23 +59,6 @@ class MarketDataNotFound(Exception):
     pass
 
 
-class KomachiNotInstalled(Exception):
-    def __init__(self):
-        super().__init__(
-            "Reading market data needs komachi: pip install kamakuraquantlab-komachi. "
-            "It is what knows where the data is."
-        )
-
-
-def _komachi():
-    try:
-        import komachi
-
-        return komachi
-    except ImportError as e:
-        raise KomachiNotInstalled() from e
-
-
 def data_root(override: str | Path | None = None) -> Path:
     """An explicit override, else wherever komachi says the data is.
 
@@ -81,19 +69,12 @@ def data_root(override: str | Path | None = None) -> Path:
     """
     if override:
         return Path(override).expanduser()
-    return Path(_komachi().data_root(env=True))
-
-
-def data_path(root: str | Path, dataset: str, market: Market, date_str: str) -> Path:
-    """Komachi's answer for where one market-day's file is."""
-    from komachi import layout
-
-    return layout.data_path(Path(root), market.id, dataset, date_str)
+    return Path(komachi.data_root(env=True))
 
 
 def available_dates(root: str | Path, dataset: str, market: Market) -> list[str]:
-    """Komachi's answer for which days of a dataset are complete on disk."""
-    return _komachi().bronze.dates(market.id, dataset, Path(root))
+    """Which days of a dataset are complete on disk."""
+    return layout.available_dates(Path(root), market.id, dataset)
 
 
 def available_markets(root: str | Path) -> list[Market]:
@@ -104,7 +85,7 @@ def available_markets(root: str | Path) -> list[Market]:
     simply not something this install can turn into events.
     """
     markets = []
-    for market_id in _komachi().bronze.markets(Path(root)):
+    for market_id in komachi.bronze.markets(Path(root)):
         try:
             markets.append(Market.from_str(market_id))
         except KeyError:
@@ -127,20 +108,21 @@ class BronzeReader(ABC):
         self.root = Path(root)
         self.market = market
 
-    def path(self, date_str: str) -> Path:
-        return data_path(self.root, self.dataset, self.market, date_str)
-
     def available_dates(self) -> list[str]:
         return available_dates(self.root, self.dataset, self.market)
 
     def read_a_day(self, date_str: str) -> pd.DataFrame:
-        path = self.path(date_str)
-        if not path.exists():
-            LOG.warning(f"No {self.dataset} data for {self.market.id} on {date_str} ({path})")
+        try:
+            df = self.read(date_str)
+        except MissingDataError:
+            LOG.warning(f"No {self.dataset} data for {self.market.id} on {date_str}")
             return pd.DataFrame()
-        df = pd.read_parquet(path)
         LOG.info(f"Loaded {len(df)} {self.dataset} rows for {self.market.id} {date_str}")
         return df
+
+    @abstractmethod
+    def read(self, date_str: str) -> pd.DataFrame:
+        """hase's frame for one day. Raises `MissingDataError` if it is not on disk."""
 
     def load(self, date_str: str) -> list[Event]:
         df = self.read_a_day(date_str)
@@ -161,6 +143,9 @@ class BronzeReader(ABC):
 
 class TradeReader(BronzeReader):
     dataset = TRADE
+
+    def read(self, date_str: str) -> pd.DataFrame:
+        return store.load_trades(self.root, self.market.id, date_str)
 
     def convert(self, df: pd.DataFrame) -> list[Event]:
         symbol = self.market.symbol
@@ -184,6 +169,9 @@ class TradeReader(BronzeReader):
 
 class OrderBookReader(BronzeReader):
     dataset = ORDER_BOOK
+
+    def read(self, date_str: str) -> pd.DataFrame:
+        return store.load_order_book(self.root, self.market.id, date_str, depth=None)
 
     def convert(self, df: pd.DataFrame) -> list[Event]:
         depth = book_depth(df.columns)
@@ -239,15 +227,6 @@ def _levels(row: tuple, start: int, depth: int) -> list[OrderLevel]:
             break
         levels.append(OrderLevel(price, row[start + 2 * i + 1]))
     return levels
-
-
-def book_depth(columns) -> int:
-    """How many levels a book file holds, from its column names."""
-    names = set(columns)
-    depth = 0
-    while f"bid{depth}_price" in names and f"ask{depth}_price" in names:
-        depth += 1
-    return depth
 
 
 class BronzeStore:
