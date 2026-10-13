@@ -44,8 +44,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Charting results in Grafana. A run writes its results locally either way; see
-# enoshima.influx.
+# Recording a run's metrics, orders and PnL in InfluxDB as it runs, for Grafana:
+# `enoshima run --influx`. A run computes its result without it; see enoshima.influx.
 influx = [
     "influxdb-client>=1.49",
 ]
@@ -60,6 +60,9 @@ Source = "https://github.com/kamakuraquantlab/Enoshima"
 "The data" = "https://kamakuraquantlab.jp/data/"
 
 [project.scripts]
+# `enoshima.cli`, not a bare `cli`: a top-level module outside the package is
+# not installed by `packages.find`, so the command imported whichever `cli`
+# some other distribution happened to ship.
 enoshima = "enoshima.cli:main"
 
 [tool.setuptools]

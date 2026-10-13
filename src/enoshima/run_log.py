@@ -52,6 +52,7 @@ class BacktestLog(RunLog):
         self.is_temporary_run = is_temporary_run
         self.batch_id = batch_id
         self.param_set_id = None
+        self.influx_bucket = None
         self.result = None
         self.end_ts = None
 
@@ -84,6 +85,7 @@ class BacktestLog(RunLog):
                 "start_str": self.dt_range.start_str,
                 "end_str": self.dt_range.end_str,
                 "is_temporary_run": self.is_temporary_run,
+                "influx_bucket": self.influx_bucket,
             }
         )
         if self.result:

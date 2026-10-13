@@ -29,7 +29,7 @@ environment.
 
 Every run is fed `WARMUP_HOURS` of data from before the requested range so
 indicators and charts have history before anything trades. Those events are
-replayed but not reported — see `ResultCollector._should_emit`. Without it the
+replayed but not reported — see `result.in_range`. Without it the
 first hours of every backtest measure a strategy whose indicators are still
 converging.
 """
@@ -56,7 +56,7 @@ from qate_env.trading_env import (
 from .backtest import Backtest
 from .bronze import BronzeStore
 from .data_source import DEFAULT_CHUNK_DAYS, DataSource, market_data_event_types
-from .result import ResultCollector
+from .result import ResultReporter
 from .run_log import BacktestLog
 
 LOG = getLogger(__name__)
@@ -91,21 +91,24 @@ class Runner:
         chunk_days: int = DEFAULT_CHUNK_DAYS,
         max_concurrency: int = MAX_CONCURRENCY,
         force: bool = False,
-        output_root: str | None = None,
-        variant: str | None = None,
+        influx=None,
     ):
+        """`influx` is an `influx.InfluxdbStore`, or None to record no metric stream.
+
+        Untyped so this module does not import the optional extra: a run without
+        InfluxDB must not need its client installed.
+        """
         self.env = env
         self.dt_range = dt_range
         self.optimize = optimize
         self.chunk_days = chunk_days
         self.max_concurrency = max_concurrency
         self.force = force
-        self.output_root = Path(output_root) if output_root else Path(env.work_dir)
+        self.output_root = Path(env.work_dir)
+        self.influx = influx
         self.batch_id = self._next_batch_id(self.output_root)
 
         self.definition = load_trading_env(env)
-        if variant:
-            self.definition.profile.variant = variant
         FEATURES.load_from_dict(self.definition.features)
         self.config = self.definition.config
         self.profile = self.definition.profile
@@ -242,7 +245,10 @@ class Runner:
             LOG.info(f"Skipping {param_set_id}: a result for this range already exists (--force to redo)")
             return None
 
-        result = ResultCollector(
+        # Recording first: it is the half that can fail on a server, and failing
+        # before the result directory exists leaves nothing half-made behind.
+        reporters = self._recording_reporters(run_log, param_set_id)
+        result = ResultReporter(
             self.result_dir(param_set_id),
             self.dt_range,
             self.profile.strategy_name,
@@ -254,7 +260,18 @@ class Runner:
             data_source.create_channel(),
             result,
             run_log,
+            reporters,
         )
+
+    def _recording_reporters(self, run_log: BacktestLog, param_set_id: str) -> list:
+        if self.influx is None:
+            return []
+        from .influx import InfluxReporter, bucket_name
+
+        bucket = bucket_name(str(self.env.name), param_set_id)
+        run_log.influx_bucket = bucket
+        writer = self.influx.create_writer(bucket, param_set_id=param_set_id)
+        return [InfluxReporter(writer, self.dt_range)]
 
     def _run_batch(self, backtests: list[Backtest]) -> None:
         """Run a batch concurrently, and do not let one failure hang the rest.
@@ -279,7 +296,7 @@ class Runner:
             except KeyboardInterrupt:
                 LOG.warning("Interrupted; stopping backtests")
                 for backtest in backtests:
-                    backtest.trader.stop()
+                    backtest.stop()
                 raise
 
     def _log_result(self, run_log: BacktestLog) -> None:

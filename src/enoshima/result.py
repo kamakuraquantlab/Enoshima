@@ -1,18 +1,14 @@
-"""Where one backtest's output goes: to disk, as it is produced.
+"""What a backtest computes about itself: the evaluations, and the result.
 
-The strategy publishes metrics, order fills and PnL updates as events. This is
-what receives them.
+`ResultReporter` is the reporter every backtest has. It evaluates each fill and
+each closed position, and its `get_result` is the figure a run log records and
+`--optimize` ranks. It also writes per-trade PnL and strategy bars to parquet
+through `timeseries`, beside the run.
 
-Everything is written locally. Metrics go to a `qate.trading.metrics.MetricLog`
-exactly as the strategy emitted them, and per-trade PnL and strategy bars go to
-parquet through `timeseries`. Nothing here contacts a database: exporting to
-InfluxDB is `enoshima export`, afterwards, from these same files.
-
-That ordering is deliberate and it replaced the opposite one. Writing straight to
-InfluxDB during a run meant a backtest could not finish without a reachable
-server, converting every metric to a database Point on the hot path, and losing
-the whole run if the write failed at the end. Local files cost a fraction of that
-and the export can be repeated.
+It does not record the metric stream. That is `influx.InfluxReporter`, added only
+when a run asks for it, so a backtest without a database still finishes with its
+result. The evaluations' own `EVAL` metrics are published back through the
+runtime, which hands them to whichever reporters are recording.
 
 ## The three slippage evaluations
 
@@ -25,13 +21,12 @@ important about itself, and reporting only the optimistic figure hides it.
 from logging import getLogger
 from pathlib import Path
 
-from qate.core.ev_q import EventQueue
 from qate.core.ev_type import EventType
 from qate.core.model import ExchangeName, Market, Measurement, Metric, SettleType
 from qate.core.order import OrderResponse
 from qate.core.symbol import Symbol
-from qate.trading.metrics import MetricLog, RotationInterval
 from qate.trading.pnl_tracker import PnlUpdate
+from qate.trading.reporter import Reporter
 from qate.util.dt_range import DtRange
 
 from .eval import Evaluation
@@ -45,22 +40,21 @@ LOG = getLogger(__name__)
 SLIPPAGE_05 = 0.00005
 SLIPPAGE_10 = 0.0001
 
-METRICS_PREFIX = "Metrics"
-METRICS_FLUSH = 2048
 
 
-class ResultCollector(EventQueue):
-    """Receives a backtest's events and writes them to its own directory.
 
-    Used as an `EventQueue` so the trader and gateways publish into it exactly as
-    they would to any other listener. It only ever receives; `get` is never
-    called.
+def in_range(ts: float, dt_range: DtRange) -> bool:
+    """Whether an event is inside the reported range.
+
+    A run is fed warmup data from before `dt_range.start_ts` so indicators have
+    history. Those events are replayed but not reported: a PnL from the warmup
+    period would be a trade the requested range did not contain.
     """
+    return ts >= dt_range.start_ts
 
-    # MARKET_PRICE and TRADE are emitted per market event. Keeping them would
-    # make the metrics file larger than the bronze it was computed from, for data
-    # that is already on disk in the bronze layer.
-    _SKIP_MEASUREMENTS = {Measurement.MARKET_PRICE.value, Measurement.TRADE.value}
+
+class ResultReporter(Reporter):
+    """Evaluates a backtest and writes its PnL and bars to its own directory."""
 
     def __init__(
         self,
@@ -69,17 +63,13 @@ class ResultCollector(EventQueue):
         strategy_name: str,
         param_set_id: str,
     ):
+        super().__init__()
         self.result_dir = Path(result_dir)
         self.result_dir.mkdir(parents=True, exist_ok=True)
         self.dt_range = dt_range
         self.strategy_name = strategy_name
         self.param_set_id = param_set_id
 
-        self.metrics_writer = MetricLog(
-            RotationInterval.ONE_DAY,
-            METRICS_FLUSH,
-            str(self.result_dir / METRICS_PREFIX),
-        )
         self.store = ResultStore(self.result_dir, strategy_name, param_set_id)
         self.pnl_stores: dict[str, object] = {}
         self.bar_stores: dict[str, object] = {}
@@ -88,38 +78,9 @@ class ResultCollector(EventQueue):
         self._cum_pnl = 0.0
         self._peak_equity = 0.0
 
-    def put(self, data) -> None:
-        if data is None:
-            return
-        (event_type, event) = data
-        if event_type == EventType.METRICS:
-            self.handle_metrics(event)
-        elif event_type == EventType.ORDER_FILLED:
-            self.handle_order(event)
-        elif event_type == EventType.TRADING_PNL_UPDATE:
-            self.handle_pnl_update(event)
-
-    def _should_emit(self, ts: float) -> bool:
-        """Whether an event is inside the reported range.
-
-        A run is fed warmup data from before `dt_range.start_ts` so indicators
-        have history. Those events are replayed but not reported: a PnL from the
-        warmup period would be a trade the requested range did not contain.
-        """
-        return ts >= self.dt_range.start_ts
-
-    def _add_metric(self, metric: Metric) -> None:
-        self.metrics_writer.add(metric)
-
-    def handle_metrics(self, metrics: list[Metric]) -> None:
+    def report_metrics(self, metrics: list[Metric]) -> None:
         for metric in metrics:
-            if metric.measurement in self._SKIP_MEASUREMENTS:
-                continue
-            if not self._should_emit(metric.ts):
-                continue
-            self._add_metric(metric)
-
-            if metric.measurement == Measurement.BAR.value:
+            if metric.measurement == Measurement.BAR.value and in_range(metric.ts, self.dt_range):
                 self._add_bar(metric)
 
     def _add_bar(self, metric: Metric) -> None:
@@ -131,17 +92,14 @@ class ResultCollector(EventQueue):
         fields = dict(zip(metric.fields[::2], metric.fields[1::2]))
         store.add(metric.ts, fields)
 
-    def handle_order(self, order_response: OrderResponse) -> None:
+    def report_order(self, order_response: OrderResponse) -> None:
         # Evaluations see every fill, warmup included, so the reported slippage
         # average is over the whole replay rather than a truncated tail.
         for evaluation in self.evals:
             evaluation.on_order(order_response)
 
-        if self._should_emit(order_response.get_ts()):
-            self._add_metric(order_response.to_metric())
-
-    def handle_pnl_update(self, pnl_update: PnlUpdate) -> None:
-        if not self._should_emit(pnl_update.get_ts()):
+    def report_pnl(self, pnl_update: PnlUpdate) -> None:
+        if not in_range(pnl_update.get_ts(), self.dt_range):
             return
 
         if pnl_update.settle_type == SettleType.OPEN:
@@ -155,18 +113,11 @@ class ResultCollector(EventQueue):
         self._cum_pnl += pnl_inc
         self._peak_equity = max(self._peak_equity, self._cum_pnl)
         drawdown = self._peak_equity - self._cum_pnl
-
-        # The same close written at both ends of the position, tagged, so a chart
-        # can align PnL either to when a trade was entered or to when it settled.
-        for align, ts in (("close", pnl_update.get_ts()), ("open", pnl_update.open_ts)):
-            metric = pnl_update.to_metric()
-            metric.ts = ts
-            self._add_metric(metric.tag("time_align", align))
-
         self._add_pnl(pnl_update, pnl_inc, drawdown)
 
-        for metric in eval_metrics:
-            self._add_metric(metric)
+        # For comparison with live trading: whoever records the run gets these
+        # through the runtime, as if the strategy had emitted them.
+        self.publish_status(EventType.METRICS, eval_metrics)
 
     def _add_pnl(self, pnl_update: PnlUpdate, pnl_inc: float, drawdown: float) -> None:
         market = pnl_update.market
@@ -198,8 +149,7 @@ class ResultCollector(EventQueue):
             result.update(evaluation.get_result())
         return result
 
-    def close(self) -> None:
+    def stop(self) -> None:
         for store in list(self.pnl_stores.values()) + list(self.bar_stores.values()):
             store.close()
-        self.metrics_writer.close()
         LOG.info(f"Results written to {self.result_dir}")

@@ -2,7 +2,8 @@
 
 Writes a synthetic bronze tree, copies the example environment into a temporary
 env root, and drives `Runner` exactly as `enoshima run` does. If this passes, the
-documented quick start works.
+documented quick start works. InfluxDB is stood in for by a store that keeps its
+points in memory: what is tested is what a run reports, not the client library.
 
 The prices are a sine wave, so the fast and slow averages cross repeatedly and
 the strategy actually opens and closes positions. A backtest that trades nothing
@@ -27,7 +28,6 @@ from qate_env.env import Env
 from qate_env.env_name import EnvName
 
 from enoshima.bronze import ORDER_BOOK, data_path
-from enoshima.result import METRICS_PREFIX
 from enoshima.runner import WARMUP_HOURS, Runner
 
 EXAMPLE_ROOT = Path(__file__).resolve().parent.parent / "example"
@@ -123,47 +123,88 @@ def test_a_run_trades_and_writes_its_results(run_env):
     # Results on disk, under the batch and parameter set that produced them.
     result_dir = Path(log["result_dir"])
     assert result_dir.is_dir()
-    assert list(result_dir.glob(f"{METRICS_PREFIX}_*.msgpack")), "no local metrics were written"
     assert list(result_dir.glob("dataset=Pnl/**/data.parquet")), "no PnL parquet was written"
 
 
-def test_metrics_are_readable_back_without_a_database(run_env):
-    """Local-first: a finished run's metrics are on disk and parseable as they are."""
-    from qate.core.model import Measurement
-    from qate.trading.metrics import read_metrics_dir
+class MemoryWriter:
+    """An `InfluxdbWriter` that keeps its points."""
 
+    def __init__(self, bucket: str):
+        self.bucket = bucket
+        self.points = []
+        self.closed = False
+
+    def add(self, point) -> None:
+        self.points.append(point)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class MemoryStore:
+    """An `InfluxdbStore` with no server behind it."""
+
+    def __init__(self):
+        self.writers: list[MemoryWriter] = []
+
+    def create_writer(self, bucket_name: str, param_set_id: str | None = None, **_) -> MemoryWriter:
+        writer = MemoryWriter(bucket_name)
+        self.writers.append(writer)
+        return writer
+
+
+def test_a_run_without_influx_still_has_its_result(run_env):
+    """InfluxDB is optional: the result is computed from the reporters every run has."""
     env, dt_range, data_root = run_env
-    runner = Runner(env, dt_range, data_root=str(data_root), chunk_days=1)
-    runner.run()
+    Runner(env, dt_range, data_root=str(data_root), chunk_days=1).run()
 
     log = json.loads(next((Path(env.work_dir) / "run_log").glob("*.json")).read_text())
-    objects = list(read_metrics_dir(log["result_dir"], METRICS_PREFIX))
-    assert objects
+    assert log["result"]["pnl_cnt0"] >= 1
+    assert log["influx_bucket"] is None
 
-    measurements = {m.measurement for m in objects}
-    assert Measurement.ORDER.value in measurements
-    assert Measurement.PNL.value in measurements
+
+def test_influx_records_orders_pnl_and_evaluations(run_env):
+    pytest.importorskip("influxdb_client")
+    env, dt_range, data_root = run_env
+    store = MemoryStore()
+    Runner(env, dt_range, data_root=str(data_root), chunk_days=1, influx=store).run()
+
+    log = json.loads(next((Path(env.work_dir) / "run_log").glob("*.json")).read_text())
+    [writer] = store.writers
+    assert writer.closed
+    assert writer.bucket == log["influx_bucket"] == f"backtest_{ENV_NAME}_{log['param_set_id']}"
+
+    by_measurement = {}
+    for point in writer.points:
+        by_measurement.setdefault(point._name, []).append(point)
+    assert {"ORDER", "PNL", "EVAL"} <= set(by_measurement)
     # Skipped on purpose: they are per-snapshot and already in the bronze layer.
-    assert Measurement.MARKET_PRICE.value not in measurements
-    assert Measurement.TRADE.value not in measurements
+    assert "MARKET_PRICE" not in by_measurement
+    assert "TRADE" not in by_measurement
 
-    # Nothing from the warmup period is recorded -- with one intended exception.
-    # A position opened during warmup and closed inside the range is a real trade
-    # and is reported, and its open-aligned copy carries the entry timestamp,
-    # which is earlier than the range. Every other metric is inside it.
-    early = [m for m in objects if m.ts < dt_range.start_ts]
-    assert all(
-        m.measurement == Measurement.PNL.value and _tag(m, "time_align") == "open" for m in early
-    ), f"unexpected metrics before the range: {[(m.measurement, _tag(m, 'time_align')) for m in early]}"
+    # Every closed position twice, aligned to its close and to its entry, and one
+    # EVAL per slippage rate.
+    closes = log["result"]["pnl_cnt0"]
+    aligns = [p._tags.get("time_align") for p in by_measurement["PNL"]]
+    assert aligns.count("close") == aligns.count("open") == closes
+    assert len(by_measurement["EVAL"]) == 3 * closes
+
+    # Nothing from the warmup period -- except the open-aligned copy of a position
+    # opened during warmup and closed inside the range, which is a real trade.
+    start_ms = int(dt_range.start_ts * 1000)
+    early = [p for p in writer.points if p._time < start_ms]
+    assert all(p._name == "PNL" and p._tags.get("time_align") == "open" for p in early)
 
 
-def _tag(metric, key: str):
-    """A tag's value from a metric's flat [k, v, k, v, ...] tag list."""
-    tags = metric.tags
-    for i in range(0, len(tags) - 1, 2):
-        if tags[i] == key:
-            return tags[i + 1]
-    return None
+def test_a_skipped_parameter_set_opens_no_bucket(run_env):
+    """A resumed sweep must not touch the database for results it already has."""
+    pytest.importorskip("influxdb_client")
+    env, dt_range, data_root = run_env
+    Runner(env, dt_range, data_root=str(data_root), chunk_days=1).run()
+
+    store = MemoryStore()
+    Runner(env, dt_range, data_root=str(data_root), chunk_days=1, influx=store).run()
+    assert store.writers == []
 
 
 def test_a_second_identical_run_is_skipped(run_env):
@@ -268,24 +309,6 @@ def test_optimize_still_reads_the_grid(run_env):
     combos = runner.param_sets()
     assert len(combos) == 6
     assert {"fast_period": 30, "slow_period": 90} not in combos
-
-
-def test_output_root_keeps_a_run_out_of_the_environment(run_env, tmp_path):
-    """What makes one environment safe for a live process and a backtest at once."""
-    env, dt_range, data_root = run_env
-    out = tmp_path / "backtests" / str(ENV_NAME)
-    out.mkdir(parents=True)
-
-    before = sorted(p.name for p in Path(env.work_dir).iterdir())
-
-    runner = Runner(env, dt_range, data_root=str(data_root), chunk_days=1, output_root=str(out))
-    runner.run()
-
-    # Everything a run produces is under the output root.
-    assert (out / "run_log").is_dir()
-    assert (out / "result").is_dir()
-    # And the environment is untouched.
-    assert sorted(p.name for p in Path(env.work_dir).iterdir()) == before
 
 
 def test_an_env_needs_no_desc_json(run_env):

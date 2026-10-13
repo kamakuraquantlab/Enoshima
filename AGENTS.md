@@ -65,15 +65,23 @@ but it is easy to break from here:
 - **An order fills on the book after the one it was created on.** The simulator
   matches against the next snapshot. Do not "fix" it into same-book fills.
 - **Warmup consumes events.** `Trader.before_loop` drains into `Strategy.warmup_*`
-  until `is_ready`, and `ResultCollector._should_emit` then drops everything before
+  until `is_ready`, and `result.in_range` then drops everything before
   the range start. A test that counts events or metrics must account for both.
   The one intended exception: a position opened during warmup and closed inside
   the range *is* reported, and its open-aligned PnL copy carries the earlier
   timestamp.
-- **Results are written locally, always.** InfluxDB is `enoshima export`,
-  afterwards, behind the `influx` extra. Nothing on a run's path may require a
-  server — that was the previous design and it meant a run could not finish
-  without one.
+- **A backtest reports through `qate`'s `Reporter` interface, like a live run.**
+  `backtest.BacktestRuntime` is the synchronous counterpart of qate's `Runtime`.
+  `ResultReporter` is always attached and is what a result is computed from;
+  `InfluxReporter` is attached only when the env's `enoshima.json` has an
+  `"influx"` entry. A run without InfluxDB must still finish with its result, so
+  nothing outside `influx.py` and that path may import `influxdb_client`.
+- **There is no msgpack log.** That is the live system's intermediate format --
+  written in real time, uploaded, then loaded into InfluxDB -- because a trading
+  process must never wait on a database. A backtest can, so it writes InfluxDB
+  directly. Do not reintroduce a local metric file "to be safe".
+- **A reporter that raises fails the backtest**, unlike in qate's `Runtime`. A
+  backtest's reporters are its output.
 - **The shared buffer is the only concurrency, and it can deadlock.** Every
   `Channel` blocks in `request_load_more` until all of them have arrived, so a
   backtest thread that dies without draining its channel strands the rest.
@@ -81,7 +89,7 @@ but it is easy to break from here:
   do not replace it with a bare `wait()`.
 - **Metric objects pack enum *values*, not names.** `ExchangeName`, `Symbol`,
   `Measurement`, `Tag` and `Field` are append-only in `qate`: reordering a member
-  silently rewrites the meaning of every metrics file already on disk.
+  silently rewrites the meaning of every metric already recorded.
 - **A run log's id is a deterministic hash**, not a UUID. That is what makes a
   sweep resumable, and what `--force` overrides. It was a UUID once, which meant
   the skip check could never fire and every combination was always recomputed.
@@ -94,10 +102,16 @@ but it is easy to break from here:
   grid's defaults -- which meant an environment had two answers and nothing kept
   them in step; the backtest envs left `params.json` empty and the live envs left
   the grid alone. An empty `params.json` still falls back, with a warning.
-- **A run writes under `--output-root`, defaulting to the env dir.** Pointing it
-  elsewhere is what lets one environment serve a live process and a backtest at the
-  same time: the definition is read, not written, and the env's lock is left alone.
-  `results`, `export` and `clean` take the same flag.
+- **The command takes no locations.** Data is komachi's (`komachi.data_root`,
+  which honours `ROOT_PATH` for one run), output is the env dir, the variant is
+  `trading.json`'s, and recording and sizing are `enoshima.json`'s
+  (`enoshima.settings`). Do not add `--data-root`, `--output-root`, `--variant` or
+  `--influx` back: each was a second answer to a question a file already answers.
+  `--chunk-days` and `--max-concurrency` stay as per-run overrides.
+- **A run writes into its environment and takes its lock**, so never point one at
+  an environment a live process is running from; copy the definition instead.
+- **`enoshima.json` refuses unknown keys.** A misspelt `"influx"` silently
+  ignored would leave a run unrecorded with nothing to say so.
 - **The strategy's `Config` class is resolved from the strategy module**, by
   `qate_env.trading_env.resolve_config_class`. There is no `desc.json` and no index of
   any kind; the map that used to be one went stale whenever code moved. Do not

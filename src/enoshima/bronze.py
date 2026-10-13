@@ -72,14 +72,16 @@ def _komachi():
 
 
 def data_root(override: str | Path | None = None) -> Path:
-    """An explicit override, else wherever komachi was set up to put data.
+    """An explicit override, else wherever komachi says the data is.
 
     Asking komachi rather than deriving it means a backtest reads exactly where
-    the downloader wrote, and keeps working when that setting changes.
+    the downloader wrote, and keeps working when that setting changes. `env=True`
+    is komachi's rule for a command line: `ROOT_PATH` in the environment is a
+    per-run answer somebody typed on purpose, and wins over the settings file.
     """
     if override:
         return Path(override).expanduser()
-    return Path(_komachi().data_root())
+    return Path(_komachi().data_root(env=True))
 
 
 def data_path(root: str | Path, dataset: str, market: Market, date_str: str) -> Path:

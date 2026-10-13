@@ -30,9 +30,10 @@ that is deliberate:
 | [`qate-env`](https://github.com/kamakuraquantlab/qate-env) | The run directory: the strategy an environment names, its config and params, and the lock | Data, and replay |
 | **Enoshima** | The replay: asks komachi where, reads the rows, hands qate its events | — |
 
-`qate-env` is the one a live runner shares, and that is what makes "backtest what
-production runs" a single command: the same `~/env/<NAME>` directory, read rather
-than written, with the backtest's own output root and its own lock.
+`qate-env` is the one a live runner shares, so a backtest environment holds the
+same files a live one does, `params.json` included: backtesting what production
+runs is copying its definition into a backtest env. A run writes into its own
+environment and takes its lock, so it is never pointed at a live one.
 
 `enoshima/bronze.py` is that join, and it is the only place that speaks both
 vocabularies. It asks komachi for paths and for the list of complete days rather
@@ -46,18 +47,13 @@ thinks it has.
 reads it where Komachi put it — no path to configure:
 
 ```bash
-komachi get --market COINCHECK:BTC_SPOT --start 2026-09-01 --end 2026-09-07
-enoshima markets
+komachi download --market COINCHECK:BTC_SPOT --start 2026-09-01 --end 2026-09-07
+komachi local
 ```
 
-```text
-Data root: ~/kamakuraquantlab-data
-market                       dataset      days  range
-COINCHECK:BTC_SPOT           Trade           7  2026-09-01 .. 2026-09-07
-COINCHECK:BTC_SPOT           OrderBook       7  2026-09-01 .. 2026-09-07
-```
-
-`--data-root` reads any tree in the same Hive-partitioned layout. Dates are
+`komachi local` is what is on disk. To replay a different tree in the same
+Hive-partitioned layout for one run, set komachi's own `ROOT_PATH` for it:
+`ROOT_PATH=/other/root enoshima run ...`. Dates are
 Asia/Tokyo days spanning 15:00–14:59 UTC; the timestamps inside the files are UTC
 epochs.
 
@@ -139,6 +135,7 @@ One directory per named run configuration, under `~/env` (or `QATE_ENV_ROOT`):
 | `param_grid.json` | The search space `--optimize grid` walks. Optional |
 | `params_combo.json` | An explicit parameter list, for `--optimize combo`. Optional |
 | `features.json` | Feature flags. Optional |
+| `enoshima.json` | How this env is backtested: InfluxDB recording, memory. Optional |
 
 There is no index file. Each file is read by whatever wants it, with the class
 named by the reader — so an environment written when a strategy lived somewhere
@@ -152,49 +149,61 @@ An env whose `params.json` is empty falls back to the grid's defaults and warns.
 The strategy's `Config` class is resolved from the strategy module
 (`<strategy_module>.config.Config`).
 
-By default a run writes back into the same directory:
+A run writes back into the same directory:
 
 ```text
 EXAMPLE_BACKTEST/
 ├── run_log/<id>.json                  one per parameter set: provenance + results
 ├── best_result/<batch_id>.json         the winner of a sweep
 └── result/<batch_id>/<param_set_id>/
-    ├── Metrics_20260901.msgpack        orders, PnL, evaluations
-    └── dataset=Pnl/.../data.parquet    per-trade PnL
+    ├── dataset=Pnl/.../data.parquet    per-trade PnL
+    └── dataset=Bar/.../data.parquet    the strategy's bars
 ```
 
-## Backtesting an environment something else is using
+## `enoshima.json`
 
-`--output-root` separates where a run's *definition* is read from and where its
-*results* go:
+How an environment is backtested, as opposed to what it trades. Every key is
+optional, and a missing file means the defaults:
 
-```bash
-enoshima run --env LIVE_ENV --from 2026-09-01 --to 2026-09-07 --output-root ~/backtests
+```json
+{
+  "influx": {"keys": "DEFAULT", "org": null},
+  "chunk_days": 2,
+  "max_concurrency": 16
+}
 ```
 
-The environment is then read and not written, and its lock is left alone — so a
-live process can be running from it at the same time. Pass the same
-`--output-root` to `results`, `export` and `clean` to look there.
+`chunk_days` and `max_concurrency` size a run (see below); `--chunk-days` and
+`--max-concurrency` override them for one run. An unknown key is an error, so a
+misspelling cannot silently change what a run does.
 
-That is the point of one environment serving both: the thing you backtest is the
-thing that runs, file for file.
+## Charting a run in InfluxDB
 
-## Results are local, and a database is optional
-
-Everything above is written to disk as the run produces it. Nothing contacts a
-server, so a run finishes whether or not one is reachable, and a failed export
-can simply be repeated.
-
-To chart results in Grafana:
+A run's result -- the evaluation in its run log -- needs nothing but the data.
+To also chart it in Grafana, give the environment an `"influx"` entry in
+`enoshima.json`, and every run of it records its metrics, orders and PnL as it
+goes:
 
 ```bash
 pip install 'kamakuraquantlab-enoshima[influx]'
-enoshima export --env EXAMPLE_BACKTEST
+echo '{"influx": {}}' > "$QATE_ENV_ROOT/EXAMPLE_BACKTEST/enoshima.json"
+enoshima run --env EXAMPLE_BACKTEST --from 2026-09-01
 ```
 
 One bucket per parameter set, `backtest_<ENV>_<param_set_id>`, so a sweep's
-combinations sit side by side. Connection details come from
-`~/.qate/influxdb.keys`.
+combinations sit side by side; the run log records which. Connection details come
+from `~/.qate/influxdb.keys` (`"keys"` picks the section; `"org"` defaults to
+the only organisation the token sees). The server is
+checked before any data is replayed, so a run asked to record never finishes
+unrecorded.
+
+It goes straight to the database. A live process writes a local log first and
+ships it later, because trading must never wait on a server; a backtest has no
+such constraint, so it skips the intermediate file.
+
+This is `qate`'s `Reporter` interface, the same one a live run uses:
+`BacktestRuntime` hands every fill, metric and PnL update to its reporters, and
+`InfluxReporter` is one of them.
 
 ## Every run is evaluated three times
 
@@ -209,15 +218,13 @@ ranks on `pnl5` for the same reason.
 | Command | Does |
 |---|---|
 | `enoshima run` | Run a backtest, or a parameter sweep |
-| `enoshima markets` | What market data is on disk |
 | `enoshima results` | Recorded runs for an environment, best first |
-| `enoshima export` | Load a run's metrics into InfluxDB |
 | `enoshima clean` | Delete an environment's results (needs `--yes`) |
 
-Useful flags on `run`: `--optimize grid|combo`, `--variant`, `--data-root`,
-`--output-root` (see above), `--chunk-days` (memory), `--max-concurrency`
-(parameter sets per data pass), `--force` (re-run a parameter set that already has
-a result).
+Flags on `run`: `--optimize grid|combo`, `--chunk-days` (memory),
+`--max-concurrency` (parameter sets per data pass), `--force` (re-run a parameter
+set that already has a result). The variant is `trading.json`'s, the data is
+komachi's, and the output is the environment directory.
 
 ## Memory, and how a sweep is cheap
 
@@ -228,7 +235,7 @@ that every parameter set in a batch reads from. A sweep therefore costs
 combination — five parameter sets over a day of real books take about as long as
 one.
 
-If a run is killed by the OOM reaper, lower `--chunk-days` before anything else.
+If a run is killed by the OOM reaper, lower `chunk_days` before anything else.
 
 Runs are also resumable. A run log's id is a hash of the environment, strategy,
 parameters and date range, so a sweep that dies part way through resumes where it

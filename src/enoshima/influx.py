@@ -1,19 +1,19 @@
-"""Optional: load a finished run's metrics into InfluxDB, for Grafana.
+"""Optional: record a backtest's metrics, orders and PnL in InfluxDB, for Grafana.
 
-A backtest never touches this. It writes its metrics to a local `MetricLog` and
-finishes; this is the separate step that copies them into a bucket so they can be
-charted, and it can be repeated as often as you like because the files are the
-record.
+`InfluxReporter` is a `qate.trading.reporter.Reporter`, added to every run of an
+environment whose `enoshima.json` has an `"influx"` entry. It writes as the run
+goes, one bucket per parameter set, so a finished backtest is on a dashboard with
+nothing further to do.
 
-Requires the extra: `pip install 'kamakuraquantlab-enoshima[influx]'`, plus a
+The live system gets there in three steps -- a msgpack log written in real time,
+an upload, and a loader into InfluxDB -- because a trading process must never
+wait on a database. A backtest has no such constraint and no reason for the
+intermediate file, so it writes the destination directly.
+
+It is optional because a backtest's *result* does not need it: without it
+a run still evaluates itself and records its figures in the run log. Requires the
+extra, `pip install 'kamakuraquantlab-enoshima[influx]'`, and a
 `~/.qate/influxdb.keys` holding the token and URLs.
-
-## Why this is here and not in qate
-
-`qate` writes the metric log and stops there. Sending it anywhere is a decision
-about infrastructure, and whoever wants the charts owns it -- which for a backtest
-is Enoshima. That is also what keeps `influxdb-client` out of `qate`'s dependency
-tree entirely.
 
 ## Timestamps
 
@@ -21,21 +21,19 @@ Metric records carry float epoch seconds. Points are written at microsecond
 precision, and colliding timestamps are spread by 1us each, because InfluxDB treats
 measurement + tags + timestamp as a primary key and would otherwise overwrite
 rather than append. Two fills inside the same millisecond are ordinary, so this is
-load-bearing rather than defensive.
+load-bearing rather than defensive. It is also deterministic, so re-running a
+parameter set over the same range overwrites its points rather than doubling them.
 
 ## One bucket per parameter set
 
 `backtest_<ENV>_<param_set_id>`, so an optimize sweep's combinations sit side by
 side and a dashboard can switch between them with a variable rather than a query
 rewrite. Runs marked temporary get `_tmp_<batch_id>` appended and a 30-day
-retention, because a quick idea test should not need remembering to clean up after;
-`delete_tmp_buckets` removes the expired ones.
+retention; `delete_tmp_buckets` removes the expired ones.
 """
 
 import time
 from logging import getLogger
-from pathlib import Path
-from typing import Iterable
 
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import WriteOptions, WriteType
@@ -50,19 +48,21 @@ from qate.core.model import (
     Side,
     Tag,
 )
-from qate.core.order import OrderType
+from qate.core.order import OrderResponse, OrderType
 from qate.core.symbol import Symbol
-from qate.trading.metrics import metrics_files, read_metrics_dir
+from qate.trading.pnl_tracker import PnlUpdate
+from qate.trading.reporter import Reporter
 from qate.util.buffer import BufferedWriter
+from qate.util.dt_range import DtRange
 
-from .result import METRICS_PREFIX
+from .result import in_range
 
 LOG = getLogger(__name__)
 
 WRITE_TIMEOUT_MS = 120_000  # large batches from a finished backtest are slow
 
 
-def create_client(url: str, token: str, org: str) -> InfluxDBClient:
+def create_client(url: str, token: str, org: str | None) -> InfluxDBClient:
     return InfluxDBClient(url, token, org=org, timeout=WRITE_TIMEOUT_MS)
 
 
@@ -192,12 +192,31 @@ class InfluxdbStore:
     `qate_env.sys_env.get_influxdb` returns.
     """
 
-    def __init__(self, config: tuple[str, str, str], org: str = "qate"):
+    def __init__(self, config: tuple[str, str, str], org: str | None = None):
         (token, write_url, read_url) = config
         self._token = token
         self._write_url = write_url
         self._read_url = read_url
         self._org = org
+
+    @property
+    def org(self) -> str:
+        """The organisation buckets are created in.
+
+        Given, or else the one the token can see. Asked rather than defaulted:
+        `influxdb.keys` holds no organisation, and a guessed name fails only once
+        the first bucket is created.
+        """
+        if self._org is None:
+            client = create_client(self._write_url, self._token, None)
+            try:
+                names = [o.name for o in client.organizations_api().find_organizations()]
+            finally:
+                client.close()
+            if len(names) != 1:
+                raise ValueError(f"The InfluxDB token sees {len(names)} organisations {names}; name one")
+            self._org = names[0]
+        return self._org
 
     def create_writer(
         self,
@@ -209,16 +228,24 @@ class InfluxdbStore:
         return InfluxdbWriter(
             self._write_url,
             self._token,
-            self._org,
+            self.org,
             bucket_name,
             buffer_size,
             retention_seconds,
             param_set_id,
         )
 
+    def ping(self) -> bool:
+        """Whether the server answers. Asked before a run, not after its replay."""
+        client = create_client(self._write_url, self._token, None)
+        try:
+            return client.ping()
+        finally:
+            client.close()
+
     def delete_bucket(self, bucket_name: str) -> None:
         """Drop a bucket and everything in it."""
-        client = create_client(self._write_url, self._token, self._org)
+        client = create_client(self._write_url, self._token, self.org)
         try:
             b = client.buckets_api()
             bucket = b.find_bucket_by_name(bucket_name)
@@ -232,69 +259,81 @@ class InfluxdbStore:
 
     def delete_range(self, bucket_name: str, start: str, stop: str) -> None:
         """Delete a time range from a bucket. `start`/`stop` are RFC3339."""
-        client = create_client(self._write_url, self._token, self._org)
+        client = create_client(self._write_url, self._token, self.org)
         try:
             client.delete_api().delete(
                 start=start,
                 stop=stop,
                 predicate="",
                 bucket=bucket_name,
-                org=self._org,
+                org=self.org,
             )
             LOG.info(f"DELETE_RANGE bucket={bucket_name} {start} -> {stop}")
         finally:
             client.close()
 
     def list_buckets(self) -> list[str]:
-        client = create_client(self._write_url, self._token, self._org)
+        client = create_client(self._write_url, self._token, self.org)
         try:
             return [b.name for b in client.buckets_api().find_buckets().buckets]
         finally:
             client.close()
 
 
-def export_metric_objects(
-    metrics: Iterable[Metric],
-    writer: InfluxdbWriter,
-    batch_size: int = 2048,
-) -> int:
-    """Write metrics through a writer. Returns how many were written."""
-    count = 0
-    points: list[Point] = []
-    for metric in metrics:
-        points.append(convert_to_point(metric))
-        count += 1
-        if len(points) >= batch_size:
-            writer.write(points)
-            points = []
-    if points:
-        writer.write(points)
-    return count
+class InfluxReporter(Reporter):
+    """A backtest's metrics, orders and PnL, written to one bucket as they happen.
 
+    What it records is what the strategy and the runtime report, with two
+    backtest-specific rules:
 
-def export_metrics(
-    directory: str | Path,
-    store: InfluxdbStore,
-    bucket_name: str,
-    prefix: str = "",
-    retention_seconds: int | None = None,
-) -> int:
-    """Load a directory of local msgpack metrics into a bucket.
+    - **Nothing from the warmup period**, which is replayed for the indicators
+      but is not part of the requested range -- except the open-aligned copy
+      below.
+    - **A closed position is written twice**, tagged `time_align=close` at its
+      close and `time_align=open` at its entry, so a chart can align PnL with the
+      signal that caused it or with when it settled. A position opened during
+      warmup and closed in range is reported, so its open copy is earlier than
+      the range.
 
-    The second half of the local-first arrangement described in
-    `qate.trading.metrics`. Returns the number of metrics written.
+    `MARKET_PRICE` and `TRADE` metrics are dropped: they are emitted per market
+    event, are already in the bronze layer, and would outweigh everything else.
     """
-    writer = store.create_writer(bucket_name, retention_seconds=retention_seconds)
-    try:
-        count = export_metric_objects(read_metrics_dir(directory, prefix), writer)
-    finally:
-        writer.close()
-    LOG.info(f"Exported {count} metric objects from {directory} to bucket {bucket_name}")
-    return count
+
+    _SKIP_MEASUREMENTS = {Measurement.MARKET_PRICE.value, Measurement.TRADE.value}
+
+    def __init__(self, writer: InfluxdbWriter, dt_range: DtRange):
+        super().__init__()
+        self.writer = writer
+        self.dt_range = dt_range
+
+    def _add(self, metric: Metric) -> None:
+        self.writer.add(convert_to_point(metric))
+
+    def report_metrics(self, metrics: list[Metric]) -> None:
+        for metric in metrics:
+            if metric.measurement in self._SKIP_MEASUREMENTS:
+                continue
+            if in_range(metric.ts, self.dt_range):
+                self._add(metric)
+
+    def report_order(self, order_response: OrderResponse) -> None:
+        if in_range(order_response.get_ts(), self.dt_range):
+            self._add(order_response.to_metric())
+
+    def report_pnl(self, pnl_update: PnlUpdate) -> None:
+        if pnl_update.settle_type != SettleType.CLOSE or not in_range(pnl_update.get_ts(), self.dt_range):
+            return
+        for align, ts in (("close", pnl_update.get_ts()), ("open", pnl_update.open_ts)):
+            metric = pnl_update.to_metric()
+            metric.ts = ts
+            self._add(metric.tag("time_align", align))
+
+    def stop(self) -> None:
+        self.writer.close()
 
 
 # --------------------------------------------------------------------------
-# Enoshima's own layer: where a run's files are, and what bucket they belong in.
+# Enoshima's own layer: what bucket a run belongs in.
 # --------------------------------------------------------------------------
 
 BUCKET_PREFIX = "backtest"
@@ -307,45 +346,6 @@ def bucket_name(env_name: str, param_set_id: str, batch_id: int | None = None) -
     if batch_id is None:
         return base
     return f"{base}{TMP_MARKER}{batch_id}"
-
-
-def export_run(
-    result_dir: str | Path,
-    store: InfluxdbStore,
-    bucket: str,
-    retention_seconds: int | None = None,
-) -> int:
-    """Load one run's metrics directory into a bucket. Returns objects written."""
-    result_dir = Path(result_dir)
-    if not metrics_files(result_dir, METRICS_PREFIX):
-        LOG.warning(f"No metrics files under {result_dir}; nothing to export")
-        return 0
-    return export_metrics(result_dir, store, bucket, prefix=METRICS_PREFIX, retention_seconds=retention_seconds)
-
-
-def export_env(env_work_dir: str | Path, store: InfluxdbStore, env_name: str, batch_id: int | None = None) -> int:
-    """Export every run under an environment, or just one batch of them.
-
-    The layout it walks is `result/<batch_id>/<param_set_id>/`, which is what
-    `Runner.result_dir` writes.
-    """
-    root = Path(env_work_dir) / "result"
-    if not root.is_dir():
-        LOG.warning(f"No results under {root}")
-        return 0
-
-    batch_dirs = [root / str(batch_id)] if batch_id is not None else sorted(d for d in root.iterdir() if d.is_dir())
-    total = 0
-    for batch_dir in batch_dirs:
-        if not batch_dir.is_dir():
-            LOG.warning(f"No such batch: {batch_dir}")
-            continue
-        for param_dir in sorted(d for d in batch_dir.iterdir() if d.is_dir()):
-            bucket = bucket_name(env_name, param_dir.name)
-            written = export_run(param_dir, store, bucket)
-            LOG.info(f"{param_dir.name}: {written} metric objects -> {bucket}")
-            total += written
-    return total
 
 
 def delete_tmp_buckets(store: InfluxdbStore, days_ago: int = 7) -> int:
