@@ -131,7 +131,7 @@ Two rules break a backtest silently rather than loudly:
 Point an environment at your strategy with `trading.json`:
 
 ```json
-{ "strategy_module_name": "my_strategy", "variant": "v1", "gateway_name": "SIMULATOR" }
+{ "strategy_module_name": "my_strategy", "variant": "v1" }
 ```
 
 ## An environment

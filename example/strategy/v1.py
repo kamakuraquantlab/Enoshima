@@ -68,7 +68,7 @@ class Variant(Strategy[Config]):
     def get_param_multiplier(self, name: str) -> int:
         # Periods are already integers. The default multiplier of 1000 would turn
         # a 60-bar period into "60000" in the param_set_id, which is the string
-        # that names the results directory.
+        # that names the run's InfluxDB bucket.
         return 1
 
     def add_gateway(self, gateway: ExchangeGateway) -> None:
