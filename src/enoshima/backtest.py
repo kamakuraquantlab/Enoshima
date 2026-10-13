@@ -62,14 +62,9 @@ class BacktestRuntime(EventQueue):
         self.reporters: list[Reporter] = []
 
         for exchange_name in exchanges:
-            # No queue and no thread: the simulator answers inside the caller's
-            # call. Slippage is 0 here because the evaluations apply their own
-            # rates -- see result.ResultReporter.
-            gateway = SimulatorGateway(exchange_name, slippage_rate=0.0)
+            gateway = SimulatorGateway(exchange_name)
             gateway.add_order_listener(self)
             self.trader.add_gateway(gateway)
-            # Books reach the gateway through the trader's own loop, so the
-            # gateway sees each snapshot before the strategy reacts to it.
             self.trader.register(EventType.MARKET_ORDER_BOOK, gateway.handle_order_book)
 
         self.trader.add_status_listener(self)

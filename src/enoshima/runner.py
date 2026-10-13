@@ -41,7 +41,6 @@ from datetime import timedelta
 from logging import getLogger
 from pathlib import Path
 
-from hase import bronze
 from qate.core.features import FEATURES
 from qate.trading.param import ParamGrid
 from qate.util.dt_range import DtRange
@@ -49,7 +48,6 @@ from qate_env.env import Env
 from qate_env.run_log import RunLogger
 from qate_env.trading_env import (
     PARAM_GRID_FILE,
-    PARAMS_FILE,
     get_strategy_class,
     load_trading_env,
 )
@@ -87,17 +85,12 @@ class Runner:
         env: Env,
         dt_range: DtRange,
         optimize: str | None = MODE_SINGLE,
-        data_root: str | None = None,
         chunk_days: int = DEFAULT_CHUNK_DAYS,
         max_concurrency: int = MAX_CONCURRENCY,
         force: bool = False,
         influx=None,
     ):
-        """`influx` is an `influx.InfluxdbStore`, or None to record no metric stream.
-
-        Untyped so this module does not import the optional extra: a run without
-        InfluxDB must not need its client installed.
-        """
+        """`influx` is an `influx.InfluxdbStore`, or None to record no metric stream."""
         self.env = env
         self.dt_range = dt_range
         self.optimize = optimize
@@ -113,9 +106,6 @@ class Runner:
         self.config = self.definition.config
         self.profile = self.definition.profile
 
-        # Komachi's answer, asked through hase: `env=True` lets ROOT_PATH point
-        # one run at another tree, which is the command-line rule.
-        self.data_root = bronze.data_root(data_root, env=True)
         self.run_logger = RunLogger(str(self.output_root))
 
     @staticmethod
@@ -133,8 +123,6 @@ class Runner:
             batch_id += 1
         return batch_id
 
-    # ---------------------------------------------------------------- planning
-
     def param_sets(self) -> list[dict]:
         if self.optimize == MODE_GRID:
             return self._param_grid().get_all()
@@ -151,24 +139,10 @@ class Runner:
         return ParamGrid.from_object(self.definition.param_grid)
 
     def _single_params(self) -> dict:
-        """The parameters for one run: `params.json`, as a live run reads it."""
         if self.definition.params:
             return self.definition.params
-
-        # Backtest environments written before this were never read from
-        # params.json and left it empty, so fall back rather than refuse -- but say
-        # so, because the two files can disagree and only one is now authoritative.
-        if self.definition.param_grid is not None:
-            defaults = ParamGrid.from_object(self.definition.param_grid).get_default()
-            LOG.warning(
-                f"{PARAMS_FILE} in {self.env.work_dir} is empty; using {PARAM_GRID_FILE}'s "
-                f"default values. Write them to {PARAMS_FILE} to run the same parameters "
-                f"a live run would: {defaults}"
-            )
-            return defaults
-        raise RuntimeError(f"No parameters: {self.env.work_dir} has neither {PARAMS_FILE} nor {PARAM_GRID_FILE}")
-
-    # ----------------------------------------------------------------- running
+        param_grid = self._param_grid()
+        return param_grid.get_default()
 
     def run(self) -> None:
         combos = self.param_sets()
@@ -181,7 +155,6 @@ class Runner:
         markets = [(m, market_data_event_types(t)) for m, t in self.config.get_markets()]
         data_source = DataSource(
             DtRange(self.dt_range.start_dt - timedelta(hours=WARMUP_HOURS), self.dt_range.end_dt),
-            self.data_root,
             self.chunk_days,
         )
         for market, event_types in markets:

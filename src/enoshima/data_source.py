@@ -26,7 +26,6 @@ rule, over a buffer that is refilled rather than a fixed list.
 
 import threading
 from logging import getLogger
-from pathlib import Path
 
 from hase import bronze
 from hase.bronze import DataType, MissingDataError
@@ -59,20 +58,19 @@ class Stream:
     how a run says so before it starts.
     """
 
-    def __init__(self, root: Path, market: Market, event_type: str):
+    def __init__(self, market: Market, event_type: str):
         if event_type not in DATA_TYPES:
             raise ValueError(f"No bronze dataset for event type {event_type}")
-        self.root = root
         self.market = market
         self.event_type = event_type
         self.data_type = DATA_TYPES[event_type]
 
     def available_dates(self) -> list[str]:
-        return bronze.dates(self.market, self.data_type, self.root)
+        return bronze.dates(self.market, self.data_type)
 
     def load(self, day: str) -> list[Event]:
         try:
-            data = bronze.load_day(self.market, self.data_type, day, self.root)
+            data = bronze.load_day(self.market, self.data_type, day)
         except MissingDataError:
             LOG.warning(f"No {self.data_type} data for {self.market.id} on {day}")
             return []
@@ -280,20 +278,14 @@ class Channel(EventQueue):
 class DataSource:
     """The bronze data a run replays, and the channels onto it."""
 
-    def __init__(
-        self,
-        dt_range: DtRange,
-        root: Path,
-        chunk_days: int = DEFAULT_CHUNK_DAYS,
-    ):
-        self.root = Path(root)
+    def __init__(self, dt_range: DtRange, chunk_days: int = DEFAULT_CHUNK_DAYS):
         self.dt_range = dt_range
         self._loader = Loader(dt_range, chunk_days)
         self._shared_buffer = SharedBuffer(self._loader)
 
     def add_source(self, market: Market, event_types: list[str]) -> None:
         for event_type in event_types:
-            self._loader.add_stream(Stream(self.root, market, event_type))
+            self._loader.add_stream(Stream(market, event_type))
 
     def create_channel(self) -> Channel:
         self._shared_buffer.increment_ref()
@@ -315,7 +307,7 @@ class DataSource:
         missing: set[str] = set()
         for market, event_types in markets:
             for event_type in event_types:
-                stream = Stream(self.root, market, event_type)
+                stream = Stream(market, event_type)
                 have = set(stream.available_dates())
                 for day in sorted(wanted - have):
                     missing.add(f"{market.id} {stream.data_type} {day}")
@@ -325,4 +317,3 @@ class DataSource:
 def market_data_event_types(event_types: list[str]) -> list[str]:
     """Only the event types bronze can supply."""
     return [x for x in event_types if x in DATA_TYPES]
-

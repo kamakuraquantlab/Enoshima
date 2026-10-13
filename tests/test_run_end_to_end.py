@@ -80,7 +80,7 @@ def write_books(root: Path, start_ts: float) -> None:
 
 
 @pytest.fixture
-def run_env(tmp_path, monkeypatch):
+def run_env(tmp_path, data_root, monkeypatch):
     """A temporary env root holding a copy of the example environment, and data.
 
     The books start `WARMUP_HOURS` before the reported range, because that is
@@ -92,18 +92,17 @@ def run_env(tmp_path, monkeypatch):
 
     dt_range = DtRange.from_strings("20260102_0600", "20260102_0659")
     start_ts = dt_range.start_ts - WARMUP_SECONDS
-    data_root = tmp_path / "data"
     write_books(data_root, start_ts)
 
     env = Env(str(env_root), ENV_NAME)
     monkeypatch.chdir(tmp_path)
-    return env, dt_range, data_root
+    return env, dt_range
 
 
 def test_a_run_trades_and_writes_its_results(run_env):
-    env, dt_range, data_root = run_env
+    env, dt_range = run_env
 
-    runner = Runner(env, dt_range, data_root=str(data_root), chunk_days=1)
+    runner = Runner(env, dt_range, chunk_days=1)
     runner.run()
 
     # A run log per parameter set, holding the provenance of the numbers.
@@ -154,8 +153,8 @@ class MemoryStore:
 
 def test_a_run_without_influx_still_has_its_result(run_env):
     """InfluxDB is optional: the result is computed from the reporters every run has."""
-    env, dt_range, data_root = run_env
-    Runner(env, dt_range, data_root=str(data_root), chunk_days=1).run()
+    env, dt_range = run_env
+    Runner(env, dt_range, chunk_days=1).run()
 
     log = json.loads(next((Path(env.work_dir) / "run_log").glob("*.json")).read_text())
     assert log["result"]["pnl_cnt0"] >= 1
@@ -163,10 +162,9 @@ def test_a_run_without_influx_still_has_its_result(run_env):
 
 
 def test_influx_records_orders_pnl_and_evaluations(run_env):
-    pytest.importorskip("influxdb_client")
-    env, dt_range, data_root = run_env
+    env, dt_range = run_env
     store = MemoryStore()
-    Runner(env, dt_range, data_root=str(data_root), chunk_days=1, influx=store).run()
+    Runner(env, dt_range, chunk_days=1, influx=store).run()
 
     log = json.loads(next((Path(env.work_dir) / "run_log").glob("*.json")).read_text())
     [writer] = store.writers
@@ -197,44 +195,43 @@ def test_influx_records_orders_pnl_and_evaluations(run_env):
 
 def test_a_skipped_parameter_set_opens_no_bucket(run_env):
     """A resumed sweep must not touch the database for results it already has."""
-    pytest.importorskip("influxdb_client")
-    env, dt_range, data_root = run_env
-    Runner(env, dt_range, data_root=str(data_root), chunk_days=1).run()
+    env, dt_range = run_env
+    Runner(env, dt_range, chunk_days=1).run()
 
     store = MemoryStore()
-    Runner(env, dt_range, data_root=str(data_root), chunk_days=1, influx=store).run()
+    Runner(env, dt_range, chunk_days=1, influx=store).run()
     assert store.writers == []
 
 
 def test_a_second_identical_run_is_skipped(run_env):
     """The deterministic run-log id is what makes an interrupted sweep resumable."""
-    env, dt_range, data_root = run_env
+    env, dt_range = run_env
 
-    Runner(env, dt_range, data_root=str(data_root), chunk_days=1).run()
+    Runner(env, dt_range, chunk_days=1).run()
     [log_path] = (Path(env.work_dir) / "run_log").glob("*.json")
     first = json.loads(log_path.read_text())
 
-    Runner(env, dt_range, data_root=str(data_root), chunk_days=1).run()
+    Runner(env, dt_range, chunk_days=1).run()
     # Same identity, so no second log, and the first was not rewritten.
     assert list((Path(env.work_dir) / "run_log").glob("*.json")) == [log_path]
     assert json.loads(log_path.read_text())["start_ts"] == first["start_ts"]
 
 
 def test_force_reruns_a_completed_parameter_set(run_env):
-    env, dt_range, data_root = run_env
+    env, dt_range = run_env
 
-    Runner(env, dt_range, data_root=str(data_root), chunk_days=1).run()
+    Runner(env, dt_range, chunk_days=1).run()
     [log_path] = (Path(env.work_dir) / "run_log").glob("*.json")
     first = json.loads(log_path.read_text())
 
-    Runner(env, dt_range, data_root=str(data_root), chunk_days=1, force=True).run()
+    Runner(env, dt_range, chunk_days=1, force=True).run()
     assert json.loads(log_path.read_text())["start_ts"] > first["start_ts"]
 
 
 def test_optimize_grid_runs_every_combination_and_picks_a_best(run_env):
-    env, dt_range, data_root = run_env
+    env, dt_range = run_env
 
-    runner = Runner(env, dt_range, optimize="grid", data_root=str(data_root), chunk_days=1)
+    runner = Runner(env, dt_range, optimize="grid", chunk_days=1)
     combos = runner.param_sets()
     assert len(combos) == 6  # 3 fast periods x 2 slow periods
 
@@ -255,14 +252,14 @@ def test_optimize_grid_runs_every_combination_and_picks_a_best(run_env):
 
 def test_a_resumed_sweep_ranks_the_combinations_it_skipped(run_env):
     """The best of a resumed sweep must include results it did not just compute."""
-    env, dt_range, data_root = run_env
+    env, dt_range = run_env
 
     # A first sweep of everything, then a second that skips all of it.
-    first = Runner(env, dt_range, optimize="grid", data_root=str(data_root), chunk_days=1)
+    first = Runner(env, dt_range, optimize="grid", chunk_days=1)
     first.run()
     best_first = first.post_analysis()
 
-    second = Runner(env, dt_range, optimize="grid", data_root=str(data_root), chunk_days=1)
+    second = Runner(env, dt_range, optimize="grid", chunk_days=1)
     second.run()
     best_second = second.post_analysis()
 
@@ -273,13 +270,13 @@ def test_a_resumed_sweep_ranks_the_combinations_it_skipped(run_env):
 
 def test_a_single_run_uses_params_json_not_the_grid_defaults(run_env):
     """The same file a live run reads, so "backtest what prod runs" is one command."""
-    env, dt_range, data_root = run_env
+    env, dt_range = run_env
 
     # Make the two sources disagree, then check which one won.
     params_path = Path(env.work_dir) / "params.json"
     params_path.write_text(json.dumps({"fast_period": 30, "slow_period": 90}))
 
-    runner = Runner(env, dt_range, data_root=str(data_root), chunk_days=1)
+    runner = Runner(env, dt_range, chunk_days=1)
     assert runner.param_sets() == [{"fast_period": 30, "slow_period": 90}]
 
     runner.run()
@@ -287,25 +284,21 @@ def test_a_single_run_uses_params_json_not_the_grid_defaults(run_env):
     assert log["params"] == {"fast_period": 30, "slow_period": 90}
 
 
-def test_an_empty_params_json_falls_back_to_the_grid_and_says_so(run_env, caplog):
+def test_an_empty_params_json_falls_back_to_the_grid_defaults(run_env):
     """Backtest envs written before this left params.json empty; do not just refuse."""
-    env, dt_range, data_root = run_env
+    env, dt_range = run_env
     (Path(env.work_dir) / "params.json").write_text("{}")
 
-    runner = Runner(env, dt_range, data_root=str(data_root), chunk_days=1)
-    with caplog.at_level("WARNING"):
-        params = runner.param_sets()
-
-    assert params == [{"fast_period": 20, "slow_period": 120}]
-    assert any("params.json" in r.message for r in caplog.records)
+    runner = Runner(env, dt_range, chunk_days=1)
+    assert runner.param_sets() == [{"fast_period": 20, "slow_period": 120}]
 
 
 def test_optimize_still_reads_the_grid(run_env):
     """A grid is a search space, and only --optimize consults it."""
-    env, dt_range, data_root = run_env
+    env, dt_range = run_env
     (Path(env.work_dir) / "params.json").write_text(json.dumps({"fast_period": 30, "slow_period": 90}))
 
-    runner = Runner(env, dt_range, optimize="grid", data_root=str(data_root), chunk_days=1)
+    runner = Runner(env, dt_range, optimize="grid", chunk_days=1)
     combos = runner.param_sets()
     assert len(combos) == 6
     assert {"fast_period": 30, "slow_period": 90} not in combos
@@ -313,18 +306,18 @@ def test_optimize_still_reads_the_grid(run_env):
 
 def test_an_env_needs_no_desc_json(run_env):
     """The Config class comes from the strategy module. There is no index file."""
-    env, dt_range, data_root = run_env
+    env, dt_range = run_env
     assert not (Path(env.work_dir) / "desc.json").exists()
 
-    runner = Runner(env, dt_range, data_root=str(data_root), chunk_days=1)
+    runner = Runner(env, dt_range, chunk_days=1)
     runner.run()
     assert list((Path(env.work_dir) / "run_log").glob("*.json"))
 
 
 def test_a_run_log_records_the_config_that_produced_it(run_env):
     """Provenance: a result you cannot attribute to a configuration is not a result."""
-    env, dt_range, data_root = run_env
-    Runner(env, dt_range, data_root=str(data_root), chunk_days=1).run()
+    env, dt_range = run_env
+    Runner(env, dt_range, chunk_days=1).run()
 
     log = json.loads(next((Path(env.work_dir) / "run_log").glob("*.json")).read_text())
     assert log["env"] == str(ENV_NAME)
@@ -335,10 +328,10 @@ def test_a_run_log_records_the_config_that_produced_it(run_env):
 
 
 def test_a_range_with_no_data_is_reported_not_silently_empty(run_env, caplog):
-    env, _, data_root = run_env
+    env, _ = run_env
     empty_range = DtRange.from_strings("20260201", "20260202")
 
-    runner = Runner(env, empty_range, data_root=str(data_root), chunk_days=1)
+    runner = Runner(env, empty_range, chunk_days=1)
     with caplog.at_level("WARNING"):
         runner.run()
 

@@ -52,9 +52,9 @@ komachi download --market COINCHECK:BTC_SPOT --start 2026-09-01 --end 2026-09-07
 komachi local
 ```
 
-`komachi local` is what is on disk. To replay a different tree in the same
-Hive-partitioned layout for one run, set komachi's own `ROOT_PATH` for it:
-`ROOT_PATH=/other/root enoshima run ...`. Dates are
+`komachi local` is what is on disk. Komachi is the only answer to where that is:
+`ROOT_PATH` in its settings file, `~/.kamakuraquantlab.env`. To replay a
+different tree in the same Hive-partitioned layout, change it there. Dates are
 Asia/Tokyo days spanning 15:00–14:59 UTC; the timestamps inside the files are UTC
 epochs.
 
@@ -68,8 +68,13 @@ git clone https://github.com/kamakuraquantlab/Enoshima && cd Enoshima
 pip install -e .
 
 export QATE_ENV_ROOT=$PWD/example/env
+export PYTHONPATH=$PWD   # so `example.strategy` can be imported
 enoshima run --env EXAMPLE_BACKTEST --from 2026-09-01 --to 2026-09-01
 ```
+
+`trading.json` names the strategy as a module, and Enoshima imports it by that
+name, so a strategy of your own must be importable the same way: installed into
+the environment, or on `PYTHONPATH`.
 
 Nothing is printed: every command logs to `env.log` in the environment directory,
 and that is where to watch a run.
@@ -154,7 +159,7 @@ else still loads.
 **`params.json` is what a single run uses**, so backtesting exactly what a live
 process is running is one command rather than a comparison of two files. A grid is
 a search space — an input to `--optimize` — not a description of the environment.
-An env whose `params.json` is empty falls back to the grid's defaults and warns.
+An env whose `params.json` is empty falls back to the grid's defaults.
 
 The strategy's `Config` class is resolved from the strategy module
 (`<strategy_module>.config.Config`).
@@ -178,7 +183,12 @@ optional, and a missing file means the defaults:
 
 ```json
 {
-  "influx": {"keys": "DEFAULT", "org": null},
+  "influx": {
+    "token": "",
+    "write_url": "http://localhost:8086",
+    "read_url": "http://localhost:8086",
+    "org": null
+  },
   "chunk_days": 2,
   "max_concurrency": 16
 }
@@ -196,17 +206,16 @@ To also chart it in Grafana, give the environment an `"influx"` entry in
 goes:
 
 ```bash
-pip install 'kamakuraquantlab-enoshima[influx]'
 echo '{"influx": {}}' > "$QATE_ENV_ROOT/EXAMPLE_BACKTEST/enoshima.json"
 enoshima run --env EXAMPLE_BACKTEST --from 2026-09-01
 ```
 
 One bucket per parameter set, `backtest_<ENV>_<param_set_id>`, so a sweep's
-combinations sit side by side; the run log records which. Connection details come
-from `~/.qate/influxdb.keys` (`"keys"` picks the section; `"org"` defaults to
-the only organisation the token sees). The server is
-checked before any data is replayed, so a run asked to record never finishes
-unrecorded.
+combinations sit side by side; the run log records which. Connection details are
+the entry's own: `"token"`, `"write_url"` and `"read_url"` default to a local
+server at `http://localhost:8086` with no token, and `"org"` defaults to the only
+organisation the token sees. The token sits in `enoshima.json` rather than among
+the credentials because the InfluxDB is your own, not an outside service.
 
 It goes straight to the database. A live process writes a local log first and
 ships it later, because trading must never wait on a server; a backtest has no
@@ -230,7 +239,8 @@ ranks on `pnl5` for the same reason.
 |---|---|
 | `enoshima run` | Run a backtest, or a parameter sweep |
 | `enoshima results` | Recorded runs for an environment, best first |
-| `enoshima clean` | Delete an environment's results (needs `--yes`) |
+
+To clear an environment's results, delete its `run_log/` and `best_result/`.
 
 Flags on `run`: `--optimize grid|combo`, `--chunk-days` (memory),
 `--max-concurrency` (parameter sets per data pass), `--force` (re-run a parameter

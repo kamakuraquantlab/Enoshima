@@ -86,8 +86,11 @@ but it is easy to break from here:
   `backtest.BacktestRuntime` is the synchronous counterpart of qate's `Runtime`.
   `ResultReporter` is always attached and is what a result is computed from;
   `InfluxReporter` is attached only when the env's `enoshima.json` has an
-  `"influx"` entry. A run without InfluxDB must still finish with its result, so
-  nothing outside `influx.py` and that path may import `influxdb_client`.
+  `"influx"` entry. A run without InfluxDB must still finish with its result.
+  `influxdb-client` is a plain dependency, not an extra: the import is not the
+  optional part, the recording is. The token and URLs are `enoshima.json`'s,
+  not a credential lookup -- the InfluxDB is ours, unlike the external services
+  the credential files are for.
 - **Trading data goes to InfluxDB and nowhere else.** Orders, PnL and bars are
   `InfluxReporter`'s; `ResultReporter` only evaluates. There was a parquet copy
   under `result/` (`timeseries.py`); it duplicated the metric stream and was
@@ -121,9 +124,11 @@ but it is easy to break from here:
   search space and only `--optimize` consults it. These were one source once -- the
   grid's defaults -- which meant an environment had two answers and nothing kept
   them in step; the backtest envs left `params.json` empty and the live envs left
-  the grid alone. An empty `params.json` still falls back, with a warning.
-- **The command takes no locations.** Data is komachi's (asked as
-  `hase.bronze.data_root(env=True)`, which honours `ROOT_PATH` for one run), output is the env dir, the variant is
+  the grid alone. An empty `params.json` still falls back to the grid's defaults.
+- **The command takes no locations.** Data is komachi's: hase asks
+  `komachi.data_root()`, which reads `ROOT_PATH` from komachi's settings file and
+  nothing else -- no flag, no environment variable, no override passed down from
+  here. Komachi is the only source of truth for the root. Output is the env dir, the variant is
   `trading.json`'s, and recording and sizing are `enoshima.json`'s
   (`enoshima.settings`). Do not add `--data-root`, `--output-root`, `--variant` or
   `--influx` back: each was a second answer to a question a file already answers.
@@ -144,9 +149,12 @@ but it is easy to break from here:
   configuration is not a result.
 - **`--optimize` ranks on `pnl5`**, the middle slippage assumption. Ranking on
   `pnl0` selects for strategies whose edge is thinnest.
-- **Never delete a user's results on a schedule.** `enoshima clean` requires
-  `--yes` and is the only thing that removes them. An earlier version pruned run
-  logs older than seven days automatically, on every run.
+- **Never delete a user's results.** There is no `clean` command: a user who
+  wants them gone deletes `run_log/` and `best_result/`. An earlier version pruned
+  run logs older than seven days automatically, on every run.
+- **A strategy is imported by module name, and is the user's to make importable**
+  -- installed, or on `PYTHONPATH`. Enoshima does not add the launch directory to
+  `sys.path`.
 
 ## Where a change goes
 

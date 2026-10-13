@@ -35,19 +35,18 @@ classifiers = [
 # directory a backtest reads its configuration from, which qate deliberately knows
 # nothing about. It is also what a live runner reads, which is the point -- "backtest
 # what production runs" is one environment read by two processes.
+#
+# influxdb-client is what an env's "influx" entry records through. It is a
+# database client, not a venue client: it cannot reach an exchange.
 dependencies = [
     "kamakuraquantlab-qate>=0.1",
     "kamakuraquantlab-qate-env>=0.1",
     "kamakuraquantlab-hase>=0.7",
     "numpy>=2.0",
+    "influxdb-client>=1.49",
 ]
 
 [project.optional-dependencies]
-# Recording a run's metrics, orders and PnL in InfluxDB as it runs, for Grafana:
-# `enoshima run --influx`. A run computes its result without it; see enoshima.influx.
-influx = [
-    "influxdb-client>=1.49",
-]
 dev = [
     "pytest>=8.0",
     "ruff>=0.1",

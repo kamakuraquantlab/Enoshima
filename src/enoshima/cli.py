@@ -6,7 +6,6 @@ Run as: `enoshima <command>`, or from a checkout
 ```
 enoshima run     --env NAME --from 2026-06-01 --to 2026-06-10
 enoshima results --env NAME
-enoshima clean   --env NAME
 ```
 
 `run` is the one that matters; the rest exist so that what a run produced can be
@@ -15,11 +14,12 @@ found and read without reading the source.
 Everything a run needs to know beyond the dates is somewhere already, so it is not
 a flag here:
 
-- **The data** is wherever komachi says it is. `komachi local` lists it, and
-  `ROOT_PATH=... enoshima run ...` points one run elsewhere, by komachi's own rule.
-- **The output** is the environment directory: `result/`, `run_log/`,
-  `best_result/` and `env.log` beside the definition they came from.
-- **The strategy and variant** are `trading.json`'s.
+- **The data** is wherever komachi says it is: `ROOT_PATH` in komachi's settings
+  file. `komachi local` lists it; to replay another tree, change it there.
+- **The output** is the environment directory: `run_log/`, `best_result/` and
+  `env.log` beside the definition they came from. To clear it, delete them.
+- **The strategy and variant** are `trading.json`'s. The strategy module is
+  imported by name, so it must be installed or on `PYTHONPATH`.
 - **Recording to InfluxDB**, and how a run is sized, are `enoshima.json`'s -- see
   `enoshima.settings`. `--chunk-days` and `--max-concurrency` still override the
   file for one run.
@@ -33,7 +33,6 @@ environment directory is how a run is watched.
 
 import argparse
 import json
-import shutil
 import sys
 from logging import getLogger
 from pathlib import Path
@@ -43,88 +42,29 @@ from qate_env import sys_env
 from qate_env.env import Env
 from qate_env.env_name import EnvName
 
+from enoshima.influx import InfluxdbStore
 from enoshima.runner import Runner
-from enoshima.settings import SETTINGS_FILE, InfluxSettings, load_settings
+from enoshima.settings import SETTINGS_FILE, load_settings
 
 LOG = getLogger(__name__)
 
 
-def load_env(env_name: EnvName) -> Env:
-    """The environment, not yet read. `load_trading_env` reads the files it needs."""
-    return Env(sys_env.get_env_root_dir(), env_name)
-
-
-def add_launch_dir_to_path() -> str:
-    """Put the directory the command was launched from on `sys.path`.
-
-    A strategy is loaded by module name — `trading.json` says
-    `strategy_module_name: "my_strategy"` and the loader imports it — so the
-    directory holding it has to be importable. A console script does not get the
-    working directory on `sys.path` the way `python -m` does, so without this a
-    user's own strategy is never found and the error is a bare
-    `ModuleNotFoundError` naming their module.
-
-    Called before `env.enter()`, which chdirs into the environment directory:
-    afterwards the launch directory is no longer the working directory and this
-    would record the wrong path.
-    """
-    launch_dir = str(Path.cwd())
-    if launch_dir not in sys.path:
-        sys.path.insert(0, launch_dir)
-    return launch_dir
-
-
-def influx_store(settings: InfluxSettings, work_dir: str):
-    """The InfluxDB a run records to, checked before any data is replayed.
-
-    A server that is down is found out now rather than after a long replay, and
-    the run is refused rather than silently left unrecorded: the environment asked
-    for it.
-    """
-    try:
-        from enoshima.influx import InfluxdbStore
-    except ImportError:
-        LOG.error(
-            f"{SETTINGS_FILE} in {work_dir} asks for InfluxDB, which needs the influx extra: "
-            "pip install 'kamakuraquantlab-enoshima[influx]'"
-        )
-        return None
-
-    store = InfluxdbStore(sys_env.get_influxdb(settings.keys), org=settings.org)
-    if not store.ping():
-        LOG.error(
-            f"InfluxDB is not answering at {store._write_url}. Start it, or remove "
-            f'"influx" from {SETTINGS_FILE} in {work_dir}.'
-        )
-        return None
-    try:
-        store.org
-    except Exception as e:
-        LOG.error(f'{e}. Set "org" under "influx" in {SETTINGS_FILE} in {work_dir}.')
-        return None
-    return store
-
-
-# ------------------------------------------------------------------ subcommands
-
-
 def cmd_run(args) -> int:
-    launch_dir = add_launch_dir_to_path()
-    env = load_env(args.env)
+    env = Env(sys_env.get_env_root_dir(), args.env)
     dt_range = DtRange.from_strings(args.from_dt, args.to_dt)
 
-    # chdir into the environment, log there, and lock it, so two runs cannot
-    # interleave their results. First, so that everything after is in env.log.
     env.enter()
     try:
         settings = load_settings(env.work_dir)
         influx = None
         if settings.influx is not None:
-            influx = influx_store(settings.influx, env.work_dir)
-            if influx is None:
-                return 1
+            influx = InfluxdbStore(
+                settings.influx.token,
+                settings.influx.write_url,
+                settings.influx.read_url,
+                settings.influx.org,
+            )
 
-        LOG.info(f"Loading strategies from {launch_dir}")
         if influx is not None:
             LOG.info(f"Recording to InfluxDB, organisation {influx.org}")
         runner = Runner(
@@ -148,7 +88,7 @@ def cmd_run(args) -> int:
 
 
 def cmd_results(args) -> int:
-    env = load_env(args.env)
+    env = Env(sys_env.get_env_root_dir(), args.env)
     env.visit()
     run_log_dir = Path(env.work_dir) / "run_log"
     if not run_log_dir.is_dir():
@@ -183,34 +123,6 @@ def cmd_results(args) -> int:
     return 0
 
 
-def cmd_clean(args) -> int:
-    env = load_env(args.env)
-    env.visit()
-    out = Path(env.work_dir)
-    # `result/` is what versions that wrote parquet left behind.
-    targets = [out / "result", out / "run_log", out / "best_result"]
-    existing = [t for t in targets if t.exists()]
-    if not existing:
-        LOG.info(f"Nothing to remove under {out}")
-        return 0
-
-    LOG.info("This will permanently delete:")
-    for t in existing:
-        LOG.info(f"  {t}")
-    if not args.yes:
-        # Results are the whole product of a long run. Never removed without a
-        # yes, and never on a schedule.
-        LOG.info("Re-run with --yes to confirm.")
-        return 1
-    for t in existing:
-        shutil.rmtree(t)
-        LOG.info(f"Removed {t}")
-    return 0
-
-
-# ----------------------------------------------------------------------- parser
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="enoshima", description="Backtest a strategy against recorded market data.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -241,11 +153,6 @@ def build_parser() -> argparse.ArgumentParser:
     results.add_argument("--env", required=True, type=EnvName)
     results.add_argument("--limit", type=int, default=25)
     results.set_defaults(func=cmd_results)
-
-    clean = sub.add_parser("clean", help="delete an environment's results and run logs")
-    clean.add_argument("--env", required=True, type=EnvName)
-    clean.add_argument("--yes", action="store_true", help="required; results are not deleted without it")
-    clean.set_defaults(func=cmd_clean)
 
     return parser
 

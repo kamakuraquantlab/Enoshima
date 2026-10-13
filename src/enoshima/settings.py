@@ -2,7 +2,12 @@
 
 ```json
 {
-  "influx": {"keys": "DEFAULT", "org": null},
+  "influx": {
+    "token": "",
+    "write_url": "http://localhost:8086",
+    "read_url": "http://localhost:8086",
+    "org": null
+  },
   "chunk_days": 2,
   "max_concurrency": 16
 }
@@ -11,8 +16,11 @@
 Every key is optional, and a missing file means the defaults.
 
 - `influx` turns on recording to InfluxDB. Absent or `null`, a run records
-  nothing and still has its result. `keys` names the section of
-  `~/.qate/influxdb.keys`; `org` defaults to the only one the token sees.
+  nothing and still has its result. `token`, `write_url` and `read_url` reach
+  the server, by default a local one with no token; `org` defaults to the only
+  one the token sees. The token lives here rather than among the credentials
+  because it is not one an outside service issued: the InfluxDB is ours, set up
+  for these runs, and the env says which one it charts to.
 - `chunk_days` is how many days are loaded at once (memory).
 - `max_concurrency` is how many parameter sets share one pass over the data.
 
@@ -34,7 +42,9 @@ SETTINGS_FILE = "enoshima.json"
 
 @dataclass
 class InfluxSettings:
-    keys: str = "DEFAULT"
+    token: str = ""
+    write_url: str = "http://localhost:8086"
+    read_url: str = "http://localhost:8086"
     org: str | None = None
 
 
@@ -63,7 +73,7 @@ def load_settings(work_dir: str | Path) -> Settings:
     influx = data.pop("influx", None)
     if influx is not None:
         if not isinstance(influx, dict):
-            raise ValueError(f'"influx" in {path} must be an object, e.g. {{"keys": "DEFAULT"}}')
+            raise ValueError(f'"influx" in {path} must be an object, e.g. {{"token": "..."}}')
         _check_keys(influx, InfluxSettings, f'"influx" in {path}')
         influx = InfluxSettings(**influx)
     return Settings(**data, influx=influx)

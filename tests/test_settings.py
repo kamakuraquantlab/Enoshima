@@ -21,18 +21,22 @@ def test_no_file_means_the_defaults_and_no_influx(tmp_path):
 
 
 def test_the_file_sizes_a_run_and_turns_on_influx(tmp_path):
-    write(tmp_path, {"chunk_days": 1, "max_concurrency": 4, "influx": {"keys": "BACKTEST"}})
+    write(tmp_path, {"chunk_days": 1, "max_concurrency": 4, "influx": {"token": "t", "write_url": "http://db:8086"}})
     settings = load_settings(tmp_path)
     assert (settings.chunk_days, settings.max_concurrency) == (1, 4)
-    assert settings.influx == InfluxSettings(keys="BACKTEST", org=None)
+    assert settings.influx == InfluxSettings(
+        token="t", write_url="http://db:8086", read_url="http://localhost:8086", org=None
+    )
 
 
 def test_an_empty_influx_object_is_on_with_defaults(tmp_path):
     write(tmp_path, {"influx": {}})
-    assert load_settings(tmp_path).influx == InfluxSettings()
+    influx = load_settings(tmp_path).influx
+    assert influx == InfluxSettings()
+    assert (influx.token, influx.write_url, influx.read_url) == ("", "http://localhost:8086", "http://localhost:8086")
 
 
-@pytest.mark.parametrize("data", [{"infux": {}}, {"influx": {"key": "DEFAULT"}}, {"influx": True}])
+@pytest.mark.parametrize("data", [{"infux": {}}, {"influx": {"keys": "DEFAULT"}}, {"influx": True}])
 def test_a_misspelling_is_refused_not_ignored(tmp_path, data):
     """A misspelt "influx" must not quietly leave a run unrecorded."""
     write(tmp_path, data)

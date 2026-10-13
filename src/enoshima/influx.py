@@ -11,9 +11,8 @@ wait on a database. A backtest has no such constraint and no reason for the
 intermediate file, so it writes the destination directly.
 
 It is optional because a backtest's *result* does not need it: without it
-a run still evaluates itself and records its figures in the run log. Requires the
-extra, `pip install 'kamakuraquantlab-enoshima[influx]'`, and a
-`~/.qate/influxdb.keys` holding the token and URLs.
+a run still evaluates itself and records its figures in the run log. The token
+and URLs come from the `"influx"` entry itself.
 
 ## Timestamps
 
@@ -186,14 +185,9 @@ def convert_to_point(metric: Metric) -> Point:
 
 
 class InfluxdbStore:
-    """A connection's worth of configuration, and the operations on it.
+    """A connection's worth of configuration, and the operations on it."""
 
-    `config` is the `(token, write_url, read_url)` triple
-    `qate_env.sys_env.get_influxdb` returns.
-    """
-
-    def __init__(self, config: tuple[str, str, str], org: str | None = None):
-        (token, write_url, read_url) = config
+    def __init__(self, token: str, write_url: str, read_url: str, org: str | None = None):
         self._token = token
         self._write_url = write_url
         self._read_url = read_url
@@ -204,7 +198,7 @@ class InfluxdbStore:
         """The organisation buckets are created in.
 
         Given, or else the one the token can see. Asked rather than defaulted:
-        `influxdb.keys` holds no organisation, and a guessed name fails only once
+        the env names no organisation, and a guessed name fails only once
         the first bucket is created.
         """
         if self._org is None:
