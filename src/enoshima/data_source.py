@@ -196,16 +196,20 @@ class SharedBuffer:
 
     The synchronisation is the point. Each `Channel` calls `request_load_more`
     when it reaches the end of the buffer and blocks; when the last one arrives
-    the next chunk is loaded and everyone is woken. So the buffer is only ever
-    replaced when nobody is reading it, and only one copy of a chunk exists no
-    matter how many parameter sets are running.
+    the buffer is replaced and everyone is woken. So the buffer is only ever
+    replaced when nobody is reading it, and every backtest reads the same copy.
 
-    The load runs on one dedicated thread, never on whichever backtest happened
-    to arrive last. On a free-threaded build each thread allocates from its own
-    heap, and memory one thread allocates and another frees is not reliably
-    reused: with a different backtest loading each chunk, a 45-way sweep grew by
-    about a gigabyte per replayed day until it ran out. Loading and releasing
-    every chunk on the same thread keeps that memory in one heap that reuses it.
+    The next chunk is loaded ahead, on one dedicated thread, while the
+    backtests replay the current one: loading is single-threaded and was most
+    of what every other thread spent waiting for. At most two chunks exist at
+    once, the one being read and the one waiting to replace it.
+
+    The thread is dedicated, not whichever backtest happened to arrive last,
+    for memory as well as speed. On a free-threaded build each thread
+    allocates from its own heap, and memory one thread allocates and another
+    frees is not reliably reused: with a different backtest loading each
+    chunk, a 45-way sweep grew by about a gigabyte per replayed day until it
+    ran out. Loading and releasing every chunk on the same thread keeps it flat.
 
     A backtest that raises rather than draining its channel would leave the
     others waiting. `Runner` waits on the futures and surfaces the exception, so
@@ -215,16 +219,20 @@ class SharedBuffer:
 
     def __init__(self, loader: Loader):
         self._loader = loader
+        self._cond = threading.Condition()
+        self._thread: threading.Thread | None = None
+        self._init_state()
+
+    def _init_state(self) -> None:
         self._buffer: list[Event] | None = []
         self._num_refs = 0
         self._num_waiting = 0
-        self._cond = threading.Condition()
-        # Bumped each time a load finishes, so a waiter can tell its own load
-        # from a spurious wake-up.
+        # Bumped each time the buffer is replaced, so a waiter can tell its own
+        # replacement from a spurious wake-up.
         self._generation = 0
-        self._load_requested = False
+        self._swap_requested = False
+        self._stop = False
         self._error: BaseException | None = None
-        self._thread: threading.Thread | None = None
 
     def increment_ref(self) -> None:
         self._num_refs += 1
@@ -237,7 +245,7 @@ class SharedBuffer:
         return len(self._buffer) if self._buffer is not None else 0
 
     def request_load_more(self) -> bool:
-        """Block until the next chunk is loaded. False when there is none."""
+        """Block until the next chunk replaces this one. False when there is none."""
         with self._cond:
             if self._thread is None:
                 self._thread = threading.Thread(target=self._load_loop, name="chunk-loader", daemon=True)
@@ -245,7 +253,7 @@ class SharedBuffer:
             generation = self._generation
             self._num_waiting += 1
             if self._num_waiting == self._num_refs:
-                self._load_requested = True
+                self._swap_requested = True
                 self._cond.notify_all()
             while self._generation == generation:
                 self._cond.wait()
@@ -255,15 +263,17 @@ class SharedBuffer:
 
     def _load_loop(self) -> None:
         while True:
-            with self._cond:
-                while not self._load_requested:
-                    self._cond.wait()
-                self._load_requested = False
+            # Load ahead: this runs while the backtests read the current chunk.
             try:
                 data, error = self._loader.load_more(), None
             except BaseException as e:  # handed to the waiters, who raise it
                 data, error = None, e
             with self._cond:
+                while not self._swap_requested and not self._stop:
+                    self._cond.wait()
+                if self._stop:
+                    return
+                self._swap_requested = False
                 previous, self._buffer = self._buffer, data
                 self._error = error
                 self._num_waiting = 0
@@ -271,12 +281,22 @@ class SharedBuffer:
                 self._cond.notify_all()
             # Released here, on the thread that allocated it.
             del previous
+            if data is None:
+                return
 
     def reset(self) -> None:
-        self._num_refs = 0
-        self._num_waiting = 0
-        self._buffer = []
-        self._error = None
+        """Stop loading ahead, so the loader can be rewound for the next batch.
+
+        A chunk already being loaded is waited for and dropped: it was read
+        from where the previous batch had got to, not from the start.
+        """
+        with self._cond:
+            self._stop = True
+            self._cond.notify_all()
+            thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join()
+        self._init_state()
 
 
 class Channel(EventQueue):
@@ -331,9 +351,13 @@ class DataSource:
         return Channel(self._shared_buffer)
 
     def reset(self) -> None:
-        """Rewind for the next batch of parameter sets."""
-        self._loader.reset()
+        """Rewind for the next batch of parameter sets.
+
+        The buffer first: it stops the thread that loads ahead, which would
+        otherwise still be reading from where the last batch got to.
+        """
         self._shared_buffer.reset()
+        self._loader.reset()
 
     def check_coverage(self, markets: list[tuple[Market, list[str]]]) -> list[str]:
         """Which days the range asks for that are not on disk.

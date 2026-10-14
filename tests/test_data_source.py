@@ -7,6 +7,7 @@ than as a crash.
 """
 
 import threading
+import time
 
 import pandas as pd
 import pyarrow as pa
@@ -253,6 +254,56 @@ def test_a_failed_load_reaches_every_reader_instead_of_hanging_them():
     assert not any(t.is_alive() for t in readers), "a failed load left readers waiting"
     assert len(errors) == 3
     assert all(isinstance(e.__cause__, OSError) for e in errors)
+
+
+def test_the_next_chunk_is_loaded_while_the_current_one_is_read():
+    """Loading ahead is the point: readers should not wait for a load they could have overlapped."""
+    loader = FakeLoader([[ev(1.0)], [ev(2.0)], [ev(3.0)]])
+    buffer = SharedBuffer(loader)
+    buffer.increment_ref()
+
+    assert buffer.request_load_more()          # chunk 1 is now being read
+    deadline = time.monotonic() + 5
+    while loader.calls < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert loader.calls == 2, "chunk 2 was not loaded ahead"
+    assert buffer.get(0)[1].ts == 1.0, "loading ahead must not replace the chunk being read"
+
+    assert buffer.request_load_more() and buffer.get(0)[1].ts == 2.0
+    assert buffer.request_load_more() and buffer.get(0)[1].ts == 3.0
+    assert buffer.request_load_more() is False
+
+
+class RewindableLoader(FakeLoader):
+    """A loader whose `reset` rewinds it, as `Loader`'s does."""
+
+    def __init__(self, chunks):
+        super().__init__(chunks)
+        self._all = list(chunks)
+
+    def reset(self):
+        self.chunks = list(self._all)
+
+
+def test_a_reset_replays_from_the_first_chunk():
+    """The runner resets between batches; a chunk loaded ahead for the old batch must not leak into the next."""
+    loader = RewindableLoader([[ev(1.0)], [ev(2.0)], [ev(3.0)]])
+    buffer = SharedBuffer(loader)
+
+    for _ in range(2):
+        buffer.reset()
+        loader.reset()
+        buffer.increment_ref()
+        assert buffer.request_load_more() and buffer.get(0)[1].ts == 1.0
+        # Leave the batch after one chunk, with chunk 2 being loaded ahead.
+
+    buffer.reset()
+    loader.reset()
+    buffer.increment_ref()
+    seen = []
+    while buffer.request_load_more():
+        seen.append(buffer.get(0)[1].ts)
+    assert seen == [1.0, 2.0, 3.0]
 
 
 def test_shared_buffer_reports_exhaustion():

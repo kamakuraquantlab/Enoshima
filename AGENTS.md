@@ -115,7 +115,9 @@ but it is easy to break from here:
   allocates from its own heap, and a chunk allocated on one thread and freed on
   another was not reused: a 45-way sweep grew by about 1 GB per replayed day
   until it ran out of memory, and a 9-way one grew too. Loading and releasing on
-  the same thread kept it flat, with identical results.
+  the same thread kept it flat, with identical results. That thread also loads
+  the next chunk while the current one is replayed, so two chunks can be in
+  memory at once; `SharedBuffer.reset` stops it before the loader is rewound.
 - **Metric objects pack enum *values*, not names.** `ExchangeName`, `Symbol`,
   `Measurement`, `Tag` and `Field` are append-only in `qate`: reordering a member
   silently rewrites the meaning of every metric already recorded.

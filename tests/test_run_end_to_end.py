@@ -275,6 +275,21 @@ def test_optimize_grid_runs_every_combination_and_picks_a_best(run_env):
     assert len(best_files) == 1
 
 
+def test_a_sweep_in_several_batches_gets_the_same_results_as_one(run_env, tmp_path):
+    """Between batches the data source is rewound while a chunk may be loading ahead."""
+    env, dt_range = run_env
+
+    Runner(env, dt_range, optimize="grid", chunk_days=1, max_concurrency=6).run()
+    one_batch = {p.name: json.loads(p.read_text())["result"] for p in (Path(env.work_dir) / "run_log").glob("*.json")}
+
+    shutil.rmtree(Path(env.work_dir) / "run_log")
+    Runner(env, dt_range, optimize="grid", chunk_days=1, max_concurrency=4).run()
+    two_batches = {p.name: json.loads(p.read_text())["result"] for p in (Path(env.work_dir) / "run_log").glob("*.json")}
+
+    assert len(one_batch) == 6
+    assert two_batches == one_batch
+
+
 def test_a_resumed_sweep_ranks_the_combinations_it_skipped(run_env):
     """The best of a resumed sweep must include results it did not just compute."""
     env, dt_range = run_env

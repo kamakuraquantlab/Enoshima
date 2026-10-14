@@ -264,7 +264,8 @@ objects, so the range is loaded a couple of days at a time into **one** buffer
 that every parameter set in a batch reads from. A sweep therefore costs
 `ceil(combos / --max-concurrency)` passes over the data, not one pass per
 combination — five parameter sets over a day of real books take about as long as
-one.
+one. The next chunk is loaded while the current one is replayed, so up to two
+chunks are in memory at once.
 
 If a run is killed by the OOM reaper, lower `chunk_days` before anything else.
 
