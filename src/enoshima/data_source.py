@@ -195,14 +195,22 @@ class SharedBuffer:
     """One chunk of events, shared by every backtest in a batch.
 
     The synchronisation is the point. Each `Channel` calls `request_load_more`
-    when it reaches the end of the buffer and blocks; the last one to arrive does
-    the load and wakes the rest. So the buffer is only ever replaced when nobody
-    is reading it, and only one copy of a chunk exists no matter how many
-    parameter sets are running.
+    when it reaches the end of the buffer and blocks; when the last one arrives
+    the next chunk is loaded and everyone is woken. So the buffer is only ever
+    replaced when nobody is reading it, and only one copy of a chunk exists no
+    matter how many parameter sets are running.
+
+    The load runs on one dedicated thread, never on whichever backtest happened
+    to arrive last. On a free-threaded build each thread allocates from its own
+    heap, and memory one thread allocates and another frees is not reliably
+    reused: with a different backtest loading each chunk, a 45-way sweep grew by
+    about a gigabyte per replayed day until it ran out. Loading and releasing
+    every chunk on the same thread keeps that memory in one heap that reuses it.
 
     A backtest that raises rather than draining its channel would leave the
     others waiting. `Runner` waits on the futures and surfaces the exception, so
-    the run fails rather than hanging silently.
+    the run fails rather than hanging silently. A load that raises is handed to
+    every waiting channel, for the same reason.
     """
 
     def __init__(self, loader: Loader):
@@ -211,6 +219,12 @@ class SharedBuffer:
         self._num_refs = 0
         self._num_waiting = 0
         self._cond = threading.Condition()
+        # Bumped each time a load finishes, so a waiter can tell its own load
+        # from a spurious wake-up.
+        self._generation = 0
+        self._load_requested = False
+        self._error: BaseException | None = None
+        self._thread: threading.Thread | None = None
 
     def increment_ref(self) -> None:
         self._num_refs += 1
@@ -225,19 +239,44 @@ class SharedBuffer:
     def request_load_more(self) -> bool:
         """Block until the next chunk is loaded. False when there is none."""
         with self._cond:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._load_loop, name="chunk-loader", daemon=True)
+                self._thread.start()
+            generation = self._generation
             self._num_waiting += 1
             if self._num_waiting == self._num_refs:
-                self._buffer = self._loader.load_more()
-                self._num_waiting = 0
+                self._load_requested = True
                 self._cond.notify_all()
-            else:
+            while self._generation == generation:
                 self._cond.wait()
+            if self._error is not None:
+                raise RuntimeError("loading the next chunk failed") from self._error
         return self._buffer is not None
+
+    def _load_loop(self) -> None:
+        while True:
+            with self._cond:
+                while not self._load_requested:
+                    self._cond.wait()
+                self._load_requested = False
+            try:
+                data, error = self._loader.load_more(), None
+            except BaseException as e:  # handed to the waiters, who raise it
+                data, error = None, e
+            with self._cond:
+                previous, self._buffer = self._buffer, data
+                self._error = error
+                self._num_waiting = 0
+                self._generation += 1
+                self._cond.notify_all()
+            # Released here, on the thread that allocated it.
+            del previous
 
     def reset(self) -> None:
         self._num_refs = 0
         self._num_waiting = 0
         self._buffer = []
+        self._error = None
 
 
 class Channel(EventQueue):

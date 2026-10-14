@@ -202,6 +202,59 @@ def test_shared_buffer_loads_once_per_chunk_for_many_readers():
     assert sorted(drained) == [1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]
 
 
+def test_shared_buffer_loads_every_chunk_on_one_thread():
+    """Not on whichever reader arrived last: see `SharedBuffer` for the memory cost."""
+    loader = FakeLoader([[ev(1.0)], [ev(2.0)], [ev(3.0)]])
+    load_threads = set()
+    load_more = loader.load_more
+    loader.load_more = lambda: (load_threads.add(threading.get_ident()), load_more())[1]
+
+    buffer = SharedBuffer(loader)
+    for _ in range(4):
+        buffer.increment_ref()
+
+    def drain():
+        while buffer.request_load_more():
+            pass
+
+    readers = [threading.Thread(target=drain) for _ in range(4)]
+    for t in readers:
+        t.start()
+    for t in readers:
+        t.join(timeout=10)
+    assert not any(t.is_alive() for t in readers), "a reader never finished; the buffer deadlocked"
+    assert loader.calls == 4
+    assert len(load_threads) == 1
+    assert not load_threads & {t.ident for t in readers}
+
+
+def test_a_failed_load_reaches_every_reader_instead_of_hanging_them():
+    class Broken(FakeLoader):
+        def load_more(self):
+            raise OSError("disk went away")
+
+    buffer = SharedBuffer(Broken([]))
+    for _ in range(3):
+        buffer.increment_ref()
+
+    errors = []
+
+    def drain():
+        try:
+            buffer.request_load_more()
+        except RuntimeError as e:
+            errors.append(e)
+
+    readers = [threading.Thread(target=drain) for _ in range(3)]
+    for t in readers:
+        t.start()
+    for t in readers:
+        t.join(timeout=10)
+    assert not any(t.is_alive() for t in readers), "a failed load left readers waiting"
+    assert len(errors) == 3
+    assert all(isinstance(e.__cause__, OSError) for e in errors)
+
+
 def test_shared_buffer_reports_exhaustion():
     loader = FakeLoader([])
     buffer = SharedBuffer(loader)

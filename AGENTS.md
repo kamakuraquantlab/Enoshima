@@ -110,6 +110,12 @@ but it is easy to break from here:
   backtest thread that dies without draining its channel strands the rest.
   `Runner._run_batch` collects each future's exception for exactly this reason;
   do not replace it with a bare `wait()`.
+- **Every chunk is loaded on one dedicated thread**, not by whichever backtest
+  reaches the barrier last. On free-threaded Python (`run.sh`) each thread
+  allocates from its own heap, and a chunk allocated on one thread and freed on
+  another was not reused: a 45-way sweep grew by about 1 GB per replayed day
+  until it ran out of memory, and a 9-way one grew too. Loading and releasing on
+  the same thread kept it flat, with identical results.
 - **Metric objects pack enum *values*, not names.** `ExchangeName`, `Symbol`,
   `Measurement`, `Tag` and `Field` are append-only in `qate`: reordering a member
   silently rewrites the meaning of every metric already recorded.
