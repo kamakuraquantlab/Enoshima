@@ -272,6 +272,25 @@ Runs are also resumable. A run log's id is a hash of the environment, strategy,
 parameters and date range, so a sweep that dies part way through resumes where it
 stopped, and the combinations it skips are still ranked when it picks a best.
 
+## Running on free-threaded Python
+
+A batch's parameter sets are threads. On an ordinary build they take turns on
+one core; on a free-threaded build (3.14t) they run at once, and a sweep is
+bounded by cores rather than by the GIL. `run.sh` runs `enoshima` that way and
+refuses to start on anything else:
+
+```bash
+pyenv virtualenv 3.14.0t enoshima-314t
+pip install --only-binary=:all: 'pandas>=3.0' numpy pyarrow dacite influxdb-client httpx matplotlib
+pip install --no-deps -e . -e ../qate -e ../qate-env -e ../Hase -e ../Komachi -e <your strategy>
+./run.sh run --env MY_ENV --from 2026-06-01 --to 2026-06-30 --optimize grid
+```
+
+`pandas>=3.0` is the part that matters: earlier versions re-enable the GIL on
+import, and `run.sh` checks for exactly that. On a free-threaded build, set
+`max_concurrency` to the size of the grid if memory allows: one pass loads the
+data once, and the threads no longer cost each other a core.
+
 ## Development
 
 ```bash
