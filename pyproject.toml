@@ -39,7 +39,7 @@ classifiers = [
 # influxdb-client is what an env's "influx" entry records through. It is a
 # database client, not a venue client: it cannot reach an exchange.
 dependencies = [
-    "kamakuraquantlab-qate>=0.1",
+    "kamakuraquantlab-qate>=0.3",
     "kamakuraquantlab-qate-env>=0.1",
     "kamakuraquantlab-hase>=0.7",
     "numpy>=2.0",
