@@ -58,7 +58,9 @@ class BacktestRuntime(EventQueue):
     }
 
     def __init__(self, strategy: Strategy, exchanges: list[ExchangeName], channel: EventQueue):
-        self.trader = Trader(strategy, channel)
+        # No params.json reload: a run's parameters are the set it was built
+        # with, and the env's file would replace every sweep's set with its own.
+        self.trader = Trader(strategy, channel, reload_params=False)
         self.reporters: list[Reporter] = []
 
         for exchange_name in exchanges:

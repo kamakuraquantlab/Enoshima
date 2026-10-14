@@ -132,6 +132,12 @@ but it is easy to break from here:
   grid's defaults -- which meant an environment had two answers and nothing kept
   them in step; the backtest envs left `params.json` empty and the live envs left
   the grid alone. An empty `params.json` still falls back to the grid's defaults.
+- **A backtest never reloads `params.json`.** A live `Trader` re-reads it every
+  ten wall-clock seconds and hands it to the strategy; `BacktestRuntime` builds
+  its `Trader` with `reload_params=False`. With the reload on, every combination
+  of a sweep is replaced by the file's set partway through, and the sweep ranks
+  one strategy against itself. It went unnoticed only because `update_params`
+  refuses a dict whose keys differ, and the env's file and grid happened to.
 - **The command takes no locations.** Data is komachi's: hase asks
   `komachi.data_root()`, which reads `ROOT_PATH` from komachi's settings file and
   nothing else -- no flag, no environment variable, no override passed down from

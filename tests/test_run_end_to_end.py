@@ -15,6 +15,7 @@ reported range began, so every one of them was warmup and nothing was recorded.
 import json
 import math
 import shutil
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -306,6 +307,37 @@ def test_a_single_run_uses_params_json_not_the_grid_defaults(run_env):
     runner.run()
     log = json.loads(next((Path(env.work_dir) / "run_log").glob("*.json")).read_text())
     assert log["params"] == {"fast_period": 30, "slow_period": 90}
+
+
+
+def test_a_sweep_is_not_overwritten_by_params_json(run_env, monkeypatch):
+    """Each combination runs with its own parameters, whatever params.json says.
+
+    A live trader re-reads params.json every ten wall-clock seconds and hands it
+    to the strategy. In a sweep that would replace every combination's set with
+    the file's, so the sweep would rank one strategy against itself. It went
+    unnoticed only while params.json and the grid happened to disagree on their
+    keys, which `Strategy.update_params` refuses. Here they agree, and the clock
+    is an hour ahead so the reload would be due at once.
+    """
+    from qate.trading.strategy import Strategy
+    from qate.trading.trader import Trader
+
+    env, dt_range = run_env
+    (Path(env.work_dir) / "params.json").write_text(json.dumps({"fast_period": 30, "slow_period": 90}))
+    # The reload reads params.json from the working directory, which a real
+    # run's `env.enter()` makes the env's.
+    monkeypatch.chdir(env.work_dir)
+
+    future = time.time() + 3600
+    monkeypatch.setattr(Trader, "tick_ts", property(lambda self: future))
+    offered = []
+    monkeypatch.setattr(Strategy, "update_params", lambda self, new: offered.append(new) or False)
+
+    Runner(env, dt_range, optimize="grid", chunk_days=1).run()
+
+    assert len(list((Path(env.work_dir) / "run_log").glob("*.json"))) == 6
+    assert offered == [], "a backtest handed params.json to its strategy"
 
 
 def test_an_empty_params_json_falls_back_to_the_grid_defaults(run_env):
