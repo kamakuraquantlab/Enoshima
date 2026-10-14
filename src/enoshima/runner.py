@@ -55,6 +55,7 @@ from qate_env.trading_env import (
 from . import param_id
 from .backtest import Backtest
 from .data_source import DEFAULT_CHUNK_DAYS, DataSource, market_data_event_types
+from .influx import TMP_RETENTION_SECONDS, InfluxdbStore, InfluxReporter, bucket_name
 from .result import ResultReporter
 from .run_log import BacktestLog
 
@@ -89,7 +90,7 @@ class Runner:
         chunk_days: int = DEFAULT_CHUNK_DAYS,
         max_concurrency: int = MAX_CONCURRENCY,
         force: bool = False,
-        influx=None,
+        influx: InfluxdbStore | None = None,
         temporary: bool = False,
     ):
         """`influx` is an `influx.InfluxdbStore`, or None to record no metric stream.
@@ -243,7 +244,6 @@ class Runner:
     def _recording_reporters(self, run_log: BacktestLog, param_set_id: str) -> list:
         if self.influx is None:
             return []
-        from .influx import TMP_RETENTION_SECONDS, InfluxReporter, bucket_name
 
         bucket = bucket_name(param_set_id)
         run_log.influx_bucket = bucket
