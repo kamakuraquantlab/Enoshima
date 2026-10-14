@@ -55,7 +55,7 @@ from qate_env.trading_env import (
 from . import param_id
 from .backtest import Backtest
 from .data_source import DEFAULT_CHUNK_DAYS, DataSource, market_data_event_types
-from .influx import TMP_RETENTION_SECONDS, InfluxdbStore, InfluxReporter, bucket_name
+from .influx import InfluxdbStore, InfluxReporter, bucket_name
 from .result import ResultReporter
 from .run_log import BacktestLog
 
@@ -96,7 +96,7 @@ class Runner:
         """`influx` is an `influx.InfluxdbStore`, or None to record no metric stream.
 
         `temporary` gives every run of this batch a bucket of its own, named with the
-        batch's timestamp, and a retention; see `param_id`. It always runs: a fresh
+        batch's timestamp; see `param_id`. It always runs: a fresh
         bucket is the point, so an existing result is no reason to skip.
         """
         self.env = env
@@ -109,6 +109,9 @@ class Runner:
         self.influx = influx
         self.temporary = temporary
         self.batch_id = self._next_batch_id(self.output_root)
+        # The parameter sets whose backtest raised. A run with any is a failed
+        # run, whatever else it computed: `enoshima run` exits non-zero.
+        self.failed: list[dict] = []
 
         self.definition = load_trading_env(env)
         FEATURES.load_from_dict(self.definition.features)
@@ -187,7 +190,7 @@ class Runner:
                 continue
 
             LOG.info(f"Batch {batch_num}/{n_batches}: running {len(backtests)} backtest(s)")
-            self._run_batch(backtests)
+            self._run_batch(backtests, data_source)
             LOG.info(f"Batch {batch_num}/{n_batches}: done")
 
     def _warn_about_gaps(self, data_source: DataSource, markets) -> None:
@@ -247,17 +250,18 @@ class Runner:
 
         bucket = bucket_name(param_set_id)
         run_log.influx_bucket = bucket
-        retention = TMP_RETENTION_SECONDS if self.temporary else None
-        writer = self.influx.create_writer(bucket, retention_seconds=retention, param_set_id=param_set_id)
+        writer = self.influx.create_writer(bucket, param_set_id=param_set_id)
         return [InfluxReporter(writer, self.dt_range)]
 
-    def _run_batch(self, backtests: list[Backtest]) -> None:
+    def _run_batch(self, backtests: list[Backtest], data_source: DataSource) -> None:
         """Run a batch concurrently, and do not let one failure hang the rest.
 
-        Every backtest shares one buffer and the last to finish a chunk loads the
-        next, so a thread that dies without draining its channel would leave the
-        others waiting forever. Collecting each future's exception is what turns
-        that deadlock into a reported failure.
+        Every backtest waits for the others at the end of each chunk. One that
+        fails releases its place (`Channel.close`), so the rest finish without
+        it; its exception is collected here and the run is marked failed.
+        Interrupted, the data source is aborted first: a backtest waiting at
+        the barrier is not reading its queue, so stopping its trader alone
+        would leave it -- and the process -- waiting.
         """
         with ThreadPoolExecutor(max_workers=len(backtests), thread_name_prefix="backtest-") as executor:
             futures = {executor.submit(b.run): b for b in backtests}
@@ -268,11 +272,13 @@ class Runner:
                         future.result()
                     except Exception:
                         LOG.exception(f"Backtest failed: params={backtest.run_log.params}")
+                        self.failed.append(backtest.run_log.params)
                         continue
                     self.run_logger.save(backtest.run_log)
                     self._log_result(backtest.run_log)
             except KeyboardInterrupt:
                 LOG.warning("Interrupted; stopping backtests")
+                data_source.abort()
                 for backtest in backtests:
                     backtest.stop()
                 raise

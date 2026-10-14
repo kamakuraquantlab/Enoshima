@@ -33,6 +33,7 @@ environment directory is how a run is watched.
 
 import argparse
 import json
+import logging
 import sys
 from logging import getLogger
 from pathlib import Path
@@ -47,6 +48,16 @@ from enoshima.runner import Runner
 from enoshima.settings import SETTINGS_FILE, load_settings
 
 LOG = getLogger(__name__)
+
+
+def quiet_strategy_logs(strategy_module_name: str, level: str) -> None:
+    """Set the strategy's loggers to `level` for this run. Levels only: no handler is added.
+
+    The strategy's package, and `qate.trading`, where `Strategy` logs every fill.
+    Enoshima's own loggers, and qate's event loop, keep theirs.
+    """
+    for name in (strategy_module_name.split(".")[0], "qate.trading"):
+        logging.getLogger(name).setLevel(level)
 
 
 def cmd_run(args) -> int:
@@ -77,9 +88,16 @@ def cmd_run(args) -> int:
             influx=influx,
             temporary=args.temporary,
         )
+        quiet_strategy_logs(runner.profile.strategy_module_name, settings.strategy_log_level)
         runner.run()
         if args.optimize:
             runner.post_analysis()
+        if runner.failed:
+            LOG.error(f"{len(runner.failed)} backtest(s) failed; their results were not saved")
+            return 1
+    except KeyboardInterrupt:
+        LOG.warning("Interrupted")
+        return 130
     except Exception:
         LOG.exception("Run failed")
         return 1
@@ -151,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--temporary",
         action="store_true",
-        help="record to a bucket of its own, suffixed _tmp_<timestamp> and kept 30 days",
+        help="record to a bucket of its own, suffixed _tmp_<timestamp>",
     )
     run.set_defaults(func=cmd_run)
 

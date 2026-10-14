@@ -33,7 +33,6 @@ buckets of the combinations already run; reordering the grid does.
 
 A temporary run appends `_tmp_<timestamp>`, so it writes a bucket of its own
 rather than into the one a parameter set's permanent results accumulate in.
-`influx.delete_tmp_buckets` reads the age back out of that suffix.
 """
 
 from decimal import Decimal

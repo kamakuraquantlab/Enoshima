@@ -128,9 +128,8 @@ def test_a_run_trades_and_writes_its_results(run_env):
 class MemoryWriter:
     """An `InfluxdbWriter` that keeps its points."""
 
-    def __init__(self, bucket: str, retention_seconds: int | None = None):
+    def __init__(self, bucket: str):
         self.bucket = bucket
-        self.retention_seconds = retention_seconds
         self.points = []
         self.closed = False
 
@@ -148,9 +147,9 @@ class MemoryStore:
         self.writers: list[MemoryWriter] = []
 
     def create_writer(
-        self, bucket_name: str, retention_seconds: int | None = None, param_set_id: str | None = None, **_
+        self, bucket_name: str, param_set_id: str | None = None, **_
     ) -> MemoryWriter:
-        writer = MemoryWriter(bucket_name, retention_seconds)
+        writer = MemoryWriter(bucket_name)
         self.writers.append(writer)
         return writer
 
@@ -234,7 +233,6 @@ def test_a_temporary_run_gets_a_bucket_of_its_own_and_keeps_the_permanent_log(ru
 
     [writer] = store.writers
     assert writer.bucket == f"backtest_{ENV_NAME}_20_120_tmp_{runner.batch_id}"
-    assert writer.retention_seconds is not None
 
     logs = [json.loads(p.read_text()) for p in (Path(env.work_dir) / "run_log").glob("*.json")]
     assert sorted(log["is_temporary_run"] for log in logs) == [False, True]
@@ -288,6 +286,39 @@ def test_a_sweep_in_several_batches_gets_the_same_results_as_one(run_env, tmp_pa
 
     assert len(one_batch) == 6
     assert two_batches == one_batch
+
+
+def test_a_backtest_that_raises_fails_without_stopping_the_others(run_env, monkeypatch):
+    """One parameter set raises partway through the replay.
+
+    qate's event loop catches the exception and carries on, so this used to
+    produce a normal-looking result. Now that backtest stops at the first one,
+    saves no run log, and marks the run failed -- and, having stopped early, it
+    must release the others rather than leave them waiting at the barrier.
+    """
+    from example.strategy.v1 import Variant
+
+    env, dt_range = run_env
+    calls = {"n": 0}
+    original = Variant.handle_order_book
+
+    def flaky(self, order_book):
+        if self.fast_period == 40:
+            calls["n"] += 1
+            if calls["n"] > 100:
+                raise ValueError("the strategy broke")
+        return original(self, order_book)
+
+    monkeypatch.setattr(Variant, "handle_order_book", flaky)
+
+    runner = Runner(env, dt_range, optimize="grid", chunk_days=1)
+    runner.run()   # must return: a hang here is the deadlock
+
+    logs = [json.loads(p.read_text()) for p in (Path(env.work_dir) / "run_log").glob("*.json")]
+    assert len(logs) == 4, "the two fast_period=40 sets failed; the other four completed"
+    assert all(log["params"]["fast_period"] != 40 for log in logs)
+    assert sorted(p["slow_period"] for p in runner.failed) == [120, 240]
+    assert all(p["fast_period"] == 40 for p in runner.failed)
 
 
 def test_a_resumed_sweep_ranks_the_combinations_it_skipped(run_env):
@@ -407,3 +438,20 @@ def test_a_range_with_no_data_is_reported_not_silently_empty(run_env, caplog):
         runner.run()
 
     assert any("not on disk" in r.message for r in caplog.records)
+
+
+def test_each_backtest_gets_its_own_skip_set():
+    """One set read by every thread per event made a free-threaded sweep 2.4x slower."""
+    from qate.core.model import ExchangeName
+    from qate.trading.replay import ReplayQueue
+    from qate.trading.strategy import Strategy
+
+    from enoshima.backtest import BacktestRuntime
+    from enoshima.influx import UNRECORDED_MEASUREMENTS
+
+    a, b = Strategy(), Strategy()
+    BacktestRuntime(a, [ExchangeName.GMO], ReplayQueue([]))
+    BacktestRuntime(b, [ExchangeName.GMO], ReplayQueue([]))
+    assert a.skip_measurements == b.skip_measurements == UNRECORDED_MEASUREMENTS
+    assert a.skip_measurements is not b.skip_measurements
+    assert a.skip_measurements is not UNRECORDED_MEASUREMENTS

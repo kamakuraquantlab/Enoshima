@@ -98,7 +98,10 @@ but it is easy to break from here:
 - **Enoshima does not configure logging.** Every command enters its env, and
   `qate_env.Env` attaches the `env.log` handler. Each module takes
   `LOG = getLogger(__name__)` and logs; nothing calls `print`, `basicConfig` or
-  adds a handler, and nothing goes to stdout.
+  adds a handler, and nothing goes to stdout. The one thing it sets is a level:
+  `enoshima run` sets the strategy's package and `qate.trading` to
+  `enoshima.json`'s `strategy_log_level`, `WARNING` by default, because a live
+  run's INFO line per fill became 600 MB of `env.log` in one sweep.
 - **There is no msgpack log.** That is the live system's intermediate format --
   written in real time, uploaded, then loaded into InfluxDB -- because a trading
   process must never wait on a database. A backtest can, so it writes InfluxDB
@@ -118,6 +121,13 @@ but it is easy to break from here:
   the same thread kept it flat, with identical results. That thread also loads
   the next chunk while the current one is replayed, so two chunks can be in
   memory at once; `SharedBuffer.reset` stops it before the loader is rewound.
+- **No Python object may be touched by every backtest thread on every event.**
+  On free-threaded Python, threads reading one shared object contend on its
+  reference count; a single `frozenset` shared by 45 strategies and checked per
+  event made a sweep 2.4x slower. Give each backtest its own copy (and note that
+  `frozenset(a_frozenset)` is not a copy). Market data is the exception the
+  design accepts: the chunk is shared, and a recorded book (`hase`'s
+  `RecordedOrderBook`) caches its market price per size for every reader.
 - **Metric objects pack enum *values*, not names.** `ExchangeName`, `Symbol`,
   `Measurement`, `Tag` and `Field` are append-only in `qate`: reordering a member
   silently rewrites the meaning of every metric already recorded.

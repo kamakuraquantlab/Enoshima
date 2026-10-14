@@ -22,9 +22,12 @@ It differs from `Runtime` where a replay differs from a live run:
 - **No thread and no queue of its own.** It is the `EventQueue` the trader and
   gateways publish into, and it dispatches inside the caller's call, so a replay
   stays deterministic.
-- **A reporter that raises fails the run.** A live runtime logs and carries on,
-  because a run must not depend on anyone being told. A backtest's reporters *are*
-  its output, and a result missing half its records is not a result.
+- **Any exception fails the run, and stops it.** A live runtime logs and carries
+  on, because a run must not depend on anyone being told. A backtest's reporters
+  *are* its output, and a result computed past an exception is not a result. qate's
+  event loop catches what a handler raises -- the strategy's or a reporter's -- and
+  publishes it as `EXCEPTION`; the runtime stops its trader at the first one, and
+  `Backtest.run` raises, so the run is reported failed and its log is not saved.
 
 A reporter may publish back into the runtime -- `Reporter` is a `StatusFeed` --
 and what it publishes is dispatched to every reporter. That is how the
@@ -42,10 +45,15 @@ from qate.trading.reporter import Reporter
 from qate.trading.strategy import Strategy
 from qate.trading.trader import Trader
 
+from .influx import UNRECORDED_MEASUREMENTS
 from .result import ResultReporter
 from .run_log import BacktestLog
 
 LOG = getLogger(__name__)
+
+
+class BacktestFailed(Exception):
+    """A replay raised. Its numbers are not a result."""
 
 
 class BacktestRuntime(EventQueue):
@@ -58,6 +66,13 @@ class BacktestRuntime(EventQueue):
     }
 
     def __init__(self, strategy: Strategy, exchanges: list[ExchangeName], channel: EventQueue):
+        self.channel = channel
+        # Nothing records these (see `influx.UNRECORDED_MEASUREMENTS`); a
+        # strategy that asks `wants_metric` need not build them. A copy per
+        # strategy, built from a tuple because `frozenset(a_frozenset)` hands
+        # back the same object: one set read by every thread of a sweep, for
+        # every event, made the whole sweep 2.4x slower on free-threaded Python.
+        strategy.skip_measurements = frozenset(tuple(UNRECORDED_MEASUREMENTS))
         # No params.json reload: a run's parameters are the set it was built
         # with, and the env's file would replace every sweep's set with its own.
         self.trader = Trader(strategy, channel, reload_params=False)
@@ -84,15 +99,24 @@ class BacktestRuntime(EventQueue):
             return
         for reporter in self.reporters:
             getattr(reporter, call)(event)
+        if event_type == EventType.EXCEPTION:
+            # Replaying on would only compute a result nobody should use.
+            self.trader.stop()
 
     def run(self) -> None:
-        for reporter in self.reporters:
-            reporter.start()
         try:
-            self.trader.run()
-        finally:
             for reporter in self.reporters:
-                reporter.stop()
+                reporter.start()
+            try:
+                self.trader.run()
+            finally:
+                for reporter in self.reporters:
+                    reporter.stop()
+        finally:
+            # However this ends, the other backtests must stop waiting for this one.
+            close = getattr(self.channel, "close", None)
+            if close is not None:
+                close()
 
     def stop(self) -> None:
         self.trader.stop()
@@ -119,6 +143,11 @@ class Backtest:
 
     def run(self) -> None:
         self.runtime.run()
+        if self.result.exceptions:
+            first = self.result.exceptions[0]
+            raise BacktestFailed(
+                f"{len(self.result.exceptions)} exception(s) during the replay; the first: {first!r}"
+            ) from first
         self.run_log.set_result(self.result.get_result())
 
     def stop(self) -> None:

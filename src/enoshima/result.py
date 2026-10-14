@@ -51,6 +51,11 @@ class ResultReporter(Reporter):
         super().__init__()
         self.dt_range = dt_range
         self.evals = [Evaluation(), Evaluation(SLIPPAGE_05), Evaluation(SLIPPAGE_10)]
+        # What the event loop caught. Any at all and there is no result.
+        self.exceptions: list[BaseException] = []
+
+    def report_exception(self, error: BaseException) -> None:
+        self.exceptions.append(error)
 
     def report_order(self, order_response: OrderResponse) -> None:
         # Evaluations see every fill, warmup included, so the reported slippage

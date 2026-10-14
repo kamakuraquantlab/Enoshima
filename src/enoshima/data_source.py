@@ -211,10 +211,12 @@ class SharedBuffer:
     chunk, a 45-way sweep grew by about a gigabyte per replayed day until it
     ran out. Loading and releasing every chunk on the same thread keeps it flat.
 
-    A backtest that raises rather than draining its channel would leave the
-    others waiting. `Runner` waits on the futures and surfaces the exception, so
-    the run fails rather than hanging silently. A load that raises is handed to
-    every waiting channel, for the same reason.
+    A backtest that stops early -- it failed, or was stopped -- would leave
+    the others waiting for it at the barrier forever, so its channel
+    `release`s its place and the rest carry on without it. A load that raises
+    is handed to every waiting channel, and `abort` wakes them all with no
+    more data, for the same reason: nothing here may wait on a thread that is
+    not coming.
     """
 
     def __init__(self, loader: Loader):
@@ -232,6 +234,7 @@ class SharedBuffer:
         self._generation = 0
         self._swap_requested = False
         self._stop = False
+        self._aborted = False
         self._error: BaseException | None = None
 
     def increment_ref(self) -> None:
@@ -247,19 +250,40 @@ class SharedBuffer:
     def request_load_more(self) -> bool:
         """Block until the next chunk replaces this one. False when there is none."""
         with self._cond:
+            if self._aborted:
+                return False
             if self._thread is None:
                 self._thread = threading.Thread(target=self._load_loop, name="chunk-loader", daemon=True)
                 self._thread.start()
             generation = self._generation
             self._num_waiting += 1
-            if self._num_waiting == self._num_refs:
-                self._swap_requested = True
-                self._cond.notify_all()
-            while self._generation == generation:
+            self._swap_if_all_arrived()
+            while self._generation == generation and not self._aborted:
                 self._cond.wait()
+            if self._aborted:
+                return False
             if self._error is not None:
                 raise RuntimeError("loading the next chunk failed") from self._error
         return self._buffer is not None
+
+    def release(self) -> None:
+        """A channel leaves for good. The others no longer wait for it."""
+        with self._cond:
+            self._num_refs -= 1
+            self._swap_if_all_arrived()
+
+    def abort(self) -> None:
+        """Wake every waiting channel with no more data, and load nothing more."""
+        with self._cond:
+            self._aborted = True
+            self._stop = True
+            self._cond.notify_all()
+
+    def _swap_if_all_arrived(self) -> None:
+        # Called with the lock held.
+        if self._num_refs > 0 and self._num_waiting == self._num_refs:
+            self._swap_requested = True
+            self._cond.notify_all()
 
     def _load_loop(self) -> None:
         while True:
@@ -312,6 +336,7 @@ class Channel(EventQueue):
         self._trading_events: list[Event] = []
         self._pos = 0
         self._done = False
+        self._closed = False
 
     def put(self, event: Event) -> None:
         self._trading_events.append(event)
@@ -324,7 +349,9 @@ class Channel(EventQueue):
     def _next_market_event(self) -> Event | None:
         if self._done:
             return None
-        if self._pos == self._shared_buffer.len:
+        # A loop, not an if: a chunk can be empty -- a range of days with no
+        # data on disk -- and reading index 0 of it raised in every backtest.
+        while self._pos >= self._shared_buffer.len:
             if not self._shared_buffer.request_load_more():
                 self._done = True
                 return None
@@ -332,6 +359,14 @@ class Channel(EventQueue):
         item = self._shared_buffer.get(self._pos)
         self._pos += 1
         return item
+
+    def close(self) -> None:
+        """This backtest reads no more. Safe to call more than once."""
+        if self._closed:
+            return
+        self._closed = True
+        if not self._done:
+            self._shared_buffer.release()
 
 
 class DataSource:
@@ -358,6 +393,10 @@ class DataSource:
         """
         self._shared_buffer.reset()
         self._loader.reset()
+
+    def abort(self) -> None:
+        """End the replay for every channel now: the run is being stopped."""
+        self._shared_buffer.abort()
 
     def check_coverage(self, markets: list[tuple[Market, list[str]]]) -> list[str]:
         """Which days the range asks for that are not on disk.

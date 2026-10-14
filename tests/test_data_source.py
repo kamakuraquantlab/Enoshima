@@ -306,6 +306,65 @@ def test_a_reset_replays_from_the_first_chunk():
     assert seen == [1.0, 2.0, 3.0]
 
 
+def test_an_empty_chunk_is_skipped_not_read():
+    """A range of days with nothing on disk loads as an empty chunk. It used to raise IndexError."""
+    from enoshima.data_source import Channel
+
+    buffer = SharedBuffer(FakeLoader([[ev(1.0)], [], [], [ev(2.0)]]))
+    channel = Channel(buffer)
+    buffer.increment_ref()
+    seen = []
+    while (item := channel.get()) is not None:
+        seen.append(item[1].ts)
+    assert seen == [1.0, 2.0]
+
+
+def test_a_channel_that_leaves_does_not_strand_the_others():
+    """A backtest that fails mid-replay must not leave the rest waiting for it at the barrier."""
+    from enoshima.data_source import Channel
+
+    buffer = SharedBuffer(FakeLoader([[ev(1.0)], [ev(2.0)], [ev(3.0)]]))
+    channels = [Channel(buffer) for _ in range(3)]
+    for _ in channels:
+        buffer.increment_ref()
+
+    seen = {i: [] for i in range(3)}
+
+    def drain(i):
+        while (item := channels[i].get()) is not None:
+            seen[i].append(item[1].ts)
+            if i == 0:
+                channels[i].close()  # gives up after its first event
+                return
+
+    readers = [threading.Thread(target=drain, args=(i,)) for i in range(3)]
+    for t in readers:
+        t.start()
+    for t in readers:
+        t.join(timeout=10)
+    assert not any(t.is_alive() for t in readers), "the others waited for the one that left"
+    assert seen == {0: [1.0], 1: [1.0, 2.0, 3.0], 2: [1.0, 2.0, 3.0]}
+
+
+def test_abort_wakes_a_channel_waiting_at_the_barrier():
+    """What Ctrl-C needs: a waiting backtest is not reading its queue, so only the buffer can wake it."""
+    from enoshima.data_source import Channel
+
+    buffer = SharedBuffer(FakeLoader([[ev(1.0)], [ev(2.0)]]))
+    channel = Channel(buffer)
+    buffer.increment_ref()
+    buffer.increment_ref()  # a second reader that never arrives
+    results = []
+    reader = threading.Thread(target=lambda: results.append(channel.get()))
+    reader.start()
+    time.sleep(0.1)
+    assert reader.is_alive(), "the reader should be waiting for the second one"
+    buffer.abort()
+    reader.join(timeout=5)
+    assert not reader.is_alive()
+    assert results == [None]
+
+
 def test_shared_buffer_reports_exhaustion():
     loader = FakeLoader([])
     buffer = SharedBuffer(loader)

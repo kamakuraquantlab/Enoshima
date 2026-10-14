@@ -56,3 +56,33 @@ def test_the_command_takes_no_location_or_recording_flags():
             parser.parse_args(["run", "--env", "SOME_ENV", "--from", "2026-05-01", flag, "x"])
     with pytest.raises(SystemExit):
         parser.parse_args(["markets"])
+
+
+def test_strategy_logs_default_to_warning_and_can_be_raised(tmp_path):
+    assert load_settings(tmp_path).strategy_log_level == "WARNING"
+    (tmp_path / SETTINGS_FILE).write_text(json.dumps({"strategy_log_level": "INFO"}))
+    assert load_settings(tmp_path).strategy_log_level == "INFO"
+
+
+def test_a_strategy_log_level_that_is_not_one_is_refused(tmp_path):
+    (tmp_path / SETTINGS_FILE).write_text(json.dumps({"strategy_log_level": "LOUD"}))
+    with pytest.raises(ValueError, match="not a logging level"):
+        load_settings(tmp_path)
+
+
+def test_quieting_sets_levels_on_the_strategy_and_qate_trading_only():
+    import logging
+
+    from enoshima.cli import quiet_strategy_logs
+
+    names = ("example", "qate.trading", "enoshima", "qate.core")
+    before = {n: logging.getLogger(n).level for n in names}
+    try:
+        quiet_strategy_logs("example.strategy", "WARNING")
+        assert logging.getLogger("example").level == logging.WARNING
+        assert logging.getLogger("qate.trading.strategy").getEffectiveLevel() >= logging.WARNING
+        assert logging.getLogger("enoshima").level == before["enoshima"]
+        assert logging.getLogger("qate.core").level == before["qate.core"]
+    finally:
+        for n, level in before.items():
+            logging.getLogger(n).setLevel(level)

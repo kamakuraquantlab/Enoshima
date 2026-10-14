@@ -9,7 +9,8 @@
     "org": null
   },
   "chunk_days": 2,
-  "max_concurrency": 16
+  "max_concurrency": 16,
+  "strategy_log_level": "WARNING"
 }
 ```
 
@@ -23,6 +24,11 @@ Every key is optional, and a missing file means the defaults.
   for these runs, and the env says which one it charts to.
 - `chunk_days` is how many days are loaded at once (memory).
 - `max_concurrency` is how many parameter sets share one pass over the data.
+- `strategy_log_level` is the level of the strategy's own loggers -- its
+  package's, and `qate.trading`'s -- during a run. A live run logs every fill at
+  INFO, which is what you want when one fails; a sweep would write that line for
+  every fill of every parameter set (1.4 million lines, 600 MB, in one 45-way
+  sweep). `"INFO"` brings it back when a backtest needs debugging.
 
 This is the environment's file rather than a set of flags because it describes
 the environment: where its runs are charted and how big its data is. An unknown
@@ -31,6 +37,7 @@ run unrecorded.
 """
 
 import json
+import logging
 from dataclasses import dataclass, fields
 from pathlib import Path
 
@@ -52,7 +59,12 @@ class InfluxSettings:
 class Settings:
     chunk_days: int = DEFAULT_CHUNK_DAYS
     max_concurrency: int = MAX_CONCURRENCY
+    strategy_log_level: str = "WARNING"
     influx: InfluxSettings | None = None
+
+    def __post_init__(self):
+        if not isinstance(logging.getLevelName(self.strategy_log_level), int):
+            raise ValueError(f"strategy_log_level {self.strategy_log_level!r} is not a logging level, e.g. WARNING")
 
 
 def _check_keys(data: dict, cls, where: str) -> None:

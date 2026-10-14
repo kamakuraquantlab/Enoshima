@@ -190,12 +190,16 @@ optional, and a missing file means the defaults:
     "org": null
   },
   "chunk_days": 2,
-  "max_concurrency": 16
+  "max_concurrency": 16,
+  "strategy_log_level": "WARNING"
 }
 ```
 
 `chunk_days` and `max_concurrency` size a run (see below); `--chunk-days` and
-`--max-concurrency` override them for one run. An unknown key is an error, so a
+`--max-concurrency` override them for one run. `strategy_log_level` is the level
+of the strategy's loggers and `qate.trading`'s during a backtest: a live run logs
+every fill at INFO, which a sweep would repeat for every fill of every parameter
+set, so the default is `WARNING`. Set `"INFO"` to see them while debugging. An unknown key is an error, so a
 misspelling cannot silently change what a run does.
 
 ## Charting a run in InfluxDB
@@ -219,8 +223,9 @@ and `threshold=0.0015` would be `0.0015`. Parameters the
 grid does not name follow. An environment's market,
 strategy and variant are fixed, so its name stands for them, and the same values
 always give the same id: re-running a parameter set updates its bucket.
-`--temporary` appends `_tmp_<timestamp>` instead, for a bucket of its own that
-expires after 30 days. Connection details are
+`--temporary` appends `_tmp_<timestamp>` instead, for a bucket of its own.
+Enoshima never expires or deletes a bucket; cleaning up is left to whatever
+manages your InfluxDB. Connection details are
 the entry's own: `"token"`, `"write_url"` and `"read_url"` default to a local
 server at `http://localhost:8086` with no token, and `"org"` defaults to the only
 organisation the token sees. The token sits in `enoshima.json` rather than among
