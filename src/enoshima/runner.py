@@ -52,6 +52,7 @@ from qate_env.trading_env import (
     load_trading_env,
 )
 
+from . import param_id
 from .backtest import Backtest
 from .data_source import DEFAULT_CHUNK_DAYS, DataSource, market_data_event_types
 from .result import ResultReporter
@@ -89,8 +90,14 @@ class Runner:
         max_concurrency: int = MAX_CONCURRENCY,
         force: bool = False,
         influx=None,
+        temporary: bool = False,
     ):
-        """`influx` is an `influx.InfluxdbStore`, or None to record no metric stream."""
+        """`influx` is an `influx.InfluxdbStore`, or None to record no metric stream.
+
+        `temporary` gives every run of this batch a bucket of its own, named with the
+        batch's timestamp, and a retention; see `param_id`. It always runs: a fresh
+        bucket is the point, so an existing result is no reason to skip.
+        """
         self.env = env
         self.dt_range = dt_range
         self.optimize = optimize
@@ -99,6 +106,7 @@ class Runner:
         self.force = force
         self.output_root = Path(env.work_dir)
         self.influx = influx
+        self.temporary = temporary
         self.batch_id = self._next_batch_id(self.output_root)
 
         self.definition = load_trading_env(env)
@@ -198,20 +206,26 @@ class Runner:
     def _create_backtest(self, data_source: DataSource, params: dict) -> Backtest | None:
         StrategyClass = get_strategy_class(self.profile.strategy_module_name, self.profile.variant)
         strategy = StrategyClass(self.config, params)
-        param_set_id = strategy.get_param_set_id()
+        param_set_id = param_id.param_set_id(
+            str(self.env.name),
+            params,
+            self.definition.param_grid,
+            tmp_ts=self.batch_id if self.temporary else None,
+        )
 
         run_log = BacktestLog(
             self.env,
             params,
             self.dt_range,
             self.profile.strategy_name,
+            is_temporary_run=self.temporary,
             batch_id=self.batch_id,
             config=self.config,
             profile=self.profile,
         )
         run_log.param_set_id = param_set_id
 
-        if not self.force and self.run_logger.get(run_log):
+        if not self.force and not self.temporary and self.run_logger.get(run_log):
             LOG.info(f"Skipping {param_set_id}: a result for this range already exists (--force to redo)")
             return None
 
@@ -229,11 +243,12 @@ class Runner:
     def _recording_reporters(self, run_log: BacktestLog, param_set_id: str) -> list:
         if self.influx is None:
             return []
-        from .influx import InfluxReporter, bucket_name
+        from .influx import TMP_RETENTION_SECONDS, InfluxReporter, bucket_name
 
-        bucket = bucket_name(str(self.env.name), param_set_id)
+        bucket = bucket_name(param_set_id)
         run_log.influx_bucket = bucket
-        writer = self.influx.create_writer(bucket, param_set_id=param_set_id)
+        retention = TMP_RETENTION_SECONDS if self.temporary else None
+        writer = self.influx.create_writer(bucket, retention_seconds=retention, param_set_id=param_set_id)
         return [InfluxReporter(writer, self.dt_range)]
 
     def _run_batch(self, backtests: list[Backtest]) -> None:

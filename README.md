@@ -210,8 +210,17 @@ echo '{"influx": {}}' > "$QATE_ENV_ROOT/EXAMPLE_BACKTEST/enoshima.json"
 enoshima run --env EXAMPLE_BACKTEST --from 2026-09-01
 ```
 
-One bucket per parameter set, `backtest_<ENV>_<param_set_id>`, so a sweep's
-combinations sit side by side; the run log records which. Connection details are
+One bucket per parameter set, `backtest_<param_set_id>`, so a sweep's
+combinations sit side by side; the run log records which. The id is built by
+Enoshima from `param_grid.json`, not by the strategy: the environment's name, then
+the parameter values as plain decimals in the grid's order. In
+`EXAMPLE_BACKTEST`, `fast_period=20, slow_period=120` is `EXAMPLE_BACKTEST_20_120`,
+and `threshold=0.0015` would be `0.0015`. Parameters the
+grid does not name follow. An environment's market,
+strategy and variant are fixed, so its name stands for them, and the same values
+always give the same id: re-running a parameter set updates its bucket.
+`--temporary` appends `_tmp_<timestamp>` instead, for a bucket of its own that
+expires after 30 days. Connection details are
 the entry's own: `"token"`, `"write_url"` and `"read_url"` default to a local
 server at `http://localhost:8086` with no token, and `"org"` defaults to the only
 organisation the token sees. The token sits in `enoshima.json` rather than among
@@ -244,7 +253,8 @@ To clear an environment's results, delete its `run_log/` and `best_result/`.
 
 Flags on `run`: `--optimize grid|combo`, `--chunk-days` (memory),
 `--max-concurrency` (parameter sets per data pass), `--force` (re-run a parameter
-set that already has a result). The variant is `trading.json`'s, the data is
+set that already has a result), `--temporary` (record to a bucket of its own; see
+above). The variant is `trading.json`'s, the data is
 komachi's, and the output is the environment directory.
 
 ## Memory, and how a sweep is cheap

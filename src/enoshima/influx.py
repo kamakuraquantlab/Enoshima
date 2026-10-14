@@ -25,10 +25,11 @@ parameter set over the same range overwrites its points rather than doubling the
 
 ## One bucket per parameter set
 
-`backtest_<ENV>_<param_set_id>`, so an optimize sweep's combinations sit side by
-side and a dashboard can switch between them with a variable rather than a query
-rewrite. Runs marked temporary get `_tmp_<batch_id>` appended and a 30-day
-retention; `delete_tmp_buckets` removes the expired ones.
+`backtest_<param_set_id>`, the id naming the environment and the parameters (see
+`param_id`), so an optimize sweep's combinations sit side by side and a dashboard
+can switch between them with a variable rather than a query rewrite. A temporary
+run's id ends in `_tmp_<timestamp>`; its bucket gets a 30-day retention, and
+`delete_tmp_buckets` removes the expired ones.
 """
 
 import time
@@ -54,6 +55,7 @@ from qate.trading.reporter import Reporter
 from qate.util.buffer import BufferedWriter
 from qate.util.dt_range import DtRange
 
+from .param_id import TMP_MARKER
 from .result import in_range
 
 LOG = getLogger(__name__)
@@ -331,15 +333,11 @@ class InfluxReporter(Reporter):
 # --------------------------------------------------------------------------
 
 BUCKET_PREFIX = "backtest"
-TMP_MARKER = "_tmp_"
 TMP_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
 
-def bucket_name(env_name: str, param_set_id: str, batch_id: int | None = None) -> str:
-    base = f"{BUCKET_PREFIX}_{env_name}_{param_set_id}"
-    if batch_id is None:
-        return base
-    return f"{base}{TMP_MARKER}{batch_id}"
+def bucket_name(param_set_id: str) -> str:
+    return f"{BUCKET_PREFIX}_{param_set_id}"
 
 
 def delete_tmp_buckets(store: InfluxdbStore, days_ago: int = 7) -> int:

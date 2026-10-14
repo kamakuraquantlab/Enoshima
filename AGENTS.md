@@ -116,6 +116,13 @@ but it is easy to break from here:
 - **A run log's id is a deterministic hash**, not a UUID. That is what makes a
   sweep resumable, and what `--force` overrides. It was a UUID once, which meant
   the skip check could never fire and every combination was always recomputed.
+- **A parameter set's id is Enoshima's, built from `param_grid.json`** (`param_id`):
+  the env name, then the values as plain decimals in grid order, plus
+  `_tmp_<timestamp>` for `--temporary`. There are no scaling factors: they made
+  ids unreadable without the grid, and a missing one changed every bucket name. Nothing about the config is in it: an env's
+  market and strategy are fixed, so its name stands for them. It names the InfluxDB
+  bucket, so the same values must keep giving the same id. It was each strategy's
+  `get_param_set_id` once; do not put it back on `Strategy`.
 - **`post_analysis` ranks across every run log with the same strategy and range**,
   not just the current batch. A resumed sweep must be able to pick a best from
   results it did not just compute.

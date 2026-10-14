@@ -59,6 +59,10 @@ class BacktestLog(RunLog):
 
         Deliberately excludes the batch id and the timestamps: those differ between two runs that would produce the same
         numbers, and the point is to notice that they would.
+
+        A temporary run is marked in it, so that it does not overwrite the log of
+        the permanent run it repeats -- the log that names the bucket the results
+        live in. Only when temporary, so a permanent run's id is what it always was.
         """
         identity = {
             "env": str(self.env.name),
@@ -67,6 +71,8 @@ class BacktestLog(RunLog):
             "start": self.dt_range.start_str,
             "end": self.dt_range.end_str,
         }
+        if self.is_temporary_run:
+            identity["temporary"] = True
         raw = json.dumps(identity, sort_keys=True, cls=Encoder)
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 

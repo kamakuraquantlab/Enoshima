@@ -127,8 +127,9 @@ def test_a_run_trades_and_writes_its_results(run_env):
 class MemoryWriter:
     """An `InfluxdbWriter` that keeps its points."""
 
-    def __init__(self, bucket: str):
+    def __init__(self, bucket: str, retention_seconds: int | None = None):
         self.bucket = bucket
+        self.retention_seconds = retention_seconds
         self.points = []
         self.closed = False
 
@@ -145,8 +146,10 @@ class MemoryStore:
     def __init__(self):
         self.writers: list[MemoryWriter] = []
 
-    def create_writer(self, bucket_name: str, param_set_id: str | None = None, **_) -> MemoryWriter:
-        writer = MemoryWriter(bucket_name)
+    def create_writer(
+        self, bucket_name: str, retention_seconds: int | None = None, param_set_id: str | None = None, **_
+    ) -> MemoryWriter:
+        writer = MemoryWriter(bucket_name, retention_seconds)
         self.writers.append(writer)
         return writer
 
@@ -169,7 +172,9 @@ def test_influx_records_orders_pnl_and_evaluations(run_env):
     log = json.loads(next((Path(env.work_dir) / "run_log").glob("*.json")).read_text())
     [writer] = store.writers
     assert writer.closed
-    assert writer.bucket == log["influx_bucket"] == f"backtest_{ENV_NAME}_{log['param_set_id']}"
+    # The env, then the example's params.json in param_grid.json's order.
+    assert log["param_set_id"] == f"{ENV_NAME}_20_120"
+    assert writer.bucket == log["influx_bucket"] == f"backtest_{ENV_NAME}_20_120"
 
     by_measurement = {}
     for point in writer.points:
@@ -215,6 +220,25 @@ def test_a_second_identical_run_is_skipped(run_env):
     # Same identity, so no second log, and the first was not rewritten.
     assert list((Path(env.work_dir) / "run_log").glob("*.json")) == [log_path]
     assert json.loads(log_path.read_text())["start_ts"] == first["start_ts"]
+
+
+def test_a_temporary_run_gets_a_bucket_of_its_own_and_keeps_the_permanent_log(run_env):
+    """Repeating a recorded run temporarily must neither be skipped nor overwrite it."""
+    env, dt_range = run_env
+    Runner(env, dt_range, chunk_days=1, influx=MemoryStore()).run()
+
+    store = MemoryStore()
+    runner = Runner(env, dt_range, chunk_days=1, influx=store, temporary=True)
+    runner.run()
+
+    [writer] = store.writers
+    assert writer.bucket == f"backtest_{ENV_NAME}_20_120_tmp_{runner.batch_id}"
+    assert writer.retention_seconds is not None
+
+    logs = [json.loads(p.read_text()) for p in (Path(env.work_dir) / "run_log").glob("*.json")]
+    assert sorted(log["is_temporary_run"] for log in logs) == [False, True]
+    [permanent] = [log for log in logs if not log["is_temporary_run"]]
+    assert permanent["influx_bucket"] == f"backtest_{ENV_NAME}_20_120"
 
 
 def test_force_reruns_a_completed_parameter_set(run_env):
