@@ -1,16 +1,18 @@
-"""What a run recorded about itself, as one JSON file.
+"""What a run recorded about itself: its folder's `meta.json`.
 
 A run log is the provenance of a number. It holds the environment, the library
-revision, the config, the exact parameters, the date range, and the evaluation
-results, so a figure in a notebook or an article can be traced back to the run
-that produced it and re-run.
+revision, the config, the exact parameters and the date range, so a figure in a
+notebook or an article can be traced back to the run that produced it and
+re-run. The numbers themselves are beside it in the run's folder; see
+`run_dir`.
 
 ## The id is deterministic, and that is what makes a run resumable
 
 The id is a hash of everything that decides what a run computes: the
 environment, the strategy and variant, the parameter set, and the date range.
-Two runs that would compute the same thing therefore have the same id, so
-`Runner` can see that a result already exists and skip it. An optimize sweep over
+Two runs that would compute the same thing therefore have the same id -- the
+name of their folder -- so `Runner` can see that a result already exists and
+skip it. An optimize sweep over
 two hundred parameter sets that dies at number ninety resumes at ninety rather
 than starting again.
 
@@ -90,12 +92,13 @@ class BacktestLog(RunLog):
                 "influx_bucket": self.influx_bucket,
             }
         )
-        if self.result:
-            data["result"] = self.result
+        data["id"] = self.get_id()
+        if self.end_ts is not None:
             data["end_ts"] = self.end_ts
             data["execution_time"] = str(int(self.end_ts - self.start_ts)) + "s"
         return data
 
     def set_result(self, result: dict) -> None:
+        """The run's summary, which `run_dir` writes beside this log rather than in it."""
         self.result = result
         self.end_ts = time.time()

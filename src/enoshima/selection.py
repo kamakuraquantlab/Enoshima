@@ -2,8 +2,8 @@
 
 Ranking every result on one number over the whole range picks the set that fit
 that range best, which is not the same as the set most likely to keep working.
-Three things here push back against that, all computed from the run logs a
-sweep has already written -- nothing is replayed again.
+Three things here push back against that, all computed from the run folders
+a sweep has already written -- nothing is replayed again.
 
 ## Filters
 
@@ -21,8 +21,8 @@ do not share is likely a fit to noise; a plateau is not. Categorical parameters
 
 ## Walk-forward
 
-With `result.periods` in the run logs (see `result`), the sweep is replayed in
-time without being replayed in fact: choose the best set on `train_months`
+With each run folder's `by_month.json` (see `ledger`), the sweep is replayed
+in time without being replayed in fact: choose the best set on `train_months`
 complete months, score that choice on the `test_months` after them, step
 forward by `test_months`, repeat. The sum of the test months is what the
 selection procedure would have earned had it been run month by month; it is
@@ -36,7 +36,7 @@ first of a month does not make that one day a test.
 import datetime as dt
 from dataclasses import asdict, dataclass
 
-from .result import JST
+from .ledger import JST
 
 SLIPPAGES = ("0", "5", "10")
 
@@ -84,7 +84,7 @@ def window_stats(periods: dict, months: list[str]) -> dict:
 
 
 def full_range_stats(result: dict) -> dict:
-    """The same figures from a whole-range result, for run logs without periods."""
+    """The same figures from a run's whole-range summary."""
     stats = {f"pnl{s}": result.get(f"pnl{s}", 0.0) for s in SLIPPAGES}
     stats.update(trades=result.get("pnl_cnt5", 0), dd5=result.get("max_drawdown5", 0.0))
     return stats
@@ -164,7 +164,8 @@ def walk_forward(runs: list[dict], months: list[str], grid: list[dict] | None,
                  settings: SelectionSettings) -> dict:
     """Choose on `train_months`, test on the next `test_months`, step, repeat.
 
-    `runs` are run logs whose results carry `periods`. Returns the folds, the
+    `runs` are run logs whose results carry `periods`, a run folder's
+    `by_month.json`. Returns the folds, the
     out-of-sample totals, and the set chosen on the most recent window.
     """
     train, test = settings.train_months, settings.test_months
@@ -199,21 +200,19 @@ def select(runs: list[dict], start_ts: float, end_ts: float, grid: list[dict] | 
            settings: SelectionSettings) -> dict:
     """Everything `--optimize` reports: the method, the recommendation, and why.
 
-    Walk-forward when every run log has periods and the range holds enough
-    complete months; otherwise the whole-range ranking, filtered and smoothed.
+    Walk-forward when the range holds enough complete months; otherwise the
+    whole-range ranking, filtered and smoothed.
     """
     months = complete_months(start_ts, end_ts)
-    have_periods = all("periods" in r.get("result", {}) for r in runs)
     enough = settings.train_months > 0 and len(months) >= settings.train_months + settings.test_months
     out = {"settings": asdict(settings)}
 
-    if have_periods and enough:
+    if enough:
         wf = walk_forward(runs, months, grid, settings)
         out.update(method="walk-forward", walk_forward={k: wf[k] for k in ("folds", "out_of_sample")}, ranking=wf["latest"])
     else:
         ranked = rank([(r["params"], full_range_stats(r["result"])) for r in runs], grid, settings)
-        reason = ("run logs without periods; re-run with --force to record them" if not have_periods
-                  else "walk-forward off" if settings.train_months == 0
+        reason = ("walk-forward off" if settings.train_months == 0
                   else f"{len(months)} complete month(s), fewer than train_months + test_months")
         out.update(method="whole range", reason=reason, ranking=ranked)
 

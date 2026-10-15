@@ -5,7 +5,7 @@ import random
 import pytest
 from qate.util.dt_range import DtRange
 
-from enoshima.result import MonthLedger
+from enoshima.ledger import Trade, aggregate
 from enoshima.selection import (
     SelectionSettings,
     complete_months,
@@ -24,18 +24,13 @@ GRID = [
 
 
 def periods_from(changes: dict[str, list[float]]) -> dict:
-    """A run log's `periods` from each month's closed-PnL changes, the same at every slippage."""
-    out = {}
-    for month, deltas in changes.items():
-        ledger = MonthLedger("5")
-        for d in deltas:
-            ledger.add(month, d)
-        m = ledger.months[month]
-        row = {"trades": m["trades"]}
-        for s in ("0", "5", "10"):
-            row.update({f"pnl{s}": m["pnl"], f"peak{s}": m["peak"], f"trough{s}": m["trough"], f"dd{s}": m["dd"]})
-        out[month] = row
-    return out
+    """A run folder's `by_month.json` from each month's closed-PnL changes, the same at every slippage."""
+    trades = []
+    for month, deltas in sorted(changes.items()):
+        ts = DtRange.from_strings(f"{month}-10", f"{month}-10").start_ts
+        for i, d in enumerate(deltas):
+            trades.append(Trade(ts + i, ts + i - 60, "X", "Y", "long", 1.0, 1.0, d, 0.0, d, d, d))
+    return aggregate(trades, "month")
 
 
 def test_a_window_drawdown_is_exact_across_month_boundaries():
@@ -132,10 +127,11 @@ def test_walk_forward_chooses_on_the_past_and_scores_on_what_follows():
 
 
 def test_select_falls_back_to_the_whole_range_and_says_why():
-    old_log = {"params": {"x": 1}, "result": {"pnl0": 3.0, "pnl5": 2.0, "pnl10": 1.0, "pnl_cnt5": 4, "max_drawdown5": 1.0}}
+    log = {"params": {"x": 1}, "result": {"pnl0": 3.0, "pnl5": 2.0, "pnl10": 1.0, "pnl_cnt5": 4, "max_drawdown5": 1.0,
+                                          "periods": {}}}
     r = DtRange.from_strings("2025-07-01", "2026-09-01")
-    choice = select([old_log], r.start_ts, r.end_ts, None, SelectionSettings())
-    assert choice["method"] == "whole range" and "--force" in choice["reason"]
+    choice = select([log], r.start_ts, r.end_ts, None, SelectionSettings(train_months=0))
+    assert choice["method"] == "whole range" and choice["reason"] == "walk-forward off"
     assert choice["recommended"] == {"x": 1}
 
     short = DtRange.from_strings("2026-01-01", "2026-03-31")

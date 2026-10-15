@@ -91,10 +91,19 @@ but it is easy to break from here:
   optional part, the recording is. The token and URLs are `enoshima.json`'s,
   not a credential lookup -- the InfluxDB is ours, unlike the external services
   the credential files are for.
-- **Trading data goes to InfluxDB and nowhere else.** Orders, PnL and bars are
-  `InfluxReporter`'s; `ResultReporter` only evaluates. There was a parquet copy
-  under `result/` (`timeseries.py`); it duplicated the metric stream and was
-  removed. Do not bring it back.
+- **PnL goes to the run folder; orders and bars go to InfluxDB.** A run's
+  closed trades are what its result is evaluated from, so `ResultReporter` keeps
+  them and `run_dir` writes them as `trades.csv`, with `summary.json` and one
+  `by_<grouping>.json` per `ledger.GROUPINGS` beside the provenance in
+  `meta.json`. Any window or grouping is then recomputed without a replay.
+  InfluxDB is for looking at a run: orders, PnL and bars, as before. There was
+  a parquet copy of the whole metric stream under `result/` (`timeseries.py`),
+  removed because it duplicated InfluxDB; do not bring back orders or bars on
+  disk, and do not name a folder `result/` again.
+- **A run folder is written whole or not at all.** `run_dir.write` builds
+  `run_log/<id>.tmp-<pid>/` and renames it into place, and `summary.json` is
+  what "finished" means to the skip check. A folder that could exist without
+  its trades would be skipped by a resumed sweep forever.
 - **Enoshima does not configure logging.** Every command enters its env, and
   `qate_env.Env` attaches the `env.log` handler. Each module takes
   `LOG = getLogger(__name__)` and logs; nothing calls `print`, `basicConfig` or
@@ -182,9 +191,11 @@ but it is easy to break from here:
   `pnl0` selects for strategies whose edge is thinnest -- but does not simply
   take the highest. `selection` filters (no loss at pnl10 by default), smooths
   each score over its grid neighbours, and walk-forward tests the choice on JST
-  months from `result.periods`, recommending what it chose on the latest months.
-  The out-of-sample total is the honest figure; an in-sample best is not one.
-  `selection` works only from run logs: it must never need a replay.
+  months from each run's `by_month.json`, recommending what it chose on the
+  latest months. The out-of-sample total is the honest figure; an in-sample
+  best is not one. `selection` works only from run folders: it must never need
+  a replay. `best_result/<batch_id>/` holds `selection.json` and, only when a
+  set passed the filters, a copy of its `meta.json` as `<run_id>.json`.
 - **Never delete a user's results.** There is no `clean` command: a user who
   wants them gone deletes `run_log/` and `best_result/`. An earlier version pruned
   run logs older than seven days automatically, on every run.

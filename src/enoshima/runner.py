@@ -35,6 +35,7 @@ converging.
 """
 
 import json
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
@@ -45,14 +46,13 @@ from qate.core.features import FEATURES
 from qate.trading.param import ParamGrid
 from qate.util.dt_range import DtRange
 from qate_env.env import Env
-from qate_env.run_log import RunLogger
 from qate_env.trading_env import (
     PARAM_GRID_FILE,
     get_strategy_class,
     load_trading_env,
 )
 
-from . import param_id, selection
+from . import param_id, run_dir, selection
 from .backtest import Backtest
 from .data_source import DEFAULT_CHUNK_DAYS, DataSource, market_data_event_types
 from .influx import InfluxdbStore, InfluxReporter, bucket_name
@@ -120,20 +120,18 @@ class Runner:
         self.config = self.definition.config
         self.profile = self.definition.profile
 
-        self.run_logger = RunLogger(str(self.output_root))
-
     @staticmethod
     def _next_batch_id(output_root: Path) -> int:
         """A unix timestamp, advanced until it names a batch that does not exist.
 
-        The id groups one sweep's runs together and names its `best_result` file,
-        so two sweeps sharing an id would overwrite each other's best. A bare
+        The id groups one sweep's runs together and names its `best_result`
+        folder, so two sweeps sharing an id would overwrite each other's choice. A bare
         `int(time.time())` collides whenever two runs start inside the same
         second, which is ordinary when they are launched from a script.
         """
         best_root = output_root / "best_result"
         batch_id = int(time.time())
-        while (best_root / f"{batch_id}.json").exists():
+        while (best_root / str(batch_id)).exists():
             batch_id += 1
         return batch_id
 
@@ -231,7 +229,7 @@ class Runner:
         )
         run_log.param_set_id = param_set_id
 
-        if not self.force and not self.temporary and self.run_logger.get(run_log):
+        if not self.force and not self.temporary and run_dir.is_complete(run_dir.run_dir(self.output_root, run_log.get_id())):
             LOG.info(f"Skipping {param_set_id}: a result for this range already exists (--force to redo)")
             return None
 
@@ -276,7 +274,7 @@ class Runner:
                         LOG.exception(f"Backtest failed: params={backtest.run_log.params}")
                         self.failed.append(backtest.run_log.params)
                         continue
-                    self.run_logger.save(backtest.run_log)
+                    self._save(backtest)
                     self._log_result(backtest.run_log)
             except KeyboardInterrupt:
                 LOG.warning("Interrupted; stopping backtests")
@@ -284,6 +282,11 @@ class Runner:
                 for backtest in backtests:
                     backtest.stop()
                 raise
+
+    def _save(self, backtest: Backtest) -> None:
+        log = backtest.run_log
+        path = run_dir.write(self.output_root, log.get_id(), log.to_dict(), log.result, backtest.result.trades)
+        LOG.info(f"Saved {path}")
 
     def _log_result(self, run_log: BacktestLog) -> None:
         result = run_log.result or {}
@@ -331,20 +334,17 @@ class Runner:
         if not self.optimize:
             return None
 
-        run_log_dir = Path(self.run_logger.root_dir)
-        if not run_log_dir.is_dir():
-            LOG.warning(f"No run logs at {run_log_dir}")
-            return None
-
         runs = []
-        for json_file in run_log_dir.glob("*.json"):
+        for path in run_dir.iter_complete(self.output_root):
             try:
-                data = json.loads(json_file.read_text())
+                meta = run_dir.read_json(path, run_dir.META)
+                summary = run_dir.read_json(path, run_dir.SUMMARY)
+                months = run_dir.read_json(path, run_dir.grouping_file("month"))
             except (json.JSONDecodeError, OSError) as e:
-                LOG.error(f"Could not read {json_file}: {e}")
+                LOG.error(f"Could not read {path}: {e}")
                 continue
-            if self._is_comparable(data) and "pnl5" in data.get("result", {}):
-                runs.append(data)
+            if self._is_comparable(meta) and "pnl5" in summary:
+                runs.append({**meta, "run_id": path.name, "result": {**summary, "periods": months}})
 
         if not runs:
             LOG.warning(
@@ -358,14 +358,19 @@ class Runner:
         self._log_choice(choice, len(runs))
 
         top = choice["ranking"][0]["params"]
-        best = dict(next(r for r in runs if r["params"] == top))
-        best["selection"] = choice
+        best = next(r for r in runs if r["params"] == top)
+        best = {**best, "result": {k: v for k, v in best["result"].items() if k != "periods"}, "selection": choice}
 
-        best_dir = self.output_root / "best_result"
+        # The choice and why, and -- only when one passed the filters -- the
+        # chosen run's meta.json, under its run id.
+        best_dir = self.output_root / "best_result" / str(self.batch_id)
         best_dir.mkdir(parents=True, exist_ok=True)
-        best_path = best_dir / f"{self.batch_id}.json"
-        best_path.write_text(json.dumps(best, indent=2))
-        LOG.info(f"Saved {best_path}")
+        (best_dir / "selection.json").write_text(json.dumps(choice, indent=2))
+        if choice["recommended"] is not None:
+            shutil.copyfile(
+                run_dir.run_dir(self.output_root, best["run_id"]) / run_dir.META, best_dir / f"{best['run_id']}.json"
+            )
+        LOG.info(f"Saved {best_dir}")
         return best
 
     def _log_choice(self, choice: dict, n_runs: int) -> None:

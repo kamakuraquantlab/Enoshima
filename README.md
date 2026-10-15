@@ -169,12 +169,26 @@ A run writes back into the same directory:
 ```text
 EXAMPLE_BACKTEST/
 ├── env.log                            everything a command logged
-├── run_log/<id>.json                  one per parameter set: provenance + results
-└── best_result/<batch_id>.json        a sweep's recommendation, and why
+├── run_log/<id>/                      one per parameter set and range
+│   ├── meta.json                      what was run: env, config, params, range, bucket
+│   ├── summary.json                   the whole-range result at each slippage rate
+│   ├── trades.csv                     every closed position, with its PnL change at each rate
+│   └── by_<grouping>.json             the trades grouped: month, week, day, weekday,
+│                                      monthday, hour, weekday_hour, holding, side
+└── best_result/<batch_id>/            a sweep's choice
+    ├── selection.json                 the ranking, every fold, the out-of-sample totals
+    └── <id>.json                      the chosen run's meta.json (absent if none passed)
 ```
 
-Orders, per-trade PnL and the strategy's bars are not written locally. They go to
-InfluxDB when the environment asks for it — see below.
+A grouping's row holds `trades`, and per slippage suffix N `winsN`, `pnlN`, and
+the `peakN`, `troughN` and `ddN` (worst drawdown) of the group's own PnL from
+zero. For month, week and day that is the period's equity curve; for weekday,
+hour, holding time and side it is the curve of a strategy that traded only in
+that group.
+
+A run's PnL is kept on disk because the result is evaluated from it. Orders,
+PnL and the strategy's bars go to InfluxDB when the environment asks for it —
+see below — for charting.
 
 ## `enoshima.json`
 
@@ -266,16 +280,16 @@ from the run logs it has already written:
 2. **Neighbours.** A set's score is its pnl5 averaged with its neighbours on the
    grid -- one step along a numeric parameter -- so a lone spike loses to a
    plateau. Categorical parameters have no neighbours.
-3. **Walk-forward.** Each run log records its PnL by JST month. The sweep chooses
+3. **Walk-forward.** Each run folder has its PnL by JST month (`by_month.json`). The sweep chooses
    on `train_months` complete months, scores that choice on the following
    `test_months`, steps forward and repeats. The sum of those test months is
    what choosing this way would have earned, out of sample -- the figure to
    trust. The set recommended is the one chosen on the most recent months.
 
-`best_result/<batch_id>.json` holds the recommended set's run log and a
-`selection` section with the ranking, every fold and the out-of-sample totals.
-Run logs written before months were recorded fall back to the whole-range
-ranking; re-run the sweep with `--force` to record them.
+`best_result/<batch_id>/selection.json` holds the ranking, every fold and the
+out-of-sample totals, and `<id>.json` beside it is the recommended run's
+`meta.json`. When no set passes the filters there is no copy: nothing is
+recommended.
 
 ## Commands
 

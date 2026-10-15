@@ -1,4 +1,4 @@
-"""A real run, from parquet on disk to a run log on disk.
+"""A real run, from parquet on disk to a run folder on disk.
 
 Writes a synthetic bronze tree, copies the example environment into a temporary
 env root, and drives `Runner` exactly as `enoshima run` does. If this passes, the
@@ -12,6 +12,7 @@ easy: the first version of this file generated books that all fell before the
 reported range began, so every one of them was warmup and nothing was recorded.
 """
 
+import csv
 import json
 import math
 import shutil
@@ -30,6 +31,8 @@ from qate.util.dt_range import DtRange
 from qate_env.env import Env
 from qate_env.env_name import EnvName
 
+from enoshima import run_dir
+from enoshima.ledger import GROUPINGS
 from enoshima.runner import WARMUP_HOURS, Runner
 
 EXAMPLE_ROOT = Path(__file__).resolve().parent.parent / "example"
@@ -80,6 +83,16 @@ def write_books(root: Path, start_ts: float) -> None:
     pq.write_table(pa.Table.from_pandas(pd.DataFrame(rows, columns=columns), preserve_index=False), path)
 
 
+def run_dirs(env) -> list[Path]:
+    """Every finished run folder in the env."""
+    return list(run_dir.iter_complete(Path(env.work_dir)))
+
+
+def load(path: Path) -> dict:
+    """A run folder as one dict: its meta.json, with summary.json as `result`."""
+    return {**run_dir.read_json(path, run_dir.META), "result": run_dir.read_json(path, run_dir.SUMMARY)}
+
+
 @pytest.fixture
 def run_env(tmp_path, data_root, monkeypatch):
     """A temporary env root holding a copy of the example environment, and data.
@@ -107,9 +120,9 @@ def test_a_run_trades_and_writes_its_results(run_env):
     runner.run()
 
     # A run log per parameter set, holding the provenance of the numbers.
-    run_logs = list((Path(env.work_dir) / "run_log").glob("*.json"))
+    run_logs = run_dirs(env)
     assert len(run_logs) == 1
-    log = json.loads(run_logs[0].read_text())
+    log = load(run_logs[0])
     assert log["strategy"] == "example.strategy.v1"
     assert log["params"] == {"fast_period": 20, "slow_period": 120}
     assert log["start_str"] == dt_range.start_str
@@ -121,17 +134,29 @@ def test_a_run_trades_and_writes_its_results(run_env):
         assert f"sharpe_ratio_annualized{suffix}" in result
     assert result["pnl_cnt0"] >= 1, "the strategy closed no position; the test data is not forcing a trade"
 
-    # The same closed PnL, by JST month, for `selection`'s walk-forward.
-    assert list(result["periods"]) == ["2026-01"]
-    month = result["periods"]["2026-01"]
-    assert month["trades"] == result["pnl_cnt0"]
-    assert month["pnl5"] == pytest.approx(result["pnl5"])
-    assert month["dd5"] == pytest.approx(result["max_drawdown5"])
-    # And by JST day.
-    assert list(result["days"]) == ["2026-01-02"]
-    assert result["days"]["2026-01-02"]["pnl10"] == pytest.approx(result["pnl10"])
+    # The folder holds every closed trade, and each grouping adds up to the summary.
+    folder = run_logs[0]
+    assert folder.name == log["id"]
+    assert "result" not in run_dir.read_json(folder, run_dir.META), "meta.json is the input, not the result"
+    with open(folder / run_dir.TRADES) as f:
+        trades = list(csv.DictReader(f))
+    assert len(trades) == result["pnl_cnt0"]
+    assert sum(float(t["pnl_change5"]) for t in trades) == pytest.approx(result["pnl5"])
+    assert {t["side"] for t in trades} <= {"long", "short"}
+    for name in GROUPINGS:
+        rows = run_dir.read_json(folder, run_dir.grouping_file(name))
+        assert sum(r["trades"] for r in rows.values()) == result["pnl_cnt0"], name
+        assert sum(r["pnl10"] for r in rows.values()) == pytest.approx(result["pnl10"]), name
 
-    # Trading data goes to InfluxDB or nowhere; a run writes no local copy.
+    # The trades fall in one JST month and day, so those groupings' drawdown is the run's.
+    month = run_dir.read_json(folder, "by_month.json")
+    assert list(month) == ["2026-01"]
+    assert month["2026-01"]["dd5"] == pytest.approx(result["max_drawdown5"])
+    assert list(run_dir.read_json(folder, "by_day.json")) == ["2026-01-02"]
+    hours = run_dir.read_json(folder, "by_hour.json")
+    assert len(hours) == 24 and hours["06"]["trades"] == result["pnl_cnt0"]   # the range is 06:00-06:59 JST
+
+    # Orders and bars go to InfluxDB or nowhere; PnL is the only trading data on disk.
     assert not (Path(env.work_dir) / "result").exists()
 
 
@@ -169,7 +194,7 @@ def test_a_run_without_influx_still_has_its_result(run_env):
     env, dt_range = run_env
     Runner(env, dt_range, chunk_days=1).run()
 
-    log = json.loads(next((Path(env.work_dir) / "run_log").glob("*.json")).read_text())
+    log = load(run_dirs(env)[0])
     assert log["result"]["pnl_cnt0"] >= 1
     assert log["influx_bucket"] is None
 
@@ -179,7 +204,7 @@ def test_influx_records_orders_pnl_and_evaluations(run_env):
     store = MemoryStore()
     Runner(env, dt_range, chunk_days=1, influx=store).run()
 
-    log = json.loads(next((Path(env.work_dir) / "run_log").glob("*.json")).read_text())
+    log = load(run_dirs(env)[0])
     [writer] = store.writers
     assert writer.closed
     # The env, then the example's params.json in param_grid.json's order.
@@ -223,13 +248,13 @@ def test_a_second_identical_run_is_skipped(run_env):
     env, dt_range = run_env
 
     Runner(env, dt_range, chunk_days=1).run()
-    [log_path] = (Path(env.work_dir) / "run_log").glob("*.json")
-    first = json.loads(log_path.read_text())
+    [log_path] = run_dirs(env)
+    first = load(log_path)
 
     Runner(env, dt_range, chunk_days=1).run()
     # Same identity, so no second log, and the first was not rewritten.
-    assert list((Path(env.work_dir) / "run_log").glob("*.json")) == [log_path]
-    assert json.loads(log_path.read_text())["start_ts"] == first["start_ts"]
+    assert run_dirs(env) == [log_path]
+    assert load(log_path)["start_ts"] == first["start_ts"]
 
 
 def test_a_temporary_run_gets_a_bucket_of_its_own_and_keeps_the_permanent_log(run_env):
@@ -244,7 +269,7 @@ def test_a_temporary_run_gets_a_bucket_of_its_own_and_keeps_the_permanent_log(ru
     [writer] = store.writers
     assert writer.bucket == f"backtest_{ENV_NAME}_20_120_tmp_{runner.batch_id}"
 
-    logs = [json.loads(p.read_text()) for p in (Path(env.work_dir) / "run_log").glob("*.json")]
+    logs = [load(p) for p in run_dirs(env)]
     assert sorted(log["is_temporary_run"] for log in logs) == [False, True]
     [permanent] = [log for log in logs if not log["is_temporary_run"]]
     assert permanent["influx_bucket"] == f"backtest_{ENV_NAME}_20_120"
@@ -254,11 +279,11 @@ def test_force_reruns_a_completed_parameter_set(run_env):
     env, dt_range = run_env
 
     Runner(env, dt_range, chunk_days=1).run()
-    [log_path] = (Path(env.work_dir) / "run_log").glob("*.json")
-    first = json.loads(log_path.read_text())
+    [log_path] = run_dirs(env)
+    first = load(log_path)
 
     Runner(env, dt_range, chunk_days=1, force=True).run()
-    assert json.loads(log_path.read_text())["start_ts"] > first["start_ts"]
+    assert load(log_path)["start_ts"] > first["start_ts"]
 
 
 def test_optimize_grid_runs_every_combination_and_picks_a_best(run_env):
@@ -274,20 +299,30 @@ def test_optimize_grid_runs_every_combination_and_picks_a_best(run_env):
     assert "params" in best and "result" in best
 
     # One run log per combination, and the best is the top of the selection's ranking.
-    logs = list((Path(env.work_dir) / "run_log").glob("*.json"))
+    logs = run_dirs(env)
     assert len(logs) == len(combos)
     assert best["selection"]["method"] == "whole range"   # an hour holds no complete month
     assert best["params"] == best["selection"]["ranking"][0]["params"]
 
-    best_files = list((Path(env.work_dir) / "best_result").glob("*.json"))
-    assert len(best_files) == 1
+    # best_result/<batch_id>/ holds the selection, and the chosen run's meta.json
+    # when one passed the filters.
+    [best_dir] = (Path(env.work_dir) / "best_result").iterdir()
+    assert best_dir.name == str(runner.batch_id)
+    selection_file = json.loads((best_dir / "selection.json").read_text())
+    assert selection_file["ranking"][0]["params"] == best["params"]
+    copies = sorted(p.name for p in best_dir.iterdir() if p.name != "selection.json")
+    if best["selection"]["recommended"] is None:
+        assert copies == []
+    else:
+        assert copies == [f"{best['run_id']}.json"]
+        assert (best_dir / copies[0]).read_text() == (run_dir.run_dir(env.work_dir, best["run_id"]) / run_dir.META).read_text()
 
     # With every safeguard off, selection is the plain pnl5 ranking it replaced.
     from enoshima.selection import SelectionSettings
 
     plain = SelectionSettings(positive_pnl10=False, neighbors=False, train_months=0)
     best_plain = Runner(env, dt_range, optimize="grid", chunk_days=1, selection_settings=plain).post_analysis()
-    all_pnl = [json.loads(p.read_text())["result"]["pnl5"] for p in logs]
+    all_pnl = [load(p)["result"]["pnl5"] for p in logs]
     assert best_plain["result"]["pnl5"] == max(all_pnl)
 
 
@@ -296,11 +331,11 @@ def test_a_sweep_in_several_batches_gets_the_same_results_as_one(run_env, tmp_pa
     env, dt_range = run_env
 
     Runner(env, dt_range, optimize="grid", chunk_days=1, max_concurrency=6).run()
-    one_batch = {p.name: json.loads(p.read_text())["result"] for p in (Path(env.work_dir) / "run_log").glob("*.json")}
+    one_batch = {p.name: load(p)["result"] for p in run_dirs(env)}
 
     shutil.rmtree(Path(env.work_dir) / "run_log")
     Runner(env, dt_range, optimize="grid", chunk_days=1, max_concurrency=4).run()
-    two_batches = {p.name: json.loads(p.read_text())["result"] for p in (Path(env.work_dir) / "run_log").glob("*.json")}
+    two_batches = {p.name: load(p)["result"] for p in run_dirs(env)}
 
     assert len(one_batch) == 6
     assert two_batches == one_batch
@@ -332,7 +367,7 @@ def test_a_backtest_that_raises_fails_without_stopping_the_others(run_env, monke
     runner = Runner(env, dt_range, optimize="grid", chunk_days=1)
     runner.run()   # must return: a hang here is the deadlock
 
-    logs = [json.loads(p.read_text()) for p in (Path(env.work_dir) / "run_log").glob("*.json")]
+    logs = [load(p) for p in run_dirs(env)]
     assert len(logs) == 4, "the two fast_period=40 sets failed; the other four completed"
     assert all(log["params"]["fast_period"] != 40 for log in logs)
     assert sorted(p["slow_period"] for p in runner.failed) == [120, 240]
@@ -369,7 +404,7 @@ def test_a_single_run_uses_params_json_not_the_grid_defaults(run_env):
     assert runner.param_sets() == [{"fast_period": 30, "slow_period": 90}]
 
     runner.run()
-    log = json.loads(next((Path(env.work_dir) / "run_log").glob("*.json")).read_text())
+    log = load(run_dirs(env)[0])
     assert log["params"] == {"fast_period": 30, "slow_period": 90}
 
 
@@ -400,7 +435,7 @@ def test_a_sweep_is_not_overwritten_by_params_json(run_env, monkeypatch):
 
     Runner(env, dt_range, optimize="grid", chunk_days=1).run()
 
-    assert len(list((Path(env.work_dir) / "run_log").glob("*.json"))) == 6
+    assert len(run_dirs(env)) == 6
     assert offered == [], "a backtest handed params.json to its strategy"
 
 
@@ -431,7 +466,7 @@ def test_an_env_needs_no_desc_json(run_env):
 
     runner = Runner(env, dt_range, chunk_days=1)
     runner.run()
-    assert list((Path(env.work_dir) / "run_log").glob("*.json"))
+    assert run_dirs(env)
 
 
 def test_a_run_log_records_the_config_that_produced_it(run_env):
@@ -439,7 +474,7 @@ def test_a_run_log_records_the_config_that_produced_it(run_env):
     env, dt_range = run_env
     Runner(env, dt_range, chunk_days=1).run()
 
-    log = json.loads(next((Path(env.work_dir) / "run_log").glob("*.json")).read_text())
+    log = load(run_dirs(env)[0])
     assert log["env"] == str(ENV_NAME)
     assert log["config"]["market"] == "COINCHECK:BTC_SPOT"
     assert log["config"]["order_size"] == 0.002

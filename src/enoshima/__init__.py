@@ -8,9 +8,12 @@ exchange, evaluates what happened, and optionally records it in InfluxDB.
 | `runner` | Which parameter sets to run, and one shared pass over the data for all of them |
 | `data_source` | Chunked replay: asks hase for a few days at a time, one copy shared |
 | `backtest` | `BacktestRuntime`: one strategy, one replay, reported to its reporters |
-| `result` | `ResultReporter`: the evaluations, and a run's result |
+| `result` | `ResultReporter`: the evaluations, the closed trades, and a run's summary |
+| `ledger` | A closed trade, and the trades grouped by month, weekday, hour, holding time... |
+| `run_dir` | A run's folder: meta, summary, trades and groupings, written whole or not at all |
 | `eval` | Turning fills and PnL into Sharpe, drawdown, win rate |
-| `run_log` | What a run recorded about itself, and why its id is deterministic |
+| `run_log` | A run's provenance (`meta.json`), and why its id is deterministic |
+| `selection` | How `--optimize` chooses: filters, grid neighbours, walk-forward months |
 | `influx` | `InfluxReporter`: the optional metric stream, written to InfluxDB as it runs |
 | `cli` | The `enoshima` command |
 | `settings` | `enoshima.json`: InfluxDB recording and run sizing, per environment |

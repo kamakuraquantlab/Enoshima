@@ -43,6 +43,7 @@ from qate_env import sys_env
 from qate_env.env import Env
 from qate_env.env_name import EnvName
 
+from enoshima import run_dir
 from enoshima.influx import InfluxdbStore
 from enoshima.runner import Runner
 from enoshima.settings import SETTINGS_FILE, load_settings
@@ -110,15 +111,10 @@ def cmd_run(args) -> int:
 def cmd_results(args) -> int:
     env = Env(sys_env.get_env_root_dir(), args.env)
     env.visit()
-    run_log_dir = Path(env.work_dir) / "run_log"
-    if not run_log_dir.is_dir():
-        LOG.info(f"No runs recorded for {args.env}")
-        return 1
-
     rows = []
-    for path in run_log_dir.glob("*.json"):
+    for path in run_dir.iter_complete(Path(env.work_dir)):
         try:
-            rows.append(json.loads(path.read_text()))
+            rows.append({**run_dir.read_json(path, run_dir.META), "result": run_dir.read_json(path, run_dir.SUMMARY)})
         except (json.JSONDecodeError, OSError):
             continue
     if not rows:
