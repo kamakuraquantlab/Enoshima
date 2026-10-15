@@ -65,6 +65,7 @@ class BacktestLog(RunLog):
         A temporary run is marked in it, so that it does not overwrite the log of
         the permanent run it repeats -- the log that names the bucket the results
         live in. Only when temporary, so a permanent run's id is what it always was.
+        It is also prefixed `tmp_`, so its folder reads as temporary in a listing.
         """
         identity = {
             "env": str(self.env.name),
@@ -76,7 +77,8 @@ class BacktestLog(RunLog):
         if self.is_temporary_run:
             identity["temporary"] = True
         raw = json.dumps(identity, sort_keys=True, cls=Encoder)
-        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+        digest = hashlib.sha256(raw.encode()).hexdigest()[:16]
+        return f"tmp_{digest}" if self.is_temporary_run else digest
 
     def to_dict(self) -> dict:
         data = super().to_dict()

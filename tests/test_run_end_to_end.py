@@ -272,6 +272,9 @@ def test_a_temporary_run_gets_a_bucket_of_its_own_and_keeps_the_permanent_log(ru
     logs = [load(p) for p in run_dirs(env)]
     assert sorted(log["is_temporary_run"] for log in logs) == [False, True]
     [permanent] = [log for log in logs if not log["is_temporary_run"]]
+    [temporary] = [log for log in logs if log["is_temporary_run"]]
+    assert temporary["id"].startswith("tmp_") and not permanent["id"].startswith("tmp_")
+    assert sorted(p.name.startswith("tmp_") for p in run_dirs(env)) == [False, True]
     assert permanent["influx_bucket"] == f"backtest_{ENV_NAME}_20_120"
 
 
