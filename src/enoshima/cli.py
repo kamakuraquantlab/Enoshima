@@ -87,6 +87,7 @@ def cmd_run(args) -> int:
             force=args.force,
             influx=influx,
             temporary=args.temporary,
+            selection_settings=settings.selection,
         )
         quiet_strategy_logs(runner.profile.strategy_module_name, settings.strategy_log_level)
         runner.run()

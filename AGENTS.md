@@ -178,8 +178,13 @@ but it is easy to break from here:
   recorded `"config": null` for two commits. `tests/test_run_end_to_end.py` now
   holds the provenance fields, because a result you cannot attribute to a
   configuration is not a result.
-- **`--optimize` ranks on `pnl5`**, the middle slippage assumption. Ranking on
-  `pnl0` selects for strategies whose edge is thinnest.
+- **`--optimize` scores on `pnl5`**, the middle slippage assumption -- ranking on
+  `pnl0` selects for strategies whose edge is thinnest -- but does not simply
+  take the highest. `selection` filters (no loss at pnl10 by default), smooths
+  each score over its grid neighbours, and walk-forward tests the choice on JST
+  months from `result.periods`, recommending what it chose on the latest months.
+  The out-of-sample total is the honest figure; an in-sample best is not one.
+  `selection` works only from run logs: it must never need a replay.
 - **Never delete a user's results.** There is no `clean` command: a user who
   wants them gone deletes `run_log/` and `best_result/`. An earlier version pruned
   run logs older than seven days automatically, on every run.

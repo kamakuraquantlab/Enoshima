@@ -52,7 +52,7 @@ from qate_env.trading_env import (
     load_trading_env,
 )
 
-from . import param_id
+from . import param_id, selection
 from .backtest import Backtest
 from .data_source import DEFAULT_CHUNK_DAYS, DataSource, market_data_event_types
 from .influx import InfluxdbStore, InfluxReporter, bucket_name
@@ -92,6 +92,7 @@ class Runner:
         force: bool = False,
         influx: InfluxdbStore | None = None,
         temporary: bool = False,
+        selection_settings: selection.SelectionSettings | None = None,
     ):
         """`influx` is an `influx.InfluxdbStore`, or None to record no metric stream.
 
@@ -108,6 +109,7 @@ class Runner:
         self.output_root = Path(env.work_dir)
         self.influx = influx
         self.temporary = temporary
+        self.selection_settings = selection_settings or selection.SelectionSettings()
         self.batch_id = self._next_batch_id(self.output_root)
         # The parameter sets whose backtest raised. A run with any is a failed
         # run, whatever else it computed: `enoshima run` exits non-zero.
@@ -311,17 +313,19 @@ class Runner:
         )
 
     def post_analysis(self) -> dict | None:
-        """Rank every result for this strategy and range, and save the best.
+        """Choose a parameter set from every result for this strategy and range, and save it.
 
-        Ranked on `pnl5` — the middle slippage assumption, not the optimistic
-        one. Picking a winner on the zero-slippage figure selects for strategies
-        whose edge is thinnest.
+        See `selection`: sets that lose money at the pessimistic slippage (or
+        break the env's other filters) rank last, a set's score is pnl5
+        averaged with its grid neighbours, and -- when the run logs carry
+        months -- the choice is walk-forward tested, and the set recommended is
+        the one chosen on the most recent months.
 
         Ranked across every run log matching the strategy and the date range,
         *not* only the ones this batch ran. That distinction is what makes a
         resumed sweep give the right answer: the parameter sets skipped because
-        they already had a result are still candidates for best. Ranking by batch
-        id instead meant an interrupted sweep, resumed, chose its winner from only
+        they already had a result are still candidates. Ranking by batch id
+        instead meant an interrupted sweep, resumed, chose its winner from only
         the combinations it happened to re-run.
         """
         if not self.optimize:
@@ -332,39 +336,67 @@ class Runner:
             LOG.warning(f"No run logs at {run_log_dir}")
             return None
 
-        results = []
+        runs = []
         for json_file in run_log_dir.glob("*.json"):
             try:
                 data = json.loads(json_file.read_text())
             except (json.JSONDecodeError, OSError) as e:
                 LOG.error(f"Could not read {json_file}: {e}")
                 continue
-            if not self._is_comparable(data):
-                continue
-            if "result" in data and "pnl5" in data["result"]:
-                results.append((data["result"]["pnl5"], data))
+            if self._is_comparable(data) and "pnl5" in data.get("result", {}):
+                runs.append(data)
 
-        if not results:
+        if not runs:
             LOG.warning(
                 f"No results with a pnl5 figure for {self.profile.strategy_name} "
                 f"over {self.dt_range.start_str}..{self.dt_range.end_str}"
             )
             return None
 
-        results.sort(key=lambda x: x[0], reverse=True)
-        best_pnl, best = results[0]
+        grid = self.definition.param_grid if self.optimize == MODE_GRID else None
+        choice = selection.select(runs, self.dt_range.start_ts, self.dt_range.end_ts, grid, self.selection_settings)
+        self._log_choice(choice, len(runs))
+
+        top = choice["ranking"][0]["params"]
+        best = dict(next(r for r in runs if r["params"] == top))
+        best["selection"] = choice
 
         best_dir = self.output_root / "best_result"
         best_dir.mkdir(parents=True, exist_ok=True)
         best_path = best_dir / f"{self.batch_id}.json"
         best_path.write_text(json.dumps(best, indent=2))
-
-        params = " ".join(f"{k}={v}" for k, v in best.get("params", {}).items())
-        sharpe = best.get("result", {}).get("sharpe_ratio_annualized0")
-        LOG.info(
-            f"DONE {len(results)} combos - BEST pnl5={_fmt(best_pnl, '+.2f')} "
-            f"trades={best.get('result', {}).get('pnl_cnt0')} "
-            f"sharpe={_fmt(sharpe, '.3f')} "
-            f"params=({params}) saved={best_path}"
-        )
+        LOG.info(f"Saved {best_path}")
         return best
+
+    def _log_choice(self, choice: dict, n_runs: int) -> None:
+        def show(params):
+            return " ".join(f"{k}={v}" for k, v in (params or {}).items()) or "none"
+
+        if choice["method"] == "walk-forward":
+            wf = choice["walk_forward"]
+            for fold in wf["folds"]:
+                LOG.info(
+                    f"FOLD train {fold['train'][0]}..{fold['train'][1]} test {fold['test'][0]}..{fold['test'][1]}: "
+                    f"pnl5={_fmt(fold['pnl5'], '+.2f')} params=({show(fold['params'])})"
+                )
+            oos = wf["out_of_sample"]
+            LOG.info(
+                f"WALK-FORWARD {oos['folds']} folds, out of sample: pnl0={_fmt(oos['pnl0'], '+.2f')} "
+                f"pnl5={_fmt(oos['pnl5'], '+.2f')} pnl10={_fmt(oos['pnl10'], '+.2f')} "
+                f"profitable folds {oos['profitable_folds']}/{oos['folds']}"
+            )
+        else:
+            LOG.info(f"Ranked on the whole range: {choice['reason']}")
+
+        top = choice["ranking"][0]
+        if choice["recommended"] is None:
+            LOG.warning(
+                f"No parameter set passes the filters ({choice['settings']}); nothing recommended. "
+                f"Highest score: params=({show(top['params'])}) pnl5={_fmt(top['pnl5'], '+.2f')}"
+            )
+            return
+        LOG.info(
+            f"DONE {n_runs} combos - RECOMMENDED score={_fmt(top['score'], '+.2f')} "
+            f"pnl5={_fmt(top['pnl5'], '+.2f')} pnl10={_fmt(top['pnl10'], '+.2f')} "
+            f"trades={top['trades']} max_dd5={_fmt(top['dd5'], '.2f')} params=({show(top['params'])})"
+        )

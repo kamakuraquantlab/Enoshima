@@ -170,7 +170,7 @@ A run writes back into the same directory:
 EXAMPLE_BACKTEST/
 ├── env.log                            everything a command logged
 ├── run_log/<id>.json                  one per parameter set: provenance + results
-└── best_result/<batch_id>.json        the winner of a sweep
+└── best_result/<batch_id>.json        a sweep's recommendation, and why
 ```
 
 Orders, per-trade PnL and the strategy's bars are not written locally. They go to
@@ -191,7 +191,15 @@ optional, and a missing file means the defaults:
   },
   "chunk_days": 2,
   "max_concurrency": 16,
-  "strategy_log_level": "WARNING"
+  "strategy_log_level": "WARNING",
+  "selection": {
+    "positive_pnl10": true,
+    "min_trades": 0,
+    "max_drawdown": null,
+    "neighbors": true,
+    "train_months": 6,
+    "test_months": 1
+  }
 }
 ```
 
@@ -245,7 +253,29 @@ At 0, 0.005% and 0.01% extra slippage, reported with the suffixes `0`, `5` and
 `10` — `pnl0`, `pnl5`, `pnl10`. One number is not a result. A strategy whose edge
 survives at zero slippage and vanishes at 0.005% has told you something important
 about itself, and reporting only the optimistic figure hides it. `--optimize`
-ranks on `pnl5` for the same reason.
+scores on `pnl5` for the same reason.
+
+## How `--optimize` chooses
+
+The best whole-range PnL is the set that fit that range best, which is not the
+set most likely to keep working. A sweep therefore chooses in three steps, all
+from the run logs it has already written:
+
+1. **Filters.** A set that loses money at `pnl10` ranks below every set that
+   does not; `min_trades` and `max_drawdown` (on pnl5) can be added.
+2. **Neighbours.** A set's score is its pnl5 averaged with its neighbours on the
+   grid -- one step along a numeric parameter -- so a lone spike loses to a
+   plateau. Categorical parameters have no neighbours.
+3. **Walk-forward.** Each run log records its PnL by JST month. The sweep chooses
+   on `train_months` complete months, scores that choice on the following
+   `test_months`, steps forward and repeats. The sum of those test months is
+   what choosing this way would have earned, out of sample -- the figure to
+   trust. The set recommended is the one chosen on the most recent months.
+
+`best_result/<batch_id>.json` holds the recommended set's run log and a
+`selection` section with the ranking, every fold and the out-of-sample totals.
+Run logs written before months were recorded fall back to the whole-range
+ranking; re-run the sweep with `--force` to record them.
 
 ## Commands
 

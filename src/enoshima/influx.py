@@ -17,11 +17,20 @@ and URLs come from the `"influx"` entry itself.
 ## Timestamps
 
 Metric records carry float epoch seconds. Points are written at microsecond
-precision, and colliding timestamps are spread by 1us each, because InfluxDB treats
-measurement + tags + timestamp as a primary key and would otherwise overwrite
-rather than append. Two fills inside the same millisecond are ordinary, so this is
-load-bearing rather than defensive. It is also deterministic, so re-running a
-parameter set over the same range overwrites its points rather than doubling them.
+precision, and points of one series -- measurement, tags and field names -- that
+share a timestamp are spread by 1us each, because InfluxDB treats series +
+timestamp as a primary key and would otherwise overwrite rather than append. Two
+fills inside the same millisecond are ordinary, so this is load-bearing rather
+than defensive.
+
+The spreading must also be the same in every run, so that re-running a parameter
+set over the same range overwrites its points rather than doubling them. It was
+not: ties were counted across every point in a write buffer, whatever its series,
+and restarted at each flush, so a point's offset depended on its neighbours and
+on where the buffer broke. A change elsewhere -- fewer metrics buffered -- moved
+the offsets, and a re-run added a second copy of about 0.5% of a sweep's points.
+`TimestampSpreader` counts per series and across flushes, so a point's offset
+depends only on how many earlier points of its own series share its timestamp.
 
 ## One bucket per parameter set
 
@@ -68,29 +77,28 @@ def create_client(url: str, token: str, org: str | None) -> InfluxDBClient:
     return InfluxDBClient(url, token, org=org, timeout=WRITE_TIMEOUT_MS)
 
 
-def normalize_points_timestamp_us(points: list[Point]) -> None:
-    """Move points to microseconds and break timestamp ties.
+class TimestampSpreader:
+    """Moves points to microseconds and breaks ties within a series, the same way every run.
 
-    Mutates in place. A point already at `WritePrecision.US` is left at its
-    scale rather than multiplied again, so re-flushing a buffer after a failed
-    write cannot overflow the timestamps.
+    One per writer, so the count carries across flushes. Mutates in place. A
+    point already at `WritePrecision.US` was spread by an earlier flush whose
+    write failed, and is already in the count: it is left exactly as it is, so
+    a re-flush neither multiplies nor shifts it again.
     """
-    last_base_us = None
-    seq = 0
 
-    for p in points:
-        if p._write_precision == WritePrecision.US:
-            base_us = p._time  # already microseconds -- do not multiply
-        else:
+    def __init__(self):
+        self._last: dict[tuple, tuple[int, int]] = {}  # series -> (base_us, seq)
+
+    def __call__(self, points: list[Point]) -> None:
+        for p in points:
+            if p._write_precision == WritePrecision.US:
+                continue  # spread already -- counting it again would move it
             base_us = p._time * 1_000  # milliseconds -> microseconds
-
-        if base_us == last_base_us:
-            seq += 1
-        else:
-            seq = 0
-            last_base_us = base_us
-
-        p.time(base_us + seq, WritePrecision.US)
+            series = (p._name, tuple(sorted(p._tags.items())), tuple(sorted(p._fields)))
+            last = self._last.get(series)
+            seq = last[1] + 1 if last is not None and last[0] == base_us else 0
+            self._last[series] = (base_us, seq)
+            p.time(base_us + seq, WritePrecision.US)
 
 
 # Emitted per market event, and already in the bronze layer: never recorded.
@@ -114,6 +122,7 @@ class InfluxdbWriter(BufferedWriter):
         self.client = create_client(url, token, org)
         self.bucket_name = bucket_name
         self.param_set_id = param_set_id
+        self._spread_timestamps = TimestampSpreader()
         self._init_bucket()
         self.w = self.client.write_api(
             write_options=WriteOptions(
@@ -130,7 +139,7 @@ class InfluxdbWriter(BufferedWriter):
         b.create_bucket(bucket_name=self.bucket_name)
 
     def write(self, points: list[Point]):
-        normalize_points_timestamp_us(points)
+        self._spread_timestamps(points)
         if self.param_set_id:
             for p in points:
                 p.tag("param_set_id", self.param_set_id)

@@ -10,7 +10,15 @@
   },
   "chunk_days": 2,
   "max_concurrency": 16,
-  "strategy_log_level": "WARNING"
+  "strategy_log_level": "WARNING",
+  "selection": {
+    "positive_pnl10": true,
+    "min_trades": 0,
+    "max_drawdown": null,
+    "neighbors": true,
+    "train_months": 6,
+    "test_months": 1
+  }
 }
 ```
 
@@ -29,6 +37,8 @@ Every key is optional, and a missing file means the defaults.
   INFO, which is what you want when one fails; a sweep would write that line for
   every fill of every parameter set (1.4 million lines, 600 MB, in one 45-way
   sweep). `"INFO"` brings it back when a backtest needs debugging.
+- `selection` is how `--optimize` chooses: filters, grid-neighbour smoothing
+  and walk-forward months. See `enoshima.selection`.
 
 This is the environment's file rather than a set of flags because it describes
 the environment: where its runs are charted and how big its data is. An unknown
@@ -38,11 +48,12 @@ run unrecorded.
 
 import json
 import logging
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from .data_source import DEFAULT_CHUNK_DAYS
 from .runner import MAX_CONCURRENCY
+from .selection import SelectionSettings
 
 SETTINGS_FILE = "enoshima.json"
 
@@ -61,6 +72,7 @@ class Settings:
     max_concurrency: int = MAX_CONCURRENCY
     strategy_log_level: str = "WARNING"
     influx: InfluxSettings | None = None
+    selection: SelectionSettings = field(default_factory=SelectionSettings)
 
     def __post_init__(self):
         if not isinstance(logging.getLevelName(self.strategy_log_level), int):
@@ -88,4 +100,13 @@ def load_settings(work_dir: str | Path) -> Settings:
             raise ValueError(f'"influx" in {path} must be an object, e.g. {{"token": "..."}}')
         _check_keys(influx, InfluxSettings, f'"influx" in {path}')
         influx = InfluxSettings(**influx)
-    return Settings(**data, influx=influx)
+
+    selection = data.pop("selection", None)
+    if selection is None:
+        selection = SelectionSettings()
+    else:
+        if not isinstance(selection, dict):
+            raise ValueError(f'"selection" in {path} must be an object')
+        _check_keys(selection, SelectionSettings, f'"selection" in {path}')
+        selection = SelectionSettings(**selection)
+    return Settings(**data, influx=influx, selection=selection)

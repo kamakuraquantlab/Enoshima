@@ -16,7 +16,23 @@ Every run is evaluated three times, at 0, 0.005% and 0.01% extra slippage, and
 the results are suffixed `0`, `5` and `10`. One number is not a result: a
 strategy whose edge survives at 0 and vanishes at 0.005% has told you something
 important about itself, and reporting only the optimistic figure hides it.
+
+## Per month
+
+The result also holds `periods`: each evaluation's closed PnL split by JST
+month (the same day boundary as bronze's partitions), with its trade count and
+the high, low and worst drawdown of the PnL within the month, measured from the
+month's start. That is enough to recompute any run of months -- its PnL and its
+exact maximum drawdown -- without replaying again, which is what lets
+`selection` choose parameters on some months and test them on the next.
+
+And `days`: each JST day's closed trades and PnL at the three rates. That is
+what relating a strategy to the market it traded needs -- a day's PnL beside
+that day's volatility or trend -- and it comes from the run itself, not from
+whatever a metrics database happens to hold.
 """
+
+import datetime as dt
 
 from qate.core.ev_type import EventType
 from qate.core.model import SettleType
@@ -26,6 +42,36 @@ from qate.trading.reporter import Reporter
 from qate.util.dt_range import DtRange
 
 from .eval import Evaluation
+
+JST = dt.timezone(dt.timedelta(hours=9))
+
+
+def month_of(ts: float) -> str:
+    """The JST month a timestamp falls in, as `YYYY-MM`."""
+    return dt.datetime.fromtimestamp(ts, JST).strftime("%Y-%m")
+
+
+def day_of(ts: float) -> str:
+    """The JST day a timestamp falls in, as `YYYY-MM-DD` -- bronze's `date=` partition."""
+    return dt.datetime.fromtimestamp(ts, JST).strftime("%Y-%m-%d")
+
+
+class MonthLedger:
+    """One evaluation's closed PnL, month by month, from the months' start."""
+
+    def __init__(self, suffix: str):
+        self.suffix = suffix
+        self.months: dict[str, dict] = {}
+
+    def add(self, month: str, pnl_change: float) -> None:
+        m = self.months.get(month)
+        if m is None:
+            m = self.months[month] = {"trades": 0, "pnl": 0.0, "peak": 0.0, "trough": 0.0, "dd": 0.0}
+        m["trades"] += 1
+        m["pnl"] += pnl_change
+        m["peak"] = max(m["peak"], m["pnl"])
+        m["trough"] = min(m["trough"], m["pnl"])
+        m["dd"] = max(m["dd"], m["peak"] - m["pnl"])
 
 # Extra slippage rates the run is evaluated at, beyond the simulated fill.
 # 0.005% is what live execution logs have actually shown for small orders in
@@ -51,6 +97,8 @@ class ResultReporter(Reporter):
         super().__init__()
         self.dt_range = dt_range
         self.evals = [Evaluation(), Evaluation(SLIPPAGE_05), Evaluation(SLIPPAGE_10)]
+        self.ledgers = [MonthLedger(evaluation.suffix) for evaluation in self.evals]
+        self.days: dict[str, dict] = {}
         # What the event loop caught. Any at all and there is no result.
         self.exceptions: list[BaseException] = []
 
@@ -72,7 +120,17 @@ class ResultReporter(Reporter):
                 evaluation.on_open_pnl_update(pnl_update)
             return
 
-        eval_metrics = [evaluation.on_close_pnl_update(pnl_update) for evaluation in self.evals]
+        month = month_of(pnl_update.get_ts())
+        day = self.days.get(day_of(pnl_update.get_ts()))
+        if day is None:
+            day = self.days[day_of(pnl_update.get_ts())] = {"trades": 0, **{f"pnl{e.suffix}": 0.0 for e in self.evals}}
+        day["trades"] += 1
+        eval_metrics = []
+        for evaluation, ledger in zip(self.evals, self.ledgers):
+            before = evaluation.overall_pnl
+            eval_metrics.append(evaluation.on_close_pnl_update(pnl_update))
+            ledger.add(month, evaluation.overall_pnl - before)
+            day[f"pnl{evaluation.suffix}"] += evaluation.overall_pnl - before
 
         # For comparison with live trading: whoever records the run gets these
         # through the runtime, as if the strategy had emitted them.
@@ -83,4 +141,12 @@ class ResultReporter(Reporter):
         result: dict = {}
         for evaluation in self.evals:
             result.update(evaluation.get_result())
+        periods: dict[str, dict] = {}
+        for ledger in self.ledgers:
+            for month, m in ledger.months.items():
+                row = periods.setdefault(month, {"trades": m["trades"]})
+                for key in ("pnl", "peak", "trough", "dd"):
+                    row[f"{key}{ledger.suffix}"] = m[key]
+        result["periods"] = dict(sorted(periods.items()))
+        result["days"] = dict(sorted(self.days.items()))
         return result

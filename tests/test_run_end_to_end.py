@@ -121,6 +121,16 @@ def test_a_run_trades_and_writes_its_results(run_env):
         assert f"sharpe_ratio_annualized{suffix}" in result
     assert result["pnl_cnt0"] >= 1, "the strategy closed no position; the test data is not forcing a trade"
 
+    # The same closed PnL, by JST month, for `selection`'s walk-forward.
+    assert list(result["periods"]) == ["2026-01"]
+    month = result["periods"]["2026-01"]
+    assert month["trades"] == result["pnl_cnt0"]
+    assert month["pnl5"] == pytest.approx(result["pnl5"])
+    assert month["dd5"] == pytest.approx(result["max_drawdown5"])
+    # And by JST day.
+    assert list(result["days"]) == ["2026-01-02"]
+    assert result["days"]["2026-01-02"]["pnl10"] == pytest.approx(result["pnl10"])
+
     # Trading data goes to InfluxDB or nowhere; a run writes no local copy.
     assert not (Path(env.work_dir) / "result").exists()
 
@@ -263,14 +273,22 @@ def test_optimize_grid_runs_every_combination_and_picks_a_best(run_env):
     assert best is not None
     assert "params" in best and "result" in best
 
-    # One run log per combination, and the best is one of them.
+    # One run log per combination, and the best is the top of the selection's ranking.
     logs = list((Path(env.work_dir) / "run_log").glob("*.json"))
     assert len(logs) == len(combos)
-    all_pnl = [json.loads(p.read_text())["result"]["pnl5"] for p in logs]
-    assert best["result"]["pnl5"] == max(all_pnl)
+    assert best["selection"]["method"] == "whole range"   # an hour holds no complete month
+    assert best["params"] == best["selection"]["ranking"][0]["params"]
 
     best_files = list((Path(env.work_dir) / "best_result").glob("*.json"))
     assert len(best_files) == 1
+
+    # With every safeguard off, selection is the plain pnl5 ranking it replaced.
+    from enoshima.selection import SelectionSettings
+
+    plain = SelectionSettings(positive_pnl10=False, neighbors=False, train_months=0)
+    best_plain = Runner(env, dt_range, optimize="grid", chunk_days=1, selection_settings=plain).post_analysis()
+    all_pnl = [json.loads(p.read_text())["result"]["pnl5"] for p in logs]
+    assert best_plain["result"]["pnl5"] == max(all_pnl)
 
 
 def test_a_sweep_in_several_batches_gets_the_same_results_as_one(run_env, tmp_path):
