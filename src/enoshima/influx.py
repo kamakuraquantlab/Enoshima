@@ -32,12 +32,18 @@ the offsets, and a re-run added a second copy of about 0.5% of a sweep's points.
 `TimestampSpreader` counts per series and across flushes, so a point's offset
 depends only on how many earlier points of its own series share its timestamp.
 
-## One bucket per parameter set
+## One bucket per parameter set and batch
 
-`backtest_<param_set_id>`, the id naming the environment and the parameters (see
-`param_id`), so an optimize sweep's combinations sit side by side and a dashboard
-can switch between them with a variable rather than a query rewrite. A temporary
-run's id ends in `_tmp_<timestamp>`, so it writes a bucket of its own.
+`backtest_<param_set_id>_<batch_id>`: the id naming the environment and the
+parameters (see `param_id`), then the batch that ran it. A sweep's combinations
+sit side by side under one batch id, and a dashboard switches between them with
+a variable rather than a query rewrite. The run's `meta.json` records its bucket.
+
+The batch id is in it so that every execution writes a bucket of its own. Without
+it, a `--force` re-run wrote into the bucket of the run it repeated: points at the
+same timestamps were replaced and the rest stayed, so after a strategy change one
+bucket held two runs mixed together. A `--temporary` flag used to be the way to
+ask for a fresh bucket; making every run fresh removed the need for it.
 
 Every bucket is kept. Enoshima creates buckets and writes to them, and never
 expires or deletes one: cleaning up is a separate tool's job. A retention on
@@ -306,5 +312,5 @@ class InfluxReporter(Reporter):
 BUCKET_PREFIX = "backtest"
 
 
-def bucket_name(param_set_id: str) -> str:
-    return f"{BUCKET_PREFIX}_{param_set_id}"
+def bucket_name(param_set_id: str, batch_id: int) -> str:
+    return f"{BUCKET_PREFIX}_{param_set_id}_{batch_id}"

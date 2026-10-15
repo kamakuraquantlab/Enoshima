@@ -202,14 +202,15 @@ def test_a_run_without_influx_still_has_its_result(run_env):
 def test_influx_records_orders_pnl_and_evaluations(run_env):
     env, dt_range = run_env
     store = MemoryStore()
-    Runner(env, dt_range, chunk_days=1, influx=store).run()
+    runner = Runner(env, dt_range, chunk_days=1, influx=store)
+    runner.run()
 
     log = load(run_dirs(env)[0])
     [writer] = store.writers
     assert writer.closed
-    # The env, then the example's params.json in param_grid.json's order.
+    # The env, then the example's params.json in param_grid.json's order, then the batch.
     assert log["param_set_id"] == f"{ENV_NAME}_20_120"
-    assert writer.bucket == log["influx_bucket"] == f"backtest_{ENV_NAME}_20_120"
+    assert writer.bucket == log["influx_bucket"] == f"backtest_{ENV_NAME}_20_120_{runner.batch_id}"
 
     by_measurement = {}
     for point in writer.points:
@@ -257,25 +258,21 @@ def test_a_second_identical_run_is_skipped(run_env):
     assert load(log_path)["start_ts"] == first["start_ts"]
 
 
-def test_a_temporary_run_gets_a_bucket_of_its_own_and_keeps_the_permanent_log(run_env):
-    """Repeating a recorded run temporarily must neither be skipped nor overwrite it."""
+def test_a_forced_rerun_writes_a_bucket_of_its_own_and_replaces_the_folder(run_env):
+    """Re-running must not write on top of the earlier run's points; the folder is the run's id, so it is replaced."""
     env, dt_range = run_env
-    Runner(env, dt_range, chunk_days=1, influx=MemoryStore()).run()
+    first = Runner(env, dt_range, chunk_days=1, influx=MemoryStore())
+    first.run()
 
     store = MemoryStore()
-    runner = Runner(env, dt_range, chunk_days=1, influx=store, temporary=True)
-    runner.run()
+    second = Runner(env, dt_range, chunk_days=1, influx=store, force=True)
+    second.run()
 
     [writer] = store.writers
-    assert writer.bucket == f"backtest_{ENV_NAME}_20_120_tmp_{runner.batch_id}"
-
-    logs = [load(p) for p in run_dirs(env)]
-    assert sorted(log["is_temporary_run"] for log in logs) == [False, True]
-    [permanent] = [log for log in logs if not log["is_temporary_run"]]
-    [temporary] = [log for log in logs if log["is_temporary_run"]]
-    assert temporary["id"].startswith("tmp_") and not permanent["id"].startswith("tmp_")
-    assert sorted(p.name.startswith("tmp_") for p in run_dirs(env)) == [False, True]
-    assert permanent["influx_bucket"] == f"backtest_{ENV_NAME}_20_120"
+    assert second.batch_id != first.batch_id
+    assert writer.bucket == f"backtest_{ENV_NAME}_20_120_{second.batch_id}"
+    [path] = run_dirs(env)
+    assert load(path)["influx_bucket"] == writer.bucket
 
 
 def test_force_reruns_a_completed_parameter_set(run_env):

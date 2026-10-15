@@ -41,7 +41,3 @@ def test_widening_the_grid_does_not_rename_an_existing_set():
     params = {"stop": 0.04, "threshold": 0.0015}
     assert param_set_id("ENV", params, wider) == param_set_id("ENV", params, GRID)
 
-
-def test_a_temporary_run_appends_its_timestamp():
-    params = {"stop": 0.04, "threshold": 0.0015}
-    assert param_set_id("ENV", params, GRID, tmp_ts=1760000000) == "ENV_0.04_0.0015_tmp_1760000000"

@@ -144,12 +144,17 @@ but it is easy to break from here:
   sweep resumable, and what `--force` overrides. It was a UUID once, which meant
   the skip check could never fire and every combination was always recomputed.
 - **A parameter set's id is Enoshima's, built from `param_grid.json`** (`param_id`):
-  the env name, then the values as plain decimals in grid order, plus
-  `_tmp_<timestamp>` for `--temporary`. There are no scaling factors: they made
-  ids unreadable without the grid, and a missing one changed every bucket name. Nothing about the config is in it: an env's
-  market and strategy are fixed, so its name stands for them. It names the InfluxDB
+  the env name, then the values as plain decimals in grid order. There are no
+  scaling factors: they made ids unreadable without the grid, and a missing one
+  changed every bucket name. Nothing about the config is in it: an env's
+  market and strategy are fixed, so its name stands for them. It starts the InfluxDB
   bucket, so the same values must keep giving the same id. It was each strategy's
   `get_param_set_id` once; do not put it back on `Strategy`.
+- **A bucket is `backtest_<param_set_id>_<batch_id>`: every execution writes its
+  own.** A `--force` re-run used to write into the bucket of the run it repeated,
+  leaving the old run's points beside the new. There is no `--temporary` any more;
+  it was the opt-in for what is now always true. The batch id goes in the bucket,
+  never in the run's id, which must stay deterministic for a sweep to resume.
 - **`post_analysis` ranks across every run log with the same strategy and range**,
   not just the current batch. A resumed sweep must be able to pick a best from
   results it did not just compute.

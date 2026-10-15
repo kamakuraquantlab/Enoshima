@@ -87,7 +87,6 @@ def cmd_run(args) -> int:
             max_concurrency=args.max_concurrency or settings.max_concurrency,
             force=args.force,
             influx=influx,
-            temporary=args.temporary,
             selection_settings=settings.selection,
         )
         quiet_strategy_logs(runner.profile.strategy_module_name, settings.strategy_log_level)
@@ -163,11 +162,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"parameter sets per data pass; overrides {SETTINGS_FILE}",
     )
     run.add_argument("--force", action="store_true", help="re-run parameter sets that already have a result")
-    run.add_argument(
-        "--temporary",
-        action="store_true",
-        help="record to a bucket of its own, suffixed _tmp_<timestamp>",
-    )
     run.set_defaults(func=cmd_run)
 
     results = sub.add_parser("results", help="list recorded runs, best first")

@@ -91,15 +91,9 @@ class Runner:
         max_concurrency: int = MAX_CONCURRENCY,
         force: bool = False,
         influx: InfluxdbStore | None = None,
-        temporary: bool = False,
         selection_settings: selection.SelectionSettings | None = None,
     ):
-        """`influx` is an `influx.InfluxdbStore`, or None to record no metric stream.
-
-        `temporary` gives every run of this batch a bucket of its own, named with the
-        batch's timestamp; see `param_id`. It always runs: a fresh
-        bucket is the point, so an existing result is no reason to skip.
-        """
+        """`influx` is an `influx.InfluxdbStore`, or None to record no metric stream."""
         self.env = env
         self.dt_range = dt_range
         self.optimize = optimize
@@ -108,7 +102,6 @@ class Runner:
         self.force = force
         self.output_root = Path(env.work_dir)
         self.influx = influx
-        self.temporary = temporary
         self.selection_settings = selection_settings or selection.SelectionSettings()
         self.batch_id = self._next_batch_id(self.output_root)
         # The parameter sets whose backtest raised. A run with any is a failed
@@ -124,8 +117,9 @@ class Runner:
     def _next_batch_id(output_root: Path) -> int:
         """A unix timestamp, advanced until it names a batch that does not exist.
 
-        The id groups one sweep's runs together and names its `best_result`
-        folder, so two sweeps sharing an id would overwrite each other's choice. A bare
+        The id groups one sweep's runs together, names its `best_result` folder and
+        ends each of its InfluxDB buckets, so two sweeps sharing an id would overwrite
+        each other's choice and write into each other's buckets. A bare
         `int(time.time())` collides whenever two runs start inside the same
         second, which is ordinary when they are launched from a script.
         """
@@ -210,26 +204,20 @@ class Runner:
     def _create_backtest(self, data_source: DataSource, params: dict) -> Backtest | None:
         StrategyClass = get_strategy_class(self.profile.strategy_module_name, self.profile.variant)
         strategy = StrategyClass(self.config, params)
-        param_set_id = param_id.param_set_id(
-            str(self.env.name),
-            params,
-            self.definition.param_grid,
-            tmp_ts=self.batch_id if self.temporary else None,
-        )
+        param_set_id = param_id.param_set_id(str(self.env.name), params, self.definition.param_grid)
 
         run_log = BacktestLog(
             self.env,
             params,
             self.dt_range,
             self.profile.strategy_name,
-            is_temporary_run=self.temporary,
             batch_id=self.batch_id,
             config=self.config,
             profile=self.profile,
         )
         run_log.param_set_id = param_set_id
 
-        if not self.force and not self.temporary and run_dir.is_complete(run_dir.run_dir(self.output_root, run_log.get_id())):
+        if not self.force and run_dir.is_complete(run_dir.run_dir(self.output_root, run_log.get_id())):
             LOG.info(f"Skipping {param_set_id}: a result for this range already exists (--force to redo)")
             return None
 
@@ -248,7 +236,7 @@ class Runner:
         if self.influx is None:
             return []
 
-        bucket = bucket_name(param_set_id)
+        bucket = bucket_name(param_set_id, self.batch_id)
         run_log.influx_bucket = bucket
         writer = self.influx.create_writer(bucket, param_set_id=param_set_id)
         return [InfluxReporter(writer, self.dt_range)]

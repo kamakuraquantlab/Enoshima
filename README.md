@@ -236,16 +236,17 @@ echo '{"influx": {}}' > "$QATE_ENV_ROOT/EXAMPLE_BACKTEST/enoshima.json"
 enoshima run --env EXAMPLE_BACKTEST --from 2026-09-01
 ```
 
-One bucket per parameter set, `backtest_<param_set_id>`, so a sweep's
-combinations sit side by side; the run log records which. The id is built by
+One bucket per parameter set and run, `backtest_<param_set_id>_<batch_id>`, so a
+sweep's combinations sit side by side under one batch id; the run's `meta.json`
+records which. The id is built by
 Enoshima from `param_grid.json`, not by the strategy: the environment's name, then
 the parameter values as plain decimals in the grid's order. In
 `EXAMPLE_BACKTEST`, `fast_period=20, slow_period=120` is `EXAMPLE_BACKTEST_20_120`,
 and `threshold=0.0015` would be `0.0015`. Parameters the
 grid does not name follow. An environment's market,
 strategy and variant are fixed, so its name stands for them, and the same values
-always give the same id: re-running a parameter set updates its bucket.
-`--temporary` appends `_tmp_<timestamp>` instead, for a bucket of its own.
+always give the same id. The batch id makes every execution's bucket its own: a
+`--force` re-run does not write on top of the run it repeats.
 Enoshima never expires or deletes a bucket; cleaning up is left to whatever
 manages your InfluxDB. Connection details are
 the entry's own: `"token"`, `"write_url"` and `"read_url"` default to a local
@@ -302,8 +303,7 @@ To clear an environment's results, delete its `run_log/` and `best_result/`.
 
 Flags on `run`: `--optimize grid|combo`, `--chunk-days` (memory),
 `--max-concurrency` (parameter sets per data pass), `--force` (re-run a parameter
-set that already has a result), `--temporary` (record to a bucket of its own; see
-above). The variant is `trading.json`'s, the data is
+set that already has a result). The variant is `trading.json`'s, the data is
 komachi's, and the output is the environment directory.
 
 ## Memory, and how a sweep is cheap

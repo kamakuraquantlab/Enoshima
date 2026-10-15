@@ -1,4 +1,4 @@
-"""The string that names a run's parameter set: its InfluxDB bucket and its run log's tag.
+"""The string that names a run's parameter set: the start of its InfluxDB bucket, and its run log's tag.
 
 Built here from `param_grid.json`, not by the strategy. It used to be each
 strategy's `get_param_set_id`, which made every strategy carry code that has
@@ -29,26 +29,16 @@ does not name follow, in the order the parameter set gives them. An environment
 with no grid gets that for every parameter. Widening a sweep does not rename the
 buckets of the combinations already run; reordering the grid does.
 
-## Temporary runs
-
-A temporary run appends `_tmp_<timestamp>`, so it writes a bucket of its own
-rather than into the one a parameter set's permanent results accumulate in.
+The bucket adds the batch id to it; see `influx.bucket_name`.
 """
 
 from decimal import Decimal
 
-TMP_MARKER = "_tmp_"
-
-
-def param_set_id(env_name: str, params: dict, param_grid: list[dict] | None, tmp_ts: int | None = None) -> str:
-    """`tmp_ts`, a unix timestamp, marks the run temporary."""
+def param_set_id(env_name: str, params: dict, param_grid: list[dict] | None) -> str:
     grid_names = [spec["name"] for spec in param_grid or []]
     names = [name for name in grid_names if name in params]
     names += [name for name in params if name not in grid_names]
-    psid = "_".join([env_name] + [_segment(params[name]) for name in names])
-    if tmp_ts is None:
-        return psid
-    return f"{psid}{TMP_MARKER}{tmp_ts}"
+    return "_".join([env_name] + [_segment(params[name]) for name in names])
 
 
 def _segment(value) -> str:

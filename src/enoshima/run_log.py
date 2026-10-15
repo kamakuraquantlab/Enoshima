@@ -38,7 +38,6 @@ class BacktestLog(RunLog):
         params: dict,
         dt_range: DtRange,
         strategy_name: str,
-        is_temporary_run: bool = False,
         batch_id: int = None,
         config=None,
         profile=None,
@@ -49,7 +48,6 @@ class BacktestLog(RunLog):
         super().__init__(env, config=config, profile=profile, params=params)
         self.dt_range = dt_range
         self.strategy_name = strategy_name
-        self.is_temporary_run = is_temporary_run
         self.batch_id = batch_id
         self.param_set_id = None
         self.influx_bucket = None
@@ -60,12 +58,9 @@ class BacktestLog(RunLog):
         """A hash of what the run computes, so an identical run is recognisable.
 
         Deliberately excludes the batch id and the timestamps: those differ between two runs that would produce the same
-        numbers, and the point is to notice that they would.
-
-        A temporary run is marked in it, so that it does not overwrite the log of
-        the permanent run it repeats -- the log that names the bucket the results
-        live in. Only when temporary, so a permanent run's id is what it always was.
-        It is also prefixed `tmp_`, so its folder reads as temporary in a listing.
+        numbers, and the point is to notice that they would. The batch id is in the
+        InfluxDB bucket instead, so a `--force` re-run replaces this folder and writes
+        a bucket of its own.
         """
         identity = {
             "env": str(self.env.name),
@@ -74,11 +69,8 @@ class BacktestLog(RunLog):
             "start": self.dt_range.start_str,
             "end": self.dt_range.end_str,
         }
-        if self.is_temporary_run:
-            identity["temporary"] = True
         raw = json.dumps(identity, sort_keys=True, cls=Encoder)
-        digest = hashlib.sha256(raw.encode()).hexdigest()[:16]
-        return f"tmp_{digest}" if self.is_temporary_run else digest
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def to_dict(self) -> dict:
         data = super().to_dict()
@@ -90,7 +82,6 @@ class BacktestLog(RunLog):
                 "strategy": self.strategy_name,
                 "start_str": self.dt_range.start_str,
                 "end_str": self.dt_range.end_str,
-                "is_temporary_run": self.is_temporary_run,
                 "influx_bucket": self.influx_bucket,
             }
         )
