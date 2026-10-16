@@ -83,6 +83,19 @@ def read_json(path: Path, name: str) -> dict:
     return json.loads((path / name).read_text())
 
 
+def read_trades(path: Path) -> list[Trade]:
+    """A run folder's `trades.csv`, as written."""
+    with open(path / TRADES, newline="") as f:
+        rows = csv.DictReader(f)
+        return [Trade(**{k: _cell(k, v) for k, v in row.items()}) for row in rows]
+
+
+def _cell(column: str, value: str):
+    if column in ("exchange", "symbol", "side"):
+        return value
+    return None if value == "" else float(value)
+
+
 def iter_complete(root: Path):
     """Every finished run folder under `root`'s `run_log/`."""
     base = Path(root) / RUN_LOG_DIR

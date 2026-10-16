@@ -210,7 +210,10 @@ optional, and a missing file means the defaults:
     "positive_pnl10": true,
     "min_trades": 0,
     "max_drawdown": null,
+    "score": "balanced",
+    "top_share": 0.05,
     "neighbors": true,
+    "window": "expanding",
     "train_months": 6,
     "test_months": 1
   }
@@ -268,24 +271,36 @@ At 0, 0.005% and 0.01% extra slippage, reported with the suffixes `0`, `5` and
 `10` — `pnl0`, `pnl5`, `pnl10`. One number is not a result. A strategy whose edge
 survives at zero slippage and vanishes at 0.005% has told you something important
 about itself, and reporting only the optimistic figure hides it. `--optimize`
-scores on `pnl5` for the same reason.
+weighs `pnl5` and `pnl10`, never `pnl0`, for the same reason.
 
 ## How `--optimize` chooses
 
 The best whole-range PnL is the set that fit that range best, which is not the
-set most likely to keep working. A sweep therefore chooses in three steps, all
-from the run logs it has already written:
+set most likely to keep working. A sweep therefore chooses in four steps, all
+from the run folders it has already written:
 
 1. **Filters.** A set that loses money at `pnl10` ranks below every set that
    does not; `min_trades` and `max_drawdown` (on pnl5) can be added.
-2. **Neighbours.** A set's score is its pnl5 averaged with its neighbours on the
-   grid -- one step along a numeric parameter -- so a lone spike loses to a
-   plateau. Categorical parameters have no neighbours.
-3. **Walk-forward.** Each run folder has its PnL by JST month (`by_month.json`). The sweep chooses
-   on `train_months` complete months, scores that choice on the following
-   `test_months`, steps forward and repeats. The sum of those test months is
-   what choosing this way would have earned, out of sample -- the figure to
-   trust. The set recommended is the one chosen on the most recent months.
+2. **Score.** With `"score": "balanced"`, four figures: `pnl5` (realistic),
+   `pnl10` (degraded execution), `dd5`, the maximum drawdown at pnl5 (a
+   period that does not suit it), and `top_share5`, the share of its winning
+   pnl5 made by its best `top_share` of trades (whether a few big wins carry
+   it). Each becomes a percentile among the sets that pass -- 1 for the best,
+   0 for the worst -- and the score is their mean, unweighted. `"pnl5"` ranks
+   on pnl5 alone.
+3. **Neighbours.** Each figure is averaged with the same figure of its
+   neighbours on the grid -- the sets one step away along one numeric
+   parameter -- before it is ranked, so a lone spike loses to a plateau.
+   Categorical parameters have no neighbours.
+4. **Walk-forward.** Each run folder has its PnL by JST month (`by_month.json`),
+   and its trades. The sweep chooses on the months before a test month, scores
+   that choice on the following `test_months`, steps forward and repeats. The
+   sum of those test months is what choosing this way would have earned, out
+   of sample -- the figure to trust. With `"window": "expanding"` a choice is
+   made on every complete month since the start, and `train_months` is only the
+   history the first test needs; the set recommended is chosen on the whole
+   range. `"rolling"` uses the latest `train_months` instead, and recommends
+   on the most recent ones.
 
 `best_result/<batch_id>/selection.json` holds the ranking, every fold and the
 out-of-sample totals, and `<id>.json` beside it is the recommended run's

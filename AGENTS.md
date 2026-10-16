@@ -192,12 +192,17 @@ but it is easy to break from here:
   recorded `"config": null` for two commits. `tests/test_run_end_to_end.py` now
   holds the provenance fields, because a result you cannot attribute to a
   configuration is not a result.
-- **`--optimize` scores on `pnl5`**, the middle slippage assumption -- ranking on
-  `pnl0` selects for strategies whose edge is thinnest -- but does not simply
-  take the highest. `selection` filters (no loss at pnl10 by default), smooths
-  each score over its grid neighbours, and walk-forward tests the choice on JST
-  months from each run's `by_month.json`, recommending what it chose on the
-  latest months. The out-of-sample total is the honest figure; an in-sample
+- **`--optimize` does not take the highest `pnl5`.** Ranking on `pnl0` selects
+  for strategies whose edge is thinnest, and ranking on any one figure selects
+  for the set that is exceptional on it. `selection` filters (no loss at pnl10
+  by default), scores each set by its mean percentile on pnl5, pnl10, dd5 and
+  `top_share5` (how much of its winnings its best 5% of trades made), smooths
+  each figure over its grid neighbours, and walk-forward tests the choice on JST
+  months from each run's `by_month.json` and `trades.csv`. The window expands:
+  each choice uses every month before it, and the set recommended is chosen on
+  the whole range. On three trend-following sweeps a rolling six months chose on noise,
+  and the pnl5-only score kept choosing the deepest drawdowns; both remain as
+  settings (`"window": "rolling"`, `"score": "pnl5"`), not as defaults. The out-of-sample total is the honest figure; an in-sample
   best is not one. `selection` works only from run folders: it must never need
   a replay. `best_result/<batch_id>/` holds `selection.json` and, only when a
   set passed the filters, a copy of its `meta.json` as `<run_id>.json`.

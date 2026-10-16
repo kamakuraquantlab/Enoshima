@@ -15,7 +15,10 @@
     "positive_pnl10": true,
     "min_trades": 0,
     "max_drawdown": null,
+    "score": "balanced",
+    "top_share": 0.05,
     "neighbors": true,
+    "window": "expanding",
     "train_months": 6,
     "test_months": 1
   }
@@ -37,8 +40,8 @@ Every key is optional, and a missing file means the defaults.
   INFO, which is what you want when one fails; a sweep would write that line for
   every fill of every parameter set (1.4 million lines, 600 MB, in one 45-way
   sweep). `"INFO"` brings it back when a backtest needs debugging.
-- `selection` is how `--optimize` chooses: filters, grid-neighbour smoothing
-  and walk-forward months. See `enoshima.selection`.
+- `selection` is how `--optimize` chooses: filters, the score, grid-neighbour
+  smoothing and the walk-forward window. See `enoshima.selection`.
 
 This is the environment's file rather than a set of flags because it describes
 the environment: where its runs are charted and how big its data is. An unknown

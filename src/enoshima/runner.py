@@ -56,10 +56,13 @@ from . import param_id, run_dir, selection
 from .backtest import Backtest
 from .data_source import DEFAULT_CHUNK_DAYS, DataSource, market_data_event_types
 from .influx import InfluxdbStore, InfluxReporter, bucket_name
+from .ledger import month_of
 from .result import ResultReporter
 from .run_log import BacktestLog
 
 LOG = getLogger(__name__)
+
+_last_batch_id = 0  # see `Runner._next_batch_id`
 
 WARMUP_HOURS = 4
 MAX_CONCURRENCY = 16
@@ -122,11 +125,17 @@ class Runner:
         each other's choice and write into each other's buckets. A bare
         `int(time.time())` collides whenever two runs start inside the same
         second, which is ordinary when they are launched from a script.
+
+        Only a sweep writes a `best_result` folder, so a single run leaves nothing
+        on disk to advance past; the last id this process issued covers the
+        common case of two runs started one after the other.
         """
+        global _last_batch_id
         best_root = output_root / "best_result"
-        batch_id = int(time.time())
+        batch_id = max(int(time.time()), _last_batch_id + 1)
         while (best_root / str(batch_id)).exists():
             batch_id += 1
+        _last_batch_id = batch_id
         return batch_id
 
     def param_sets(self) -> list[dict]:
@@ -307,8 +316,9 @@ class Runner:
         """Choose a parameter set from every result for this strategy and range, and save it.
 
         See `selection`: sets that lose money at the pessimistic slippage (or
-        break the env's other filters) rank last, a set's score is pnl5
-        averaged with its grid neighbours, and -- when the run logs carry
+        break the env's other filters) rank last, a set's score is its place on
+        pnl5, pnl10, drawdown and pnl5 without its best trades, each averaged
+        with its grid neighbours, and -- when the run logs carry
         months -- the choice is walk-forward tested, and the set recommended is
         the one chosen on the most recent months.
 
@@ -327,12 +337,17 @@ class Runner:
             try:
                 meta = run_dir.read_json(path, run_dir.META)
                 summary = run_dir.read_json(path, run_dir.SUMMARY)
+                if not (self._is_comparable(meta) and "pnl5" in summary):
+                    continue
                 months = run_dir.read_json(path, run_dir.grouping_file("month"))
-            except (json.JSONDecodeError, OSError) as e:
+                trade_pnl5 = {}
+                for t in run_dir.read_trades(path):
+                    trade_pnl5.setdefault(month_of(t.close_ts), []).append(t.pnl_change5)
+            except (json.JSONDecodeError, OSError, TypeError, ValueError) as e:
                 LOG.error(f"Could not read {path}: {e}")
                 continue
-            if self._is_comparable(meta) and "pnl5" in summary:
-                runs.append({**meta, "run_id": path.name, "result": {**summary, "periods": months}})
+            runs.append({**meta, "run_id": path.name,
+                         "result": {**summary, "periods": months, "trade_pnl5": trade_pnl5}})
 
         if not runs:
             LOG.warning(
@@ -347,7 +362,8 @@ class Runner:
 
         top = choice["ranking"][0]["params"]
         best = next(r for r in runs if r["params"] == top)
-        best = {**best, "result": {k: v for k, v in best["result"].items() if k != "periods"}, "selection": choice}
+        best = {**best, "result": {k: v for k, v in best["result"].items() if k not in ("periods", "trade_pnl5")},
+                "selection": choice}
 
         # The choice and why, and -- only when one passed the filters -- the
         # chosen run's meta.json, under its run id.
