@@ -96,8 +96,13 @@ class SelectionSettings:
     test_months: int = 1
     score: str = "balanced"
     top_share: float = 0.05
+    group_by: list[str] | None = None  # see `best`: None is every categorical parameter
 
     def __post_init__(self):
+        if self.group_by is not None and not (
+            isinstance(self.group_by, list) and all(isinstance(n, str) for n in self.group_by)
+        ):
+            raise ValueError("selection group_by is a list of parameter names, or null for the categorical ones")
         if self.window not in WINDOWS:
             raise ValueError(f"selection window {self.window!r} is not one of {WINDOWS}")
         if self.score not in SCORES:

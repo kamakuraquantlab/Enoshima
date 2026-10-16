@@ -13,7 +13,9 @@ exchange, evaluates what happened, and optionally records it in InfluxDB.
 | `run_dir` | A run's folder: meta, summary, trades and groupings, written whole or not at all |
 | `eval` | Turning fills and PnL into Sharpe, drawdown, win rate |
 | `run_log` | A run's provenance (`meta.json`), and why its id is deterministic |
-| `selection` | How `--optimize` chooses: filters, grid neighbours, walk-forward months |
+| `selection` | How a set is chosen from a group: filters, score, grid neighbours, walk-forward |
+| `best` | Which groups get a recommendation: every range, split by categorical parameter |
+| `post_analysis` | Analyses of finished runs: the selection rule's window, history and interval, tested |
 | `influx` | `InfluxReporter`: the optional metric stream, written to InfluxDB as it runs |
 | `cli` | The `enoshima` command |
 | `settings` | `enoshima.json`: InfluxDB recording and run sizing, per environment |

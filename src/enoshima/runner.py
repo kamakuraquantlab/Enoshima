@@ -35,7 +35,6 @@ converging.
 """
 
 import json
-import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
@@ -52,11 +51,10 @@ from qate_env.trading_env import (
     load_trading_env,
 )
 
-from . import param_id, run_dir, selection
+from . import best, param_id, run_dir, selection
 from .backtest import Backtest
 from .data_source import DEFAULT_CHUNK_DAYS, DataSource, market_data_event_types
 from .influx import InfluxdbStore, InfluxReporter, bucket_name
-from .ledger import month_of
 from .result import ResultReporter
 from .run_log import BacktestLog
 
@@ -299,113 +297,19 @@ class Runner:
 
     # ----------------------------------------------------------- post-analysis
 
-    def _is_comparable(self, run_log_data: dict) -> bool:
-        """Whether a recorded run answers the same question as this one.
+    def post_analysis(self) -> list[dict] | None:
+        """Recommend for every range and group in this environment; see `best`.
 
-        Same strategy and variant, same range. Two runs that differ in either are
-        not candidates for the same "best parameter set", because the number they
-        report is not measuring the same thing.
-        """
-        return (
-            run_log_data.get("strategy") == self.profile.strategy_name
-            and run_log_data.get("start_str") == self.dt_range.start_str
-            and run_log_data.get("end_str") == self.dt_range.end_str
-        )
-
-    def post_analysis(self) -> dict | None:
-        """Choose a parameter set from every result for this strategy and range, and save it.
-
-        See `selection`: sets that lose money at the pessimistic slippage (or
-        break the env's other filters) rank last, a set's score is its place on
-        pnl5, pnl10, drawdown and pnl5 without its best trades, each averaged
-        with its grid neighbours, and -- when the run logs carry
-        months -- the choice is walk-forward tested, and the set recommended is
-        the one chosen on the most recent months.
-
-        Ranked across every run log matching the strategy and the date range,
-        *not* only the ones this batch ran. That distinction is what makes a
-        resumed sweep give the right answer: the parameter sets skipped because
-        they already had a result are still candidates. Ranking by batch id
-        instead meant an interrupted sweep, resumed, chose its winner from only
-        the combinations it happened to re-run.
+        Every run folder is a candidate, *not* only the ones this batch ran.
+        That is what makes a resumed sweep give the right answer: the parameter
+        sets skipped because they already had a result are still candidates.
+        Ranking by batch id instead meant an interrupted sweep, resumed, chose
+        its winner from only the combinations it happened to re-run.
         """
         if not self.optimize:
             return None
-
-        runs = []
-        for path in run_dir.iter_complete(self.output_root):
-            try:
-                meta = run_dir.read_json(path, run_dir.META)
-                summary = run_dir.read_json(path, run_dir.SUMMARY)
-                if not (self._is_comparable(meta) and "pnl5" in summary):
-                    continue
-                months = run_dir.read_json(path, run_dir.grouping_file("month"))
-                trade_pnl5 = {}
-                for t in run_dir.read_trades(path):
-                    trade_pnl5.setdefault(month_of(t.close_ts), []).append(t.pnl_change5)
-            except (json.JSONDecodeError, OSError, TypeError, ValueError) as e:
-                LOG.error(f"Could not read {path}: {e}")
-                continue
-            runs.append({**meta, "run_id": path.name,
-                         "result": {**summary, "periods": months, "trade_pnl5": trade_pnl5}})
-
-        if not runs:
-            LOG.warning(
-                f"No results with a pnl5 figure for {self.profile.strategy_name} "
-                f"over {self.dt_range.start_str}..{self.dt_range.end_str}"
-            )
+        groups = best.recommend(self.output_root, self.batch_id, self.selection_settings)
+        if not groups:
+            LOG.warning(f"No results with a pnl5 figure in {self.output_root}")
             return None
-
-        grid = self.definition.param_grid if self.optimize == MODE_GRID else None
-        choice = selection.select(runs, self.dt_range.start_ts, self.dt_range.end_ts, grid, self.selection_settings)
-        self._log_choice(choice, len(runs))
-
-        top = choice["ranking"][0]["params"]
-        best = next(r for r in runs if r["params"] == top)
-        best = {**best, "result": {k: v for k, v in best["result"].items() if k not in ("periods", "trade_pnl5")},
-                "selection": choice}
-
-        # The choice and why, and -- only when one passed the filters -- the
-        # chosen run's meta.json, under its run id.
-        best_dir = self.output_root / "best_result" / str(self.batch_id)
-        best_dir.mkdir(parents=True, exist_ok=True)
-        (best_dir / "selection.json").write_text(json.dumps(choice, indent=2))
-        if choice["recommended"] is not None:
-            shutil.copyfile(
-                run_dir.run_dir(self.output_root, best["run_id"]) / run_dir.META, best_dir / f"{best['run_id']}.json"
-            )
-        LOG.info(f"Saved {best_dir}")
-        return best
-
-    def _log_choice(self, choice: dict, n_runs: int) -> None:
-        def show(params):
-            return " ".join(f"{k}={v}" for k, v in (params or {}).items()) or "none"
-
-        if choice["method"] == "walk-forward":
-            wf = choice["walk_forward"]
-            for fold in wf["folds"]:
-                LOG.info(
-                    f"FOLD train {fold['train'][0]}..{fold['train'][1]} test {fold['test'][0]}..{fold['test'][1]}: "
-                    f"pnl5={_fmt(fold['pnl5'], '+.2f')} params=({show(fold['params'])})"
-                )
-            oos = wf["out_of_sample"]
-            LOG.info(
-                f"WALK-FORWARD {oos['folds']} folds, out of sample: pnl0={_fmt(oos['pnl0'], '+.2f')} "
-                f"pnl5={_fmt(oos['pnl5'], '+.2f')} pnl10={_fmt(oos['pnl10'], '+.2f')} "
-                f"profitable folds {oos['profitable_folds']}/{oos['folds']}"
-            )
-        else:
-            LOG.info(f"Ranked on the whole range: {choice['reason']}")
-
-        top = choice["ranking"][0]
-        if choice["recommended"] is None:
-            LOG.warning(
-                f"No parameter set passes the filters ({choice['settings']}); nothing recommended. "
-                f"Highest score: params=({show(top['params'])}) pnl5={_fmt(top['pnl5'], '+.2f')}"
-            )
-            return
-        LOG.info(
-            f"DONE {n_runs} combos - RECOMMENDED score={_fmt(top['score'], '+.2f')} "
-            f"pnl5={_fmt(top['pnl5'], '+.2f')} pnl10={_fmt(top['pnl10'], '+.2f')} "
-            f"trades={top['trades']} max_dd5={_fmt(top['dd5'], '.2f')} params=({show(top['params'])})"
-        )
+        return groups

@@ -155,9 +155,16 @@ but it is easy to break from here:
   leaving the old run's points beside the new. There is no `--temporary` any more;
   it was the opt-in for what is now always true. The batch id goes in the bucket,
   never in the run's id, which must stay deterministic for a sweep to resume.
-- **`post_analysis` ranks across every run log with the same strategy and range**,
-  not just the current batch. A resumed sweep must be able to pick a best from
-  results it did not just compute.
+- **A recommendation is per range and per group, from every run folder**, not
+  per batch (`best.recommend`). Runs are grouped by strategy and range, then by
+  `group_by` -- the categorical parameters by default -- and each group is
+  ranked alone. A resumed sweep must be able to pick a best from results it did
+  not just compute, and a categorical value is a different way of trading, to
+  be compared on its own merits rather than outranked on a box size's figures.
+  `enoshima select` reruns it from disk. `enoshima walk-forward`
+  (`post_analysis.walk_forward`) tests the rule's own window, history and
+  reselection interval over days, every rule on the same test days; it reuses
+  `selection.rank` and must not grow a second way of choosing.
 - **A single run's parameters come from `params.json`**, the same file a live run
   reads, so "backtest what production runs" is one command. `param_grid.json` is a
   search space and only `--optimize` consults it. These were one source once -- the
@@ -204,11 +211,12 @@ but it is easy to break from here:
   and the pnl5-only score kept choosing the deepest drawdowns; both remain as
   settings (`"window": "rolling"`, `"score": "pnl5"`), not as defaults. The out-of-sample total is the honest figure; an in-sample
   best is not one. `selection` works only from run folders: it must never need
-  a replay. `best_result/<batch_id>/` holds `selection.json` and, only when a
-  set passed the filters, a copy of its `meta.json` as `<run_id>.json`.
+  a replay. `best_result/<batch_id>/` holds `selection.json` and, for each
+  group where a set passed the filters, a copy of its `meta.json` as `<run_id>.json`.
 - **Never delete a user's results.** There is no `clean` command: a user who
-  wants them gone deletes `run_log/` and `best_result/`. An earlier version pruned
-  run logs older than seven days automatically, on every run.
+  wants them gone deletes `run_log/`, `best_result/` and `post_analysis/`. An
+  earlier version pruned run logs older than seven days automatically, on every
+  run.
 - **A strategy is imported by module name, and is the user's to make importable**
   -- installed, or on `PYTHONPATH`. Enoshima does not add the launch directory to
   `sys.path`.

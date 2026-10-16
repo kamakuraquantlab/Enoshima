@@ -5,11 +5,17 @@ Run as: `enoshima <command>`, or from a checkout
 
 ```
 enoshima run     --env NAME --from 2026-06-01 --to 2026-06-10
+enoshima select  --env NAME
+enoshima walk-forward --env NAME --window expanding,rolling --history 3m,6m --every 1w,1m,never
 enoshima results --env NAME
 ```
 
-`run` is the one that matters; the rest exist so that what a run produced can be
-found and read without reading the source.
+`run` is the one that matters. `select` recommends again from the run folders
+already written -- after a change to the rule in `enoshima.json`, say -- without
+replaying anything; a sweep does the same when it finishes. `walk-forward` tests
+the rule itself: how each window, history and reselection interval would have
+done out of sample (`enoshima.post_analysis.walk_forward`). `results` exists so
+that what a run produced can be found and read without reading the source.
 
 Everything a run needs to know beyond the dates is somewhere already, so it is not
 a flag here:
@@ -43,8 +49,9 @@ from qate_env import sys_env
 from qate_env.env import Env
 from qate_env.env_name import EnvName
 
-from enoshima import run_dir
+from enoshima import best, run_dir
 from enoshima.influx import InfluxdbStore
+from enoshima.post_analysis import walk_forward
 from enoshima.runner import Runner
 from enoshima.settings import SETTINGS_FILE, load_settings
 
@@ -107,6 +114,48 @@ def cmd_run(args) -> int:
     return 0
 
 
+def cmd_select(args) -> int:
+    env = Env(sys_env.get_env_root_dir(), args.env)
+    env.enter()
+    try:
+        settings = load_settings(env.work_dir)
+        root = Path(env.work_dir)
+        groups = best.recommend(root, Runner._next_batch_id(root), settings.selection)
+        if not groups:
+            LOG.warning(f"No results with a pnl5 figure for {args.env}")
+            return 1
+    except Exception:
+        LOG.exception("Select failed")
+        return 1
+    finally:
+        env.leave()
+    return 0
+
+
+def _list(text: str) -> list[str]:
+    return [p.strip() for p in text.split(",") if p.strip()]
+
+
+def cmd_walk_forward(args) -> int:
+    env = Env(sys_env.get_env_root_dir(), args.env)
+    env.enter()
+    try:
+        settings = load_settings(env.work_dir)
+        rule_list = walk_forward.rules(_list(args.window), _list(args.history), _list(args.every))
+        test_from = DtRange.from_strings(args.test_from, args.test_from).start_dt.date() if args.test_from else None
+        path = walk_forward.run(Path(env.work_dir), rule_list, settings.selection, test_from,
+                                [p.split("+") for p in args.sum])
+        if path is None:
+            LOG.warning(f"No results with a pnl5 figure for {args.env}")
+            return 1
+    except Exception:
+        LOG.exception("Walk-forward failed")
+        return 1
+    finally:
+        env.leave()
+    return 0
+
+
 def cmd_results(args) -> int:
     env = Env(sys_env.get_env_root_dir(), args.env)
     env.visit()
@@ -163,6 +212,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--force", action="store_true", help="re-run parameter sets that already have a result")
     run.set_defaults(func=cmd_run)
+
+    select = sub.add_parser("select", help="recommend from the recorded runs again, replaying nothing")
+    select.add_argument("--env", required=True, type=EnvName)
+    select.set_defaults(func=cmd_select)
+
+    wf = sub.add_parser("walk-forward", help="test the selection rule's window, history and reselection interval")
+    wf.add_argument("--env", required=True, type=EnvName)
+    wf.add_argument("--window", default="expanding", help="expanding, rolling, or both comma-separated")
+    wf.add_argument("--history", default="6m", help="rolling window lengths, e.g. 2w,3m,6m (d, w or m)")
+    wf.add_argument("--every", default="1m,never", help="reselection intervals, e.g. 1d,1w,1m, or never")
+    wf.add_argument("--test-from", default=None, help="first test day; defaults to the start plus the longest history")
+    wf.add_argument("--sum", action="append", default=[],
+                    help="groups traded side by side, values joined by +; repeatable")
+    wf.set_defaults(func=cmd_walk_forward)
 
     results = sub.add_parser("results", help="list recorded runs, best first")
     results.add_argument("--env", required=True, type=EnvName)

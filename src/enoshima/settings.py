@@ -19,6 +19,7 @@
     "top_share": 0.05,
     "neighbors": true,
     "window": "expanding",
+    "group_by": null,
     "train_months": 6,
     "test_months": 1
   }

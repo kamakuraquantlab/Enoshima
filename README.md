@@ -175,9 +175,10 @@ EXAMPLE_BACKTEST/
 │   ├── trades.csv                     every closed position, with its PnL change at each rate
 │   └── by_<grouping>.json             the trades grouped: month, week, day, weekday,
 │                                      monthday, hour, weekday_hour, holding, side
-└── best_result/<batch_id>/            a sweep's choice
-    ├── selection.json                 the ranking, every fold, the out-of-sample totals
-    └── <id>.json                      the chosen run's meta.json (absent if none passed)
+├── best_result/<batch_id>/            a sweep's (or `select`'s) recommendations
+│   ├── selection.json                 per range and group: ranking, folds, out-of-sample totals
+│   └── <id>.json                      each recommended run's meta.json
+└── post_analysis/                     `walk-forward`'s reports: walk_forward_<stamp>.json and .txt
 ```
 
 A grouping's row holds `trades`, and per slippage suffix N `winsN`, `pnlN`, and
@@ -214,6 +215,7 @@ optional, and a missing file means the defaults:
     "top_share": 0.05,
     "neighbors": true,
     "window": "expanding",
+    "group_by": null,
     "train_months": 6,
     "test_months": 1
   }
@@ -302,19 +304,55 @@ from the run folders it has already written:
    range. `"rolling"` uses the latest `train_months` instead, and recommends
    on the most recent ones.
 
-`best_result/<batch_id>/selection.json` holds the ranking, every fold and the
-out-of-sample totals, and `<id>.json` beside it is the recommended run's
-`meta.json`. When no set passes the filters there is no copy: nothing is
-recommended.
+This is done once per **group**, not once per sweep. Every finished run folder
+in the environment is read -- not only this batch's -- and grouped by strategy
+and range, then by `group_by`: the categorical parameters by default
+(a schedule, a mode), since each is a different way of trading rather
+than a point on a scale. Each group is ranked on its own, with neighbours from its
+own runs, and gets its own recommendation; `"group_by": []` makes a range one
+group. Temporary runs are not candidates.
+
+`best_result/<batch_id>/selection.json` holds every group's ranking, folds and
+out-of-sample totals, and each recommended run's `meta.json` is copied beside it
+as `<id>.json`. A group where no set passes the filters has no copy: nothing is
+recommended for it. `enoshima select --env NAME` does all of this again from the
+folders on disk, replaying nothing -- after changing the rule, for instance.
+
+## Testing the rule itself
+
+The walk-forward above has parameters of its own -- the window, how much
+history, how often it chooses again -- and `enoshima walk-forward` tests them,
+from the same run folders, over days rather than months:
+
+```bash
+enoshima walk-forward --env NAME --window expanding,rolling --history 1m,3m,6m \
+    --every 1d,1w,1m,never --sum A+B
+```
+
+Every combination is a rule. Spans are days, weeks or calendar months (`1d`,
+`2w`, `6m`); `never` chooses once and holds the set to the end. Each fold makes
+the choice `selection` makes, with the env's filters, score and neighbours,
+on the training days, then trades it until the next choice. Every rule is
+tested on the same days -- from `--test-from`, by default the range start plus
+the longest history -- so their totals compare, and `hindsight`, the set chosen
+on the whole range, is listed beside them as the ceiling it is. `--sum A+B`
+adds groups traded side by side, such as two schedules that split the day. The
+table goes to `env.log` and `post_analysis/`.
+
+Trying many rules on the same test days is itself a choice made in sample:
+prefer the rule that holds up across groups and environments over the one with
+the best total in one.
 
 ## Commands
 
 | Command | Does |
 |---|---|
 | `enoshima run` | Run a backtest, or a parameter sweep |
+| `enoshima select` | Recommend again from the recorded runs, per range and group |
+| `enoshima walk-forward` | Test the selection rule's window, history and reselection interval |
 | `enoshima results` | Recorded runs for an environment, best first |
 
-To clear an environment's results, delete its `run_log/` and `best_result/`.
+To clear an environment's results, delete its `run_log/`, `best_result/` and `post_analysis/`.
 
 Flags on `run`: `--optimize grid|combo`, `--chunk-days` (memory),
 `--max-concurrency` (parameter sets per data pass), `--force` (re-run a parameter

@@ -294,36 +294,37 @@ def test_optimize_grid_runs_every_combination_and_picks_a_best(run_env):
     assert len(combos) == 6  # 3 fast periods x 2 slow periods
 
     runner.run()
-    best = runner.post_analysis()
-    assert best is not None
-    assert "params" in best and "result" in best
+    groups = runner.post_analysis()
+    # Both parameters are numbers, so the sweep is one group: one recommendation.
+    [group] = groups
+    assert group["group"] == {} and group["runs"] == len(combos)
+    assert (group["start_str"], group["end_str"]) == (dt_range.start_str, dt_range.end_str)
+    assert group["method"] == "whole range"   # an hour holds no complete month
 
-    # One run log per combination, and the best is the top of the selection's ranking.
     logs = run_dirs(env)
     assert len(logs) == len(combos)
-    assert best["selection"]["method"] == "whole range"   # an hour holds no complete month
-    assert best["params"] == best["selection"]["ranking"][0]["params"]
 
-    # best_result/<batch_id>/ holds the selection, and the chosen run's meta.json
-    # when one passed the filters.
+    # best_result/<batch_id>/ holds the selection, and each recommended run's meta.json.
     [best_dir] = (Path(env.work_dir) / "best_result").iterdir()
     assert best_dir.name == str(runner.batch_id)
     selection_file = json.loads((best_dir / "selection.json").read_text())
-    assert selection_file["ranking"][0]["params"] == best["params"]
+    assert selection_file["groups"][0]["ranking"][0]["params"] == group["ranking"][0]["params"]
     copies = sorted(p.name for p in best_dir.iterdir() if p.name != "selection.json")
-    if best["selection"]["recommended"] is None:
-        assert copies == []
+    if group["recommended"] is None:
+        assert copies == [] and group["recommended_run_id"] is None
     else:
-        assert copies == [f"{best['run_id']}.json"]
-        assert (best_dir / copies[0]).read_text() == (run_dir.run_dir(env.work_dir, best["run_id"]) / run_dir.META).read_text()
+        run_id = group["recommended_run_id"]
+        assert copies == [f"{run_id}.json"]
+        assert load(run_dir.run_dir(env.work_dir, run_id))["params"] == group["recommended"]
+        assert (best_dir / copies[0]).read_text() == (run_dir.run_dir(env.work_dir, run_id) / run_dir.META).read_text()
 
     # With every safeguard off, selection is the plain pnl5 ranking it replaced.
     from enoshima.selection import SelectionSettings
 
-    plain = SelectionSettings(positive_pnl10=False, neighbors=False, train_months=0)
-    best_plain = Runner(env, dt_range, optimize="grid", chunk_days=1, selection_settings=plain).post_analysis()
-    all_pnl = [load(p)["result"]["pnl5"] for p in logs]
-    assert best_plain["result"]["pnl5"] == max(all_pnl)
+    plain = SelectionSettings(score="pnl5", positive_pnl10=False, neighbors=False, train_months=0)
+    [plain_group] = Runner(env, dt_range, optimize="grid", chunk_days=1, selection_settings=plain).post_analysis()
+    chosen = load(run_dir.run_dir(env.work_dir, plain_group["recommended_run_id"]))
+    assert chosen["result"]["pnl5"] == max(load(p)["result"]["pnl5"] for p in logs)
 
 
 def test_a_sweep_in_several_batches_gets_the_same_results_as_one(run_env, tmp_path):
@@ -381,15 +382,17 @@ def test_a_resumed_sweep_ranks_the_combinations_it_skipped(run_env):
     # A first sweep of everything, then a second that skips all of it.
     first = Runner(env, dt_range, optimize="grid", chunk_days=1)
     first.run()
-    best_first = first.post_analysis()
+    [best_first] = first.post_analysis()
 
     second = Runner(env, dt_range, optimize="grid", chunk_days=1)
     second.run()
-    best_second = second.post_analysis()
+    groups = second.post_analysis()
 
-    assert best_second is not None, "a resumed sweep with nothing to run still has a best"
-    assert best_second["result"]["pnl5"] == best_first["result"]["pnl5"]
-    assert best_second["params"] == best_first["params"]
+    assert groups, "a resumed sweep with nothing to run still has a best"
+    [best_second] = groups
+    assert best_second["runs"] == best_first["runs"] == 6
+    assert best_second["recommended_run_id"] == best_first["recommended_run_id"]
+    assert best_second["ranking"][0]["params"] == best_first["ranking"][0]["params"]
 
 
 def test_a_single_run_uses_params_json_not_the_grid_defaults(run_env):
