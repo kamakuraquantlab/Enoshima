@@ -62,7 +62,6 @@ class BacktestRuntime(EventQueue):
         EventType.METRICS: "report_metrics",
         EventType.TRADING_PNL_UPDATE: "report_pnl",
         EventType.EXCEPTION: "report_exception",
-        EventType.MSG_OUT: "report_message",
     }
 
     def __init__(self, strategy: Strategy, exchanges: list[ExchangeName], channel: EventQueue):
