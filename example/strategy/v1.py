@@ -7,7 +7,7 @@ will not make money.
 
 ## What Enoshima loads
 
-`trading.json` names `example.strategy` and variant `v1`, so the loader imports
+`strategy_param_grid.json` names `example.strategy` and variant `v1`, so the loader imports
 `example.strategy.v1` and instantiates the class called `Variant`. That name is
 the contract: exactly one `Variant` per file, constructed with `(config, params)`.
 

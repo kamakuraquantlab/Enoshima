@@ -31,12 +31,9 @@ The data path is a chain, and each link talks only to the next:
   and `OrderBook`s. It also builds silver and gold from bronze.
 - `qate` owns the model and the replay machinery, and depends on neither.
 
-A third, `qate-env`, owns the run directory: `Env`, the credential lookup, and the
-`trading.json` / `config.json` / `params.json` loader. It was `qate.env` and
-`qate.boot` until the split, so an import error naming either of those is a stale
-checkout rather than a missing feature. A live runner reads the same package, which
-is the reason a backtest can be pointed at a production environment at all --
-keep reading it, and keep writing results somewhere else.
+A third, `qate-env`, owns the run directory lifecycle and the convention for
+resolving a strategy's `Config` and `Variant` classes. Enoshima owns its strategy
+definition files and loader.
 
 **Enoshima calls `hase.bronze` and nothing below it.** `data_source.Stream` asks
 it for a market-day, tags each object with its `EventType`, and that is all the
@@ -117,6 +114,9 @@ but it is easy to break from here:
   directly. Do not reintroduce a local metric file "to be safe".
 - **A reporter that raises fails the backtest**, unlike in qate's `Runtime`. A
   backtest's reporters are its output.
+- **A reporter is a sink, not an event source.** `ResultReporter` writes its
+  derived `EVAL` results directly to the run's optional Influx writer. Do not
+  route them back through the runtime as strategy metrics.
 - **The shared buffer is the only concurrency, and it can deadlock.** Every
   `Channel` blocks in `request_load_more` until all of them have arrived, so a
   backtest thread that dies without draining its channel strands the rest.
@@ -143,7 +143,7 @@ but it is easy to break from here:
 - **A run log's id is a deterministic hash**, not a UUID. That is what makes a
   sweep resumable, and what `--force` overrides. It was a UUID once, which meant
   the skip check could never fire and every combination was always recomputed.
-- **A parameter set's id is Enoshima's, built from `param_grid.json`** (`param_id`):
+- **A parameter set's id is Enoshima's, built from `strategy_param_grid.json`** (`param_id`):
   the env name, then the values as plain decimals in grid order. There are no
   scaling factors: they made ids unreadable without the grid, and a missing one
   changed every bucket name. Nothing about the config is in it: an env's
@@ -165,23 +165,17 @@ but it is easy to break from here:
   (`post_analysis.walk_forward`) tests the rule's own window, history and
   reselection interval over days, every rule on the same test days; it reuses
   `selection.rank` and must not grow a second way of choosing.
-- **A single run's parameters come from `params.json`**, the same file a live run
-  reads, so "backtest what production runs" is one command. `param_grid.json` is a
-  search space and only `--optimize` consults it. These were one source once -- the
-  grid's defaults -- which meant an environment had two answers and nothing kept
-  them in step; the backtest envs left `params.json` empty and the live envs left
-  the grid alone. An empty `params.json` still falls back to the grid's defaults.
-- **A backtest never reloads `params.json`.** A live `Trader` re-reads it every
-  ten wall-clock seconds and hands it to the strategy; `BacktestRuntime` builds
-  its `Trader` with `reload_params=False`. With the reload on, every combination
-  of a sweep is replaced by the file's set partway through, and the sweep ranks
-  one strategy against itself. It went unnoticed only because `update_params`
-  refuses a dict whose keys differ, and the env's file and grid happened to.
+- **A single run uses the defaults in `strategy_param_grid.json`.** An optimize
+  sweep expands the values in that same file, so there is one source of parameter
+  definitions.
+- **A backtest never reloads parameters.** `BacktestRuntime` builds its `Trader`
+  with `reload_params=False`; a wall-clock reload would replace a sweep member's
+  set partway through a deterministic replay.
 - **The command takes no locations.** Data is komachi's: hase asks
   `komachi.data_root()`, which reads `ROOT_PATH` from komachi's settings file and
   nothing else -- no flag, no environment variable, no override passed down from
   here. Komachi is the only source of truth for the root. Output is the env dir, the variant is
-  `trading.json`'s, and recording and sizing are `enoshima.json`'s
+  `strategy_param_grid.json`'s, and recording and sizing are `enoshima.json`'s
   (`enoshima.settings`). Do not add `--data-root`, `--output-root`, `--variant` or
   `--influx` back: each was a second answer to a question a file already answers.
   `--chunk-days` and `--max-concurrency` stay as per-run overrides.

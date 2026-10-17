@@ -24,7 +24,7 @@ a flag here:
   file. `komachi local` lists it; to replay another tree, change it there.
 - **The output** is the environment directory: `run_log/`, `best_result/` and
   `env.log` beside the definition they came from. To clear it, delete them.
-- **The strategy and variant** are `trading.json`'s. The strategy module is
+- **The strategy and variant** are `strategy_param_grid.json`'s. The strategy module is
   imported by name, so it must be installed or on `PYTHONPATH`.
 - **Recording to InfluxDB**, and how a run is sized, are `enoshima.json`'s -- see
   `enoshima.settings`. `--chunk-days` and `--max-concurrency` still override the
@@ -96,7 +96,7 @@ def cmd_run(args) -> int:
             influx=influx,
             selection_settings=settings.selection,
         )
-        quiet_strategy_logs(runner.profile.strategy_module_name, settings.strategy_log_level)
+        quiet_strategy_logs(runner.definition.module_name, settings.strategy_log_level)
         runner.run()
         if args.optimize:
             runner.post_analysis()
@@ -197,9 +197,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--to", dest="to_dt", default="", help="end date; defaults to the end of --from's day")
     run.add_argument(
         "--optimize",
-        choices=["grid", "combo"],
+        choices=["grid"],
         default=None,
-        help="grid: every combination in param_grid.json; combo: the explicit list in params_combo.json",
+        help="run every combination in strategy_param_grid.json",
     )
     run.add_argument(
         "--chunk-days", type=int, default=None, help=f"days loaded at once (memory); overrides {SETTINGS_FILE}"

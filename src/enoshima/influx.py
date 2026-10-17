@@ -72,9 +72,11 @@ from qate.trading.reporter import Reporter
 from qate.util.buffer import BufferedWriter
 from qate.util.dt_range import DtRange
 
-from .result import in_range
-
 LOG = getLogger(__name__)
+
+
+def in_range(ts: float, dt_range: DtRange) -> bool:
+    return ts >= dt_range.start_ts
 
 WRITE_TIMEOUT_MS = 120_000  # large batches from a finished backtest are slow
 

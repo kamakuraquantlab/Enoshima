@@ -16,14 +16,9 @@ not `combos` passes.
 
 ## Which parameters a single run uses
 
-`params.json`, the same file a live run reads. That is what makes "backtest exactly
-what production is running" one command rather than a comparison of two files.
-
-It was `param_grid.json`'s default values, which meant an environment had two
-sources of truth for its parameters and nothing kept them in step -- in practice
-the backtest envs left `params.json` empty and the live envs left the grid alone.
-A grid is a search space, an input to `--optimize`, not a description of the
-environment.
+`strategy_param_grid.json` holds both the defaults for one run and the values an
+optimize sweep expands. It also names the one strategy module and variant being
+measured.
 
 ## Warmup
 
@@ -34,29 +29,23 @@ first hours of every backtest measure a strategy whose indicators are still
 converging.
 """
 
-import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
 from logging import getLogger
 from pathlib import Path
 
-from qate.core.features import FEATURES
 from qate.trading.param import ParamGrid
 from qate.util.dt_range import DtRange
 from qate_env.env import Env
-from qate_env.trading_env import (
-    PARAM_GRID_FILE,
-    get_strategy_class,
-    load_trading_env,
-)
 
 from . import best, param_id, run_dir, selection
 from .backtest import Backtest
 from .data_source import DEFAULT_CHUNK_DAYS, DataSource, market_data_event_types
-from .influx import InfluxdbStore, InfluxReporter, bucket_name
+from .influx import InfluxdbStore, InfluxdbWriter, InfluxReporter, bucket_name
 from .result import ResultReporter
 from .run_log import BacktestLog
+from .strategy_env import get_strategy_class, load_strategy_env
 
 LOG = getLogger(__name__)
 
@@ -67,9 +56,6 @@ MAX_CONCURRENCY = 16
 
 MODE_SINGLE = None
 MODE_GRID = "grid"
-MODE_COMBO = "combo"
-
-COMBO_FILE = "params_combo.json"
 
 
 def _fmt(value: float | None, spec: str) -> str:
@@ -109,10 +95,9 @@ class Runner:
         # run, whatever else it computed: `enoshima run` exits non-zero.
         self.failed: list[dict] = []
 
-        self.definition = load_trading_env(env)
-        FEATURES.load_from_dict(self.definition.features)
-        self.config = self.definition.config
-        self.profile = self.definition.profile
+        strategy_env = load_strategy_env(env)
+        self.definition = strategy_env.definition
+        self.config = strategy_env.config
 
     @staticmethod
     def _next_batch_id(output_root: Path) -> int:
@@ -139,28 +124,18 @@ class Runner:
     def param_sets(self) -> list[dict]:
         if self.optimize == MODE_GRID:
             return self._param_grid().get_all()
-        if self.optimize == MODE_COMBO:
-            combo_file = Path(self.env.work_dir) / COMBO_FILE
-            if not combo_file.is_file():
-                raise RuntimeError(f"--optimize combo needs {combo_file}")
-            return json.loads(combo_file.read_text())
         return [self._single_params()]
 
     def _param_grid(self) -> ParamGrid:
-        if self.definition.param_grid is None:
-            raise RuntimeError(f"--optimize needs {PARAM_GRID_FILE} in {self.env.work_dir}")
-        return ParamGrid.from_object(self.definition.param_grid)
+        return ParamGrid.from_object(self.definition.params)
 
     def _single_params(self) -> dict:
-        if self.definition.params:
-            return self.definition.params
-        param_grid = self._param_grid()
-        return param_grid.get_default()
+        return self._param_grid().get_default()
 
     def run(self) -> None:
         combos = self.param_sets()
         LOG.info(
-            f"START env={self.env.name} strategy={self.profile.strategy_name} "
+            f"START env={self.env.name} strategy={self.definition.strategy_name} "
             f"range={self.dt_range.start_str}..{self.dt_range.end_str} "
             f"mode={self.optimize or 'single'} combos={len(combos)}"
         )
@@ -209,18 +184,18 @@ class Runner:
             LOG.warning(f"  ... and {len(missing) - 20} more")
 
     def _create_backtest(self, data_source: DataSource, params: dict) -> Backtest | None:
-        StrategyClass = get_strategy_class(self.profile.strategy_module_name, self.profile.variant)
+        StrategyClass = get_strategy_class(self.definition.module_name, self.definition.variant_name)
         strategy = StrategyClass(self.config, params)
-        param_set_id = param_id.param_set_id(str(self.env.name), params, self.definition.param_grid)
+        param_set_id = param_id.param_set_id(str(self.env.name), params, self.definition.params)
 
         run_log = BacktestLog(
             self.env,
             params,
             self.dt_range,
-            self.profile.strategy_name,
+            self.definition.strategy_name,
             batch_id=self.batch_id,
             config=self.config,
-            profile=self.profile,
+            profile={"module_name": self.definition.module_name, "variant_name": self.definition.variant_name},
         )
         run_log.param_set_id = param_set_id
 
@@ -228,8 +203,8 @@ class Runner:
             LOG.info(f"Skipping {param_set_id}: a result for this range already exists (--force to redo)")
             return None
 
-        reporters = self._recording_reporters(run_log, param_set_id)
-        result = ResultReporter(self.dt_range)
+        writer, reporters = self._recording(run_log, param_set_id)
+        result = ResultReporter(self.dt_range, writer)
         return Backtest(
             strategy,
             self.config.get_exchanges(),
@@ -239,14 +214,14 @@ class Runner:
             reporters,
         )
 
-    def _recording_reporters(self, run_log: BacktestLog, param_set_id: str) -> list:
+    def _recording(self, run_log: BacktestLog, param_set_id: str) -> tuple[InfluxdbWriter | None, list[InfluxReporter]]:
         if self.influx is None:
-            return []
+            return None, []
 
         bucket = bucket_name(param_set_id, self.batch_id)
         run_log.influx_bucket = bucket
         writer = self.influx.create_writer(bucket, param_set_id=param_set_id)
-        return [InfluxReporter(writer, self.dt_range)]
+        return writer, [InfluxReporter(writer, self.dt_range)]
 
     def _run_batch(self, backtests: list[Backtest], data_source: DataSource) -> None:
         """Run a batch concurrently, and do not let one failure hang the rest.

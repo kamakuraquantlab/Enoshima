@@ -22,7 +22,7 @@ def test_a_small_value_is_a_plain_decimal_not_an_exponent():
 
 
 def test_a_whole_float_is_written_as_the_integer_it_equals():
-    """10 in params.json and 10.0 in a grid are the same parameter set."""
+    """Numerically equal defaults and grid values identify the same parameter set."""
     grid = [{"name": "barrier_bps", "default_value": 10, "values": [10]}]
     assert param_set_id("ENV", {"barrier_bps": 10.0}, grid) == param_set_id("ENV", {"barrier_bps": 10}, grid)
 

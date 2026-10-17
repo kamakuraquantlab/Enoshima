@@ -82,7 +82,7 @@ def categorical(runs: list[dict]) -> list[str]:
 
 
 def axes(runs: list[dict]) -> list[dict]:
-    """Each parameter's values among `runs`, shaped like `param_grid.json` for `selection.neighbours`."""
+    """Each parameter's values among runs, shaped like the strategy grid for neighbour selection."""
     values: dict[str, list] = {}
     for r in runs:
         for name, v in (r.get("params") or {}).items():

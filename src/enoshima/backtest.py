@@ -29,10 +29,9 @@ It differs from `Runtime` where a replay differs from a live run:
   publishes it as `EXCEPTION`; the runtime stops its trader at the first one, and
   `Backtest.run` raises, so the run is reported failed and its log is not saved.
 
-A reporter may publish back into the runtime -- `Reporter` is a `StatusFeed` --
-and what it publishes is dispatched to every reporter. That is how the
-evaluations' own metrics reach InfluxDB without the two reporters knowing about
-each other.
+Reporters are terminal sinks. Evaluation results write directly through the
+optional InfluxDB writer owned by the run; they do not masquerade as strategy
+metrics and re-enter this dispatch.
 """
 
 from logging import getLogger
@@ -72,8 +71,8 @@ class BacktestRuntime(EventQueue):
         # back the same object: one set read by every thread of a sweep, for
         # every event, made the whole sweep 2.4x slower on free-threaded Python.
         strategy.skip_measurements = frozenset(tuple(UNRECORDED_MEASUREMENTS))
-        # No params.json reload: a run's parameters are the set it was built
-        # with, and the env's file would replace every sweep's set with its own.
+        # A run's parameters are the set it was built with. A wall-clock reload
+        # would replace a sweep member partway through a deterministic replay.
         self.trader = Trader(strategy, channel, reload_params=False)
         self.reporters: list[Reporter] = []
 
@@ -87,7 +86,6 @@ class BacktestRuntime(EventQueue):
 
     def add_reporter(self, reporter: Reporter) -> None:
         self.reporters.append(reporter)
-        reporter.add_status_listener(self)
 
     def put(self, data) -> None:
         if data is None:

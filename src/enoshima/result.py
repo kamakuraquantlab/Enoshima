@@ -11,8 +11,9 @@ result is evaluated from: with the trades in the folder, any grouping or window
 -- `selection`'s walk-forward months among them -- is recomputed without a
 replay. Orders and the strategy's bars go to InfluxDB through
 `influx.InfluxReporter`, for looking at a run, and only when a run asks for it.
-The evaluations' own `EVAL` metrics are published back through the runtime,
-which hands them to whichever reporters are recording.
+When InfluxDB recording is enabled, the evaluations write their own `EVAL`
+metrics directly through the run's writer. They are results, not strategy
+metrics, and do not re-enter the runtime's reporter dispatch.
 
 ## The three slippage evaluations
 
@@ -22,7 +23,6 @@ strategy whose edge survives at 0 and vanishes at 0.005% has told you something
 important about itself, and reporting only the optimistic figure hides it.
 """
 
-from qate.core.ev_type import EventType
 from qate.core.model import SettleType, Side
 from qate.core.order import OrderResponse
 from qate.trading.pnl_tracker import PnlUpdate
@@ -30,6 +30,7 @@ from qate.trading.reporter import Reporter
 from qate.util.dt_range import DtRange
 
 from .eval import Evaluation
+from .influx import InfluxdbWriter, convert_to_point
 from .ledger import Trade, streaks
 
 # Extra slippage rates the run is evaluated at, beyond the simulated fill.
@@ -52,9 +53,10 @@ def in_range(ts: float, dt_range: DtRange) -> bool:
 class ResultReporter(Reporter):
     """Evaluates a backtest at each slippage rate."""
 
-    def __init__(self, dt_range: DtRange):
+    def __init__(self, dt_range: DtRange, writer: InfluxdbWriter | None = None):
         super().__init__()
         self.dt_range = dt_range
+        self.writer = writer
         self.evals = [Evaluation(), Evaluation(SLIPPAGE_05), Evaluation(SLIPPAGE_10)]
         # One per closed position inside the range, in time order.
         self.trades: list[Trade] = []
@@ -102,9 +104,9 @@ class ResultReporter(Reporter):
             )
         )
 
-        # For comparison with live trading: whoever records the run gets these
-        # through the runtime, as if the strategy had emitted them.
-        self.publish_status(EventType.METRICS, eval_metrics)
+        if self.writer is not None:
+            for metric in eval_metrics:
+                self.writer.add(convert_to_point(metric))
 
     def get_result(self) -> dict:
         """Every evaluation's whole-range numbers, suffixed by its slippage rate."""

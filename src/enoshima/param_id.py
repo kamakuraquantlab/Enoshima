@@ -1,6 +1,6 @@
 """The string that names a run's parameter set: the start of its InfluxDB bucket, and its run log's tag.
 
-Built here from `param_grid.json`, not by the strategy. It used to be each
+Built here from `strategy_param_grid.json`, not by the strategy. It used to be each
 strategy's `get_param_set_id`, which made every strategy carry code that has
 nothing to do with trading, and made the bucket a run wrote to depend on which
 override a variant happened to inherit.
@@ -24,7 +24,7 @@ another, renamed every bucket when a factor changed, and fell silently to 1 when
 one was missing or misspelt. A bucket name may contain a dot, so it went.
 
 The grid gives only the order, so that the same values give the same id whether
-they came from `params.json`, the grid or `params_combo.json`. Parameters the grid
+they came from the grid defaults or an expanded combination. Parameters the grid
 does not name follow, in the order the parameter set gives them. An environment
 with no grid gets that for every parameter. Widening a sweep does not rename the
 buckets of the combinations already run; reordering the grid does.
@@ -33,6 +33,7 @@ The bucket adds the batch id to it; see `influx.bucket_name`.
 """
 
 from decimal import Decimal
+
 
 def param_set_id(env_name: str, params: dict, param_grid: list[dict] | None) -> str:
     grid_names = [spec["name"] for spec in param_grid or []]

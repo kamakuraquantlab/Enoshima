@@ -27,13 +27,11 @@ Each layer asks the one below it in its own vocabulary, and nothing skips a laye
 | [`komachi`](https://github.com/kamakuraquantlab/Komachi) | The files. It downloads them, places them in the data lake layout, and answers which file holds a market-day and whether it is complete | What is inside a file, and trading |
 | [`hase`](https://github.com/kamakuraquantlab/Hase) | The data lake as trading data: markets as qate `Market`s, a range of bronze as `Trade`s and `OrderBook`s, and silver and gold derived from it | Replay, and where a run is configured |
 | [`qate`](https://github.com/kamakuraquantlab/qate) | The model and the machinery: `OrderBook`, `Trade`, the event loop, the simulator | Storage layouts, where data lives, and where a run is configured |
-| [`qate-env`](https://github.com/kamakuraquantlab/qate-env) | The run directory: the strategy an environment names, its config and params, and the lock | Data, and replay |
+| [`qate-env`](https://github.com/kamakuraquantlab/qate-env) | The run directory lifecycle and strategy class-resolution convention | Data, and replay |
 | **Enoshima** | The replay: asks hase for `Trade`s and `OrderBook`s, tags them as events, runs them through qate | Files, paths, and komachi |
 
-`qate-env` is the one a live runner shares, so a backtest environment holds the
-same files a live one does, `params.json` included: backtesting what production
-runs is copying its definition into a backtest env. A run writes into its own
-environment and takes its lock, so it is never pointed at a live one.
+The live runner and Enoshima share `strategy_config.json`; each owns the other
+files its job requires. A run writes into its own environment and takes its lock.
 
 A backtest's request for "these books, these days" is
 `hase.bronze.load_day(market, DataType.ORDER_BOOK, day)`; hase turns it into
@@ -72,7 +70,7 @@ export PYTHONPATH=$PWD   # so `example.strategy` can be imported
 enoshima run --env EXAMPLE_BACKTEST --from 2026-09-01 --to 2026-09-01
 ```
 
-`trading.json` names the strategy as a module, and Enoshima imports it by that
+`strategy_param_grid.json` names the strategy as a module, and Enoshima imports it by that
 name, so a strategy of your own must be importable the same way: installed into
 the environment, or on `PYTHONPATH`.
 
@@ -92,7 +90,7 @@ tail -f example/env/EXAMPLE_BACKTEST/env.log
 It loses money, and it is supposed to: a crossover that crosses 1,292 times in a
 day pays the spread 1,292 times. That is the first thing a backtest is for.
 
-Then sweep the grid in `param_grid.json`:
+Then sweep the grid in `strategy_param_grid.json`:
 
 ```bash
 enoshima run --env EXAMPLE_BACKTEST --from 2026-09-01 --to 2026-09-01 --optimize grid
@@ -132,10 +130,17 @@ Two rules break a backtest silently rather than loudly:
   simulator's latency model, and it is what stops a strategy trading on
   information it could not have had.
 
-Point an environment at your strategy with `trading.json`:
+Point an environment at your strategy and define its parameters with
+`strategy_param_grid.json`:
 
 ```json
-{ "strategy_module_name": "my_strategy", "variant": "v1" }
+{
+  "module_name": "my_strategy",
+  "variant_name": "v1",
+  "params": [
+    {"name": "threshold", "default_value": 0.001, "values": [0.0005, 0.001]}
+  ]
+}
 ```
 
 ## An environment
@@ -144,22 +149,16 @@ One directory per named run configuration, under `~/env` (or `QATE_ENV_ROOT`):
 
 | File | Holds |
 |---|---|
-| `trading.json` | Which strategy module and variant to run |
-| `config.json` | The strategy's `Config` — market, order size |
-| `params.json` | **The parameters one run uses.** The same file a live run reads |
-| `param_grid.json` | The search space `--optimize grid` walks. Optional |
-| `params_combo.json` | An explicit parameter list, for `--optimize combo`. Optional |
-| `features.json` | Feature flags. Optional |
+| `strategy_config.json` | The strategy's `Config` — market, order size |
+| `strategy_param_grid.json` | Strategy module and variant, parameter defaults, and sweep values |
 | `enoshima.json` | How this env is backtested: InfluxDB recording, memory. Optional |
 
 There is no index file. Each file is read by whatever wants it, with the class
 named by the reader — so an environment written when a strategy lived somewhere
 else still loads.
 
-**`params.json` is what a single run uses**, so backtesting exactly what a live
-process is running is one command rather than a comparison of two files. A grid is
-a search space — an input to `--optimize` — not a description of the environment.
-An env whose `params.json` is empty falls back to the grid's defaults.
+One run uses every parameter's `default_value`. `--optimize grid` expands every
+combination in `values`. There is no second parameter file that can disagree.
 
 The strategy's `Config` class is resolved from the strategy module
 (`<strategy_module>.config.Config`).
@@ -244,7 +243,7 @@ enoshima run --env EXAMPLE_BACKTEST --from 2026-09-01
 One bucket per parameter set and run, `backtest_<param_set_id>_<batch_id>`, so a
 sweep's combinations sit side by side under one batch id; the run's `meta.json`
 records which. The id is built by
-Enoshima from `param_grid.json`, not by the strategy: the environment's name, then
+Enoshima from `strategy_param_grid.json`, not by the strategy: the environment's name, then
 the parameter values as plain decimals in the grid's order. In
 `EXAMPLE_BACKTEST`, `fast_period=20, slow_period=120` is `EXAMPLE_BACKTEST_20_120`,
 and `threshold=0.0015` would be `0.0015`. Parameters the
@@ -354,9 +353,9 @@ the best total in one.
 
 To clear an environment's results, delete its `run_log/`, `best_result/` and `post_analysis/`.
 
-Flags on `run`: `--optimize grid|combo`, `--chunk-days` (memory),
+Flags on `run`: `--optimize grid`, `--chunk-days` (memory),
 `--max-concurrency` (parameter sets per data pass), `--force` (re-run a parameter
-set that already has a result). The variant is `trading.json`'s, the data is
+set that already has a result). The variant is `strategy_param_grid.json`'s, the data is
 komachi's, and the output is the environment directory.
 
 ## Memory, and how a sweep is cheap

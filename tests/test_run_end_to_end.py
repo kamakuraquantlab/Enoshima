@@ -208,7 +208,7 @@ def test_influx_records_orders_pnl_and_evaluations(run_env):
     log = load(run_dirs(env)[0])
     [writer] = store.writers
     assert writer.closed
-    # The env, then the example's params.json in param_grid.json's order, then the batch.
+    # The env, then the grid defaults in declaration order, then the batch.
     assert log["param_set_id"] == f"{ENV_NAME}_20_120"
     assert writer.bucket == log["influx_bucket"] == f"backtest_{ENV_NAME}_20_120_{runner.batch_id}"
 
@@ -395,40 +395,12 @@ def test_a_resumed_sweep_ranks_the_combinations_it_skipped(run_env):
     assert best_second["ranking"][0]["params"] == best_first["ranking"][0]["params"]
 
 
-def test_a_single_run_uses_params_json_not_the_grid_defaults(run_env):
-    """The same file a live run reads, so "backtest what prod runs" is one command."""
-    env, dt_range = run_env
-
-    # Make the two sources disagree, then check which one won.
-    params_path = Path(env.work_dir) / "params.json"
-    params_path.write_text(json.dumps({"fast_period": 30, "slow_period": 90}))
-
-    runner = Runner(env, dt_range, chunk_days=1)
-    assert runner.param_sets() == [{"fast_period": 30, "slow_period": 90}]
-
-    runner.run()
-    log = load(run_dirs(env)[0])
-    assert log["params"] == {"fast_period": 30, "slow_period": 90}
-
-
-
-def test_a_sweep_is_not_overwritten_by_params_json(run_env, monkeypatch):
-    """Each combination runs with its own parameters, whatever params.json says.
-
-    A live trader re-reads params.json every ten wall-clock seconds and hands it
-    to the strategy. In a sweep that would replace every combination's set with
-    the file's, so the sweep would rank one strategy against itself. It went
-    unnoticed only while params.json and the grid happened to disagree on their
-    keys, which `Strategy.update_params` refuses. Here they agree, and the clock
-    is an hour ahead so the reload would be due at once.
-    """
+def test_a_backtest_never_reloads_parameters(run_env, monkeypatch):
+    """Every single run and sweep member keeps the parameters it was built with."""
     from qate.trading.strategy import Strategy
     from qate.trading.trader import Trader
 
     env, dt_range = run_env
-    (Path(env.work_dir) / "params.json").write_text(json.dumps({"fast_period": 30, "slow_period": 90}))
-    # The reload reads params.json from the working directory, which a real
-    # run's `env.enter()` makes the env's.
     monkeypatch.chdir(env.work_dir)
 
     future = time.time() + 3600
@@ -439,27 +411,23 @@ def test_a_sweep_is_not_overwritten_by_params_json(run_env, monkeypatch):
     Runner(env, dt_range, optimize="grid", chunk_days=1).run()
 
     assert len(run_dirs(env)) == 6
-    assert offered == [], "a backtest handed params.json to its strategy"
+    assert offered == [], "a backtest tried to reload a strategy's parameters"
 
 
-def test_an_empty_params_json_falls_back_to_the_grid_defaults(run_env):
-    """Backtest envs written before this left params.json empty; do not just refuse."""
+def test_a_single_run_uses_the_grid_defaults(run_env):
     env, dt_range = run_env
-    (Path(env.work_dir) / "params.json").write_text("{}")
 
     runner = Runner(env, dt_range, chunk_days=1)
     assert runner.param_sets() == [{"fast_period": 20, "slow_period": 120}]
 
 
 def test_optimize_still_reads_the_grid(run_env):
-    """A grid is a search space, and only --optimize consults it."""
+    """Optimization expands every value in the same definition."""
     env, dt_range = run_env
-    (Path(env.work_dir) / "params.json").write_text(json.dumps({"fast_period": 30, "slow_period": 90}))
 
     runner = Runner(env, dt_range, optimize="grid", chunk_days=1)
     combos = runner.param_sets()
     assert len(combos) == 6
-    assert {"fast_period": 30, "slow_period": 90} not in combos
 
 
 def test_an_env_needs_no_desc_json(run_env):
@@ -481,7 +449,7 @@ def test_a_run_log_records_the_config_that_produced_it(run_env):
     assert log["env"] == str(ENV_NAME)
     assert log["config"]["market"] == "COINCHECK:BTC_SPOT"
     assert log["config"]["order_size"] == 0.002
-    assert log["trading"]["variant"] == "v1"
+    assert log["trading"]["variant_name"] == "v1"
     assert log["params"] == {"fast_period": 20, "slow_period": 120}
 
 
