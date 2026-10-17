@@ -38,6 +38,7 @@ from qate.core.gateway import ExchangeGateway
 from qate.core.model import OrderBook, SettleType, Side
 from qate.core.order import OrderRequest, OrderResponse, OrderType
 from qate.trading.inventory import SpotInventory
+from qate.trading.pnl_tracker import PnlUpdate
 from qate.trading.strategy import Strategy
 
 from .config import Config
@@ -141,8 +142,7 @@ class Variant(Strategy[Config]):
 
     # ------------------------------------------------------------------- fills
 
-    def handle_order_filled(self, order_response: OrderResponse) -> None:
-        super().handle_order_filled(order_response)
+    def handle_order_filled(self, order_response: OrderResponse) -> PnlUpdate | None:
         self.order_in_flight = False
 
         if order_response.order_request.side == Side.BUY:
@@ -150,17 +150,15 @@ class Variant(Strategy[Config]):
         else:
             self.position -= order_response.exec_size
 
-        # The inventory turns a fill into realized PnL and a fee, and publishing
-        # it is what puts the trade into the run's results. A strategy that does
-        # not publish produces a backtest with no PnL at all.
+        # The inventory turns a fill into realized PnL and a fee. Returning it
+        # lets Strategy publish it through the runtime.
         pnl_update = self.inventory.process_order(order_response)
         if pnl_update:
             pnl_update.market = self.config.market
-            self.publish_pnl_update(pnl_update)
+        return pnl_update
 
     def handle_order_error(self, order_response: OrderResponse) -> None:
         self.order_in_flight = False
-        super().handle_order_error(order_response)
 
     def after_loop(self) -> None:
         super().after_loop()
