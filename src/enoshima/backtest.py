@@ -57,8 +57,8 @@ class BacktestFailed(Exception):
 
 class BacktestRuntime(EventQueue):
     _DISPATCH = {
-        EventType.ORDER_FILLED: "report_order",
-        EventType.METRICS: "report_metrics",
+        EventType.TRADING_ORDER: "report_order",
+        EventType.TRADING_METRICS: "report_metrics",
         EventType.TRADING_PNL_UPDATE: "report_pnl",
         EventType.EXCEPTION: "report_exception",
     }
