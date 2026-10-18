@@ -1,13 +1,13 @@
 """One strategy, one parameter set, one replay.
 
 `BacktestRuntime` is the backtest's counterpart of `qate.trading.runtime.Runtime`:
-it drives a `Trader`, stands a `SimulatorGateway` where an exchange gateway would
+it drives a `Trader`, stands a `BacktestGateway` where an exchange gateway would
 be, and hands every outcome to its `Reporter`s through the same hooks a live run
 uses -- `report_order`, `report_metrics`, `report_pnl`. What records a run is
 therefore a choice of reporters, not a property of the runtime:
 
 ```
-Channel ──► Trader ──► Strategy ──► SimulatorGateway
+Channel ──► Trader ──► Strategy ──► BacktestGateway
  (market     (event      (creates    (matches against
   events)     loop)       orders)     the next book)
                  │                         │
@@ -39,7 +39,7 @@ from logging import getLogger
 from qate.core.ev_q import EventQueue
 from qate.core.ev_type import EventType
 from qate.core.model import ExchangeName
-from qate.trading.gateways import SimulatorGateway
+from qate.trading.gateways import BacktestGateway
 from qate.trading.reporter import Reporter
 from qate.trading.strategy import Strategy
 from qate.trading.trader import Trader
@@ -77,7 +77,7 @@ class BacktestRuntime(EventQueue):
         self.reporters: list[Reporter] = []
 
         for exchange_name in exchanges:
-            gateway = SimulatorGateway(exchange_name)
+            gateway = BacktestGateway(exchange_name)
             gateway.add_order_listener(self)
             self.trader.add_gateway(gateway)
             self.trader.register(EventType.MARKET_ORDER_BOOK, gateway.handle_order_book)

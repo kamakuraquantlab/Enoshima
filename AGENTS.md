@@ -59,7 +59,7 @@ but it is easy to break from here:
 
 1. **Never add a venue client, an exchange SDK, or a WebSocket library to
    `dependencies`.** A backtest reads files.
-2. **Never make `SimulatorGateway` optional.** `backtest.Backtest` builds one per
+2. **Never make `BacktestGateway` optional.** `backtest.Backtest` builds one per
    exchange in the config; there is no code path that substitutes a real gateway,
    and there should not be.
 3. **No credential, no private path, no production environment name** in source,
