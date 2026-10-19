@@ -22,6 +22,18 @@
     "group_by": null,
     "train_months": 6,
     "test_months": 1
+  },
+  "walk_forward": {
+    "window": ["expanding"],
+    "history": ["6m"],
+    "every": ["1m", "never"],
+    "test_from": null,
+    "train_window": "expanding",
+    "train_history": "1m",
+    "retrain": "1m",
+    "baseline": "default",
+    "block_days": 5,
+    "resamples": 10000
   }
 }
 ```
@@ -43,6 +55,10 @@ Every key is optional, and a missing file means the defaults.
   sweep). `"INFO"` brings it back when a backtest needs debugging.
 - `selection` is how `--optimize` chooses: filters, the score, grid-neighbour
   smoothing and the walk-forward window. See `enoshima.selection`.
+- `walk_forward` is what `enoshima walk-forward` tries: the rules (window,
+  history, reselection interval, in hours, days, weeks or months), and for
+  `--train` how often a rule is chosen again, on how much history, against
+  which baseline. See `enoshima.post_analysis.walk_forward`.
 
 This is the environment's file rather than a set of flags because it describes
 the environment: where its runs are charted and how big its data is. An unknown
@@ -56,6 +72,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from .data_source import DEFAULT_CHUNK_DAYS
+from .post_analysis.walk_forward import WalkForwardSettings
 from .runner import MAX_CONCURRENCY
 from .selection import SelectionSettings
 
@@ -77,6 +94,7 @@ class Settings:
     strategy_log_level: str = "WARNING"
     influx: InfluxSettings | None = None
     selection: SelectionSettings = field(default_factory=SelectionSettings)
+    walk_forward: WalkForwardSettings = field(default_factory=WalkForwardSettings)
 
     def __post_init__(self):
         if not isinstance(logging.getLevelName(self.strategy_log_level), int):
@@ -105,12 +123,15 @@ def load_settings(work_dir: str | Path) -> Settings:
         _check_keys(influx, InfluxSettings, f'"influx" in {path}')
         influx = InfluxSettings(**influx)
 
-    selection = data.pop("selection", None)
-    if selection is None:
-        selection = SelectionSettings()
-    else:
-        if not isinstance(selection, dict):
-            raise ValueError(f'"selection" in {path} must be an object')
-        _check_keys(selection, SelectionSettings, f'"selection" in {path}')
-        selection = SelectionSettings(**selection)
-    return Settings(**data, influx=influx, selection=selection)
+    sections = {}
+    for name, cls in (("selection", SelectionSettings), ("walk_forward", WalkForwardSettings)):
+        section = data.pop(name, None)
+        if section is None:
+            section = cls()
+        else:
+            if not isinstance(section, dict):
+                raise ValueError(f'"{name}" in {path} must be an object')
+            _check_keys(section, cls, f'"{name}" in {path}')
+            section = cls(**section)
+        sections[name] = section
+    return Settings(**data, influx=influx, **sections)

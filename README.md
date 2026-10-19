@@ -177,7 +177,14 @@ EXAMPLE_BACKTEST/
 ├── best_result/<batch_id>/            a sweep's (or `select`'s) recommendations
 │   ├── selection.json                 per range and group: ranking, folds, out-of-sample totals
 │   └── <id>.json                      each recommended run's meta.json
-└── post_analysis/                     `walk-forward`'s reports: walk_forward_<stamp>.json and .txt
+└── post_analysis/
+    ├── walk_forward_<stamp>.json      `walk-forward`'s rule table (and .txt)
+    └── train/<id>/                    one `walk-forward --train` per range and group
+        ├── meta.json                  what was trained: range, group, rules, baseline, settings
+        ├── folds.json                 each retraining: windows, every candidate's ranking, the choice
+        ├── switches.json              which rule and parameter set the trained curve held, and when
+        ├── curve.csv                  PnL closed per JST hour: trained, baseline, hindsight, each rule
+        └── summary.json               totals, significance, the rule to trade now (written last)
 ```
 
 A grouping's row holds `trades`, and per slippage suffix N `winsN`, `pnlN`, and
@@ -217,9 +224,24 @@ optional, and a missing file means the defaults:
     "group_by": null,
     "train_months": 6,
     "test_months": 1
+  },
+  "walk_forward": {
+    "window": ["expanding"],
+    "history": ["6m"],
+    "every": ["1m", "never"],
+    "test_from": null,
+    "train_window": "expanding",
+    "train_history": "1m",
+    "retrain": "1m",
+    "baseline": "default",
+    "block_days": 5,
+    "resamples": 10000
   }
 }
 ```
+
+`walk_forward` is what `enoshima walk-forward` tries; see [Testing the rule
+itself](#testing-the-rule-itself).
 
 `chunk_days` and `max_concurrency` size a run (see below); `--chunk-days` and
 `--max-concurrency` override them for one run. `strategy_log_level` is the level
@@ -321,26 +343,52 @@ folders on disk, replaying nothing -- after changing the rule, for instance.
 
 The walk-forward above has parameters of its own -- the window, how much
 history, how often it chooses again -- and `enoshima walk-forward` tests them,
-from the same run folders, over days rather than months:
+from the same run folders, to the hour. The rules are `enoshima.json`'s
+`"walk_forward"`: every combination of its `window`, `history` and `every`.
 
 ```bash
-enoshima walk-forward --env NAME --window expanding,rolling --history 1m,3m,6m \
-    --every 1d,1w,1m,never --sum A+B
+enoshima walk-forward --env NAME --sum A+B
 ```
 
-Every combination is a rule. Spans are days, weeks or calendar months (`1d`,
-`2w`, `6m`); `never` chooses once and holds the set to the end. Each fold makes
-the choice `selection` makes, with the env's filters, score and neighbours,
-on the training days, then trades it until the next choice. Every rule is
-tested on the same days -- from `--test-from`, by default the range start plus
-the longest history -- so their totals compare, and `hindsight`, the set chosen
-on the whole range, is listed beside them as the ceiling it is. `--sum A+B`
-adds groups traded side by side, such as two schedules that split the day. The
-table goes to `env.log` and `post_analysis/`.
+Spans are hours, days, weeks or calendar months (`4h`, `1d`, `2w`, `6m`);
+`never` chooses once and holds the set to the end. Each fold makes the choice
+`selection` makes, with the env's filters, score, neighbours and `group_by`, on
+the training hours, then trades it until the next choice; a trade belongs to
+the hour it closed in. Every rule is tested on the same hours -- from
+`test_from`, by default the range start plus the longest history -- so their
+totals compare, and `hindsight`, the set chosen on the whole range, is listed
+beside them as the ceiling it is. `--sum A+B` adds groups traded side by side,
+such as two schedules that split the day. The table goes to `env.log` and
+`post_analysis/`.
 
 Trying many rules on the same test days is itself a choice made in sample:
 prefer the rule that holds up across groups and environments over the one with
 the best total in one.
+
+### Training the rule
+
+```bash
+enoshima walk-forward --env NAME --train
+```
+
+`--train` makes that choice the way a deployment would, and tests it. Every
+`retrain` (a month by default) it ranks the rules on how they did out of sample
+over the `train_history` before -- with `selection.rank`, a rule's history and
+interval in hours being its grid axes -- and trades the winner until the next
+retraining. One candidate is always **no switching**: the parameter set of the
+grid's `default_value`s (with the group's own values for grouped parameters),
+held throughout; `"baseline": "once"`, or a default set that was never run,
+means the set chosen once at the start of the test instead. A retraining where
+no candidate passes the filters trades the baseline.
+
+The trained curve never sees the hours it trades, so it is compared with the
+baseline directly: the daily pnl5 and pnl10 difference by a moving-block
+bootstrap (`block_days`, `resamples`; a one-sided p-value), and the retrainings
+won by a sign test. `summary.json`'s `current` is the rule chosen on the latest
+window, the one to trade now. Each group gets its own folder under
+`post_analysis/train/`, whole and ready to chart. Comparing several training
+settings by their p-values is the same in-sample fit one level up: decide them
+before looking.
 
 ## Commands
 
@@ -348,7 +396,7 @@ the best total in one.
 |---|---|
 | `enoshima run` | Run a backtest, or a parameter sweep |
 | `enoshima select` | Recommend again from the recorded runs, per range and group |
-| `enoshima walk-forward` | Test the selection rule's window, history and reselection interval |
+| `enoshima walk-forward` | Test the selection rule's window, history and reselection interval; `--train` chooses among them monthly against no switching |
 | `enoshima results` | Recorded runs for an environment, best first |
 
 To clear an environment's results, delete its `run_log/`, `best_result/` and `post_analysis/`.

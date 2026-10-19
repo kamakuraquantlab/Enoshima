@@ -39,13 +39,13 @@ BEST_RESULT_DIR = "best_result"
 SELECTION_FILE = "selection.json"
 
 
-def load_runs(root: Path, grouping: str = "month") -> list[dict]:
+def load_runs(root: Path, grouping: str | None = "month") -> list[dict]:
     """Every finished, non-temporary run folder with a pnl5 figure, as `selection` reads it.
 
     `periods` and `trade_pnl5` are keyed by `grouping`, a calendar one of
-    `ledger.GROUPINGS`: month for `selection`, day for `post_analysis`.
+    `ledger.GROUPINGS`: month for `selection`. With `grouping` None, `result`
+    carries the run's `trades` instead, for `post_analysis` to cut its own windows.
     """
-    key_of = GROUPINGS[grouping][0]
     runs = []
     for path in run_dir.iter_complete(root):
         try:
@@ -55,15 +55,20 @@ def load_runs(root: Path, grouping: str = "month") -> list[dict]:
                 continue
             if meta.get("is_temporary_run"):
                 continue  # a one-off look at a set, not a candidate
-            periods = run_dir.read_json(path, run_dir.grouping_file(grouping))
-            trade_pnl5 = {}
-            for t in run_dir.read_trades(path):
-                trade_pnl5.setdefault(key_of(t), []).append(t.pnl_change5)
+            trades = run_dir.read_trades(path)
+            if grouping is None:
+                result = {**summary, "trades": trades}
+            else:
+                key_of = GROUPINGS[grouping][0]
+                trade_pnl5 = {}
+                for t in trades:
+                    trade_pnl5.setdefault(key_of(t), []).append(t.pnl_change5)
+                result = {**summary, "periods": run_dir.read_json(path, run_dir.grouping_file(grouping)),
+                          "trade_pnl5": trade_pnl5}
         except (json.JSONDecodeError, OSError, TypeError, ValueError) as e:
             LOG.error(f"Could not read {path}: {e}")
             continue
-        runs.append({**meta, "run_id": path.name,
-                     "result": {**summary, "periods": periods, "trade_pnl5": trade_pnl5}})
+        runs.append({**meta, "run_id": path.name, "result": result})
     return runs
 
 

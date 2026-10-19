@@ -163,8 +163,13 @@ but it is easy to break from here:
   be compared on its own merits rather than outranked on a box size's figures.
   `enoshima select` reruns it from disk. `enoshima walk-forward`
   (`post_analysis.walk_forward`) tests the rule's own window, history and
-  reselection interval over days, every rule on the same test days; it reuses
-  `selection.rank` and must not grow a second way of choosing.
+  reselection interval to the hour, every rule on the same test hours; it reuses
+  `selection.rank` and must not grow a second way of choosing. Its rules are
+  `enoshima.json`'s `"walk_forward"`, not flags. `--train` ranks the rules'
+  out-of-sample curves, and a no-switching baseline, with that same
+  `selection.rank`, and is compared with the baseline only out of sample; its
+  folders under `post_analysis/train/` are written whole, `summary.json` last,
+  and a results viewer may read them -- add to their files rather than rename.
 - **A single run uses the defaults in `strategy_param_grid.json`.** An optimize
   sweep expands the values in that same file, so there is one source of parameter
   definitions.

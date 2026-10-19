@@ -6,15 +6,17 @@ Run as: `enoshima <command>`, or from a checkout
 ```
 enoshima run     --env NAME --from 2026-06-01 --to 2026-06-10
 enoshima select  --env NAME
-enoshima walk-forward --env NAME --window expanding,rolling --history 3m,6m --every 1w,1m,never
+enoshima walk-forward --env NAME [--train]
 enoshima results --env NAME
 ```
 
 `run` is the one that matters. `select` recommends again from the run folders
 already written -- after a change to the rule in `enoshima.json`, say -- without
 replaying anything; a sweep does the same when it finishes. `walk-forward` tests
-the rule itself: how each window, history and reselection interval would have
-done out of sample (`enoshima.post_analysis.walk_forward`). `results` exists so
+the rule itself: how each window, history and reselection interval in
+`enoshima.json`'s `"walk_forward"` would have done out of sample, and with
+`--train` chooses among them every month against a baseline that never
+switches (`enoshima.post_analysis.walk_forward`). `results` exists so
 that what a run produced can be found and read without reading the source.
 
 Everything a run needs to know beyond the dates is somewhere already, so it is not
@@ -54,6 +56,7 @@ from enoshima.influx import InfluxdbStore
 from enoshima.post_analysis import walk_forward
 from enoshima.runner import Runner
 from enoshima.settings import SETTINGS_FILE, load_settings
+from enoshima.strategy_env import STRATEGY_PARAM_GRID_FILE, StrategyParamGrid
 
 LOG = getLogger(__name__)
 
@@ -132,8 +135,9 @@ def cmd_select(args) -> int:
     return 0
 
 
-def _list(text: str) -> list[str]:
-    return [p.strip() for p in text.split(",") if p.strip()]
+def _grid_defaults(env: Env) -> dict:
+    definition = env.load_object(STRATEGY_PARAM_GRID_FILE, StrategyParamGrid)
+    return {p["name"]: p["default_value"] for p in (definition.params if definition else []) if "default_value" in p}
 
 
 def cmd_walk_forward(args) -> int:
@@ -141,12 +145,18 @@ def cmd_walk_forward(args) -> int:
     env.enter()
     try:
         settings = load_settings(env.work_dir)
-        rule_list = walk_forward.rules(_list(args.window), _list(args.history), _list(args.every))
-        test_from = DtRange.from_strings(args.test_from, args.test_from).start_dt.date() if args.test_from else None
-        path = walk_forward.run(Path(env.work_dir), rule_list, settings.selection, test_from,
-                                [p.split("+") for p in args.sum])
-        if path is None:
-            LOG.warning(f"No results with a pnl5 figure for {args.env}")
+        wf = settings.walk_forward
+        root = Path(env.work_dir)
+        if args.train:
+            if args.sum:
+                LOG.warning("--sum adds rules' totals across groups; --train ignores it")
+            found = walk_forward.run_train(root, wf, settings.selection, _grid_defaults(env))
+        else:
+            test_from = walk_forward.parse_time(wf.test_from) if wf.test_from else None
+            found = walk_forward.run(root, wf.rules(), settings.selection, test_from,
+                                     [p.split("+") for p in args.sum])
+        if not found:
+            LOG.warning(f"No results with a pnl5 figure, or none long enough, for {args.env}")
             return 1
     except Exception:
         LOG.exception("Walk-forward failed")
@@ -217,12 +227,12 @@ def build_parser() -> argparse.ArgumentParser:
     select.add_argument("--env", required=True, type=EnvName)
     select.set_defaults(func=cmd_select)
 
-    wf = sub.add_parser("walk-forward", help="test the selection rule's window, history and reselection interval")
+    wf = sub.add_parser("walk-forward", help="test the selection rule's window, history and reselection "
+                        f"interval, as {SETTINGS_FILE}'s walk_forward lists them")
     wf.add_argument("--env", required=True, type=EnvName)
-    wf.add_argument("--window", default="expanding", help="expanding, rolling, or both comma-separated")
-    wf.add_argument("--history", default="6m", help="rolling window lengths, e.g. 2w,3m,6m (d, w or m)")
-    wf.add_argument("--every", default="1m,never", help="reselection intervals, e.g. 1d,1w,1m, or never")
-    wf.add_argument("--test-from", default=None, help="first test day; defaults to the start plus the longest history")
+    wf.add_argument("--train", action="store_true",
+                    help="choose a rule every retrain interval, against a baseline that never switches, and "
+                         "write post_analysis/train/")
     wf.add_argument("--sum", action="append", default=[],
                     help="groups traded side by side, values joined by +; repeatable")
     wf.set_defaults(func=cmd_walk_forward)
