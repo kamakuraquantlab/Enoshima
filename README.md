@@ -160,17 +160,26 @@ enoshima run --env EXAMPLE_BACKTEST --from 2026-01-01 --to 2027-01-31 --weekly  
 
 The range is widened to the ISO weeks that cover it, Monday 00:00 to Sunday
 24:00 JST, and each week is replayed on its own: a fresh strategy and simulated
-exchange, fed `weekly.preload_hours` (24 by default) of data before the Monday,
-reporting from the Monday on. Asked for 2026-10-08, it replays 10-04 to 10-11
-and reports 10-05 to 10-11. A week's result depends only on the environment,
-the parameters, the preload and the week, so a week already on disk is skipped,
-and a window's result is its weeks' trades put together -- identical, to the
-byte, whichever run computed each week.
+exchange, fed `weekly.preload_days` (1 by default) of data before the Monday
+and `weekly.overlap_days` (1 by default) after the Sunday. A trade belongs to
+the week it *opened* in. Asked for 2026-10-08, it replays 10-04 to 10-12: the
+preload day 10-04 warms the strategy up, every trade opened from 10-05 to
+10-11 is the week's, and the overlap day 10-12 is there to see the last of
+them closed -- a trade opened on 10-12 is the next week's, and no open order
+made on 10-12 fills in this week's replay. The replay stops
+as soon as the week's last position is closed, and the orders a week counts
+are its own trades' legs, so everything a week reports happened to the
+trades it opened. A week's result
+depends only on the environment, the parameters, the preload, the overlap and
+the week, so a week already on disk is skipped, and a window's result is its
+weeks' trades put together -- identical, to the byte, whichever run computed
+each week.
 
 It runs as far as there is data. Each week is clipped to the complete days on
-disk -- the first to the last day that every stream the strategy reads has --
-so a range asked for up to today runs the current week to yesterday, and a
-week with no such day is not run. A partial week records its own
+disk -- the first to the last day that every stream the strategy reads has,
+less the overlap at the end -- so a range asked for up to today runs the
+current week's opens to the day before yesterday, and a week with no such day
+is not run. A partial week records its own
 `start_str`/`end_str` and `"partial": true`, and the next weekly run whose data
 reaches further into it runs it again, so the last week grows to full without
 `--force`. A day missing between the first and the last is not clipped: it
@@ -179,13 +188,14 @@ replays as empty, with a warning. `--force` reruns the weeks asked for.
 What it trades away is equality with one continuous replay. Each week starts
 cold: a position opened before the preload and still open on the Monday is in
 neither week, and a strategy whose state needs more history than the preload
-behaves differently on Mondays. Make the preload longer than the strategy's
-memory. Each week's `summary.json` has `open_at_end`, the positions its replay
-ended holding.
+behaves differently on Mondays. A trade the overlap did not see closed is in
+no week. Make the preload longer than the strategy's memory and the overlap
+longer than its holding time. Each week's `summary.json` has `open_at_end`,
+the positions the week opened that its replay ended still holding.
 
 The run is cumulative. Its folder is `run_log/<id>/`, with an id that has no
-dates in it -- the environment, the strategy and its revision, the parameters
-and the preload -- and every weekly run of them adds its weeks to
+dates in it -- the environment, the strategy and its revision, the parameters,
+the preload and the overlap -- and every weekly run of them adds its weeks to
 `weeks/<YYYY-Www>/` (`meta.json`, `summary.json`, `trades.csv` per week). The
 root `meta.json`, `summary.json`, `trades.csv` and `by_*.json` are never the
 current run's: they are rebuilt from every week on disk, from the first
@@ -303,14 +313,15 @@ optional, and a missing file means the defaults:
     "resamples": 10000
   },
   "weekly": {
-    "preload_hours": 24
+    "preload_days": 1,
+    "overlap_days": 1
   }
 }
 ```
 
 `weekly` is how a `--weekly` run replays a week; see [Extending a backtest week
-by week](#extending-a-backtest-week-by-week). The preload is part of the run's
-id: a different one starts a different set of weeks.
+by week](#extending-a-backtest-week-by-week). The preload and the overlap are
+part of the run's id: a different one starts a different set of weeks.
 
 `walk_forward` is what `enoshima walk-forward` tries; see [Testing the rule
 itself](#testing-the-rule-itself).

@@ -32,8 +32,8 @@ converging.
 
 With `weekly`, the range is widened to the ISO weeks covering it, clipped to
 the complete days on disk, and each week is replayed on its own -- one pass
-over the week and its preload for every parameter set that needs it, in
-batches as above. A week already written is skipped unless the data now
+over the week, its preload and its overlap for every parameter set that needs
+it, in batches as above. A week already written is skipped unless the data now
 reaches further into it than when it ran; the weeks between those on disk and
 those asked for are filled in, so each parameter set's weeks stay contiguous.
 After each week the run's root files are rebuilt from all of its weeks
@@ -168,27 +168,31 @@ class Runner:
         combos = self.param_sets()
         mode = self.optimize or "single"
         if self.weekly:
-            mode += f" weekly({len(self.weeks)} weeks, preload {self.weekly.preload_hours}h)"
+            mode += (f" weekly({len(self.weeks)} weeks, preload {self.weekly.preload_days}d,"
+                     f" overlap {self.weekly.overlap_days}d)")
         LOG.info(
             f"START env={self.env.name} strategy={self.definition.strategy_name} "
             f"range={self.dt_range.start_str}..{self.dt_range.end_str} "
             f"mode={mode} combos={len(combos)}"
         )
         if not self.weekly:
-            self._run_range(combos, self.dt_range, WARMUP_HOURS)
+            self._run_range(combos, self.dt_range, timedelta(hours=WARMUP_HOURS))
             return
         available = self._available_days()
         if available is None:
             LOG.warning("No day is complete on disk for every stream the strategy reads; nothing to run")
             return
         LOG.info(f"Complete days on disk: {available[0]}..{available[1]}")
+        if available[1] - self.weekly.overlap < available[0]:
+            LOG.warning(f"No day on disk has its {self.weekly.overlap_days}-day overlap after it; nothing to run")
+            return
         todo = self._weeks_to_run(combos, available)
         for week in sorted(todo, key=lambda w: w.monday):
             dt_range, params = todo[week]
             part = "" if dt_range.start_dt == week.start and dt_range.end_dt == week.dt_range.end_dt else \
                 f" (partial: {dt_range.start_str}..{dt_range.end_str})"
             LOG.info(f"Week {week.key}{part}: {len(params)} parameter set(s)")
-            self._run_range(params, dt_range, self.weekly.preload_hours, week)
+            self._run_range(params, dt_range, self.weekly.preload, week, self.weekly.overlap)
         self._rebuild_all(combos)
 
     def _available_days(self) -> tuple[dt.date, dt.date] | None:
@@ -207,17 +211,21 @@ class Runner:
     ) -> dict[Week, tuple[DtRange, list[dict]]]:
         """Each week, the part of it with data, and the parameter sets that need it.
 
-        A set needs a week asked for or between its weeks on disk, that it has
-        no result for, or whose result the data now reaches past -- a week
-        that was partial. `--force` reruns the weeks asked for.
+        The part with data ends `overlap_days` before the last complete day:
+        a trade opened later could not be seen closed. A set needs a week
+        asked for or between its weeks on disk, that it has no result for, or
+        whose result the data now reaches past -- a week that was partial.
+        `--force` reruns the weeks asked for.
         """
         todo: dict[Week, tuple[DtRange, list[dict]]] = {}
         grown = set()
+        first, last = available
+        last -= self.weekly.overlap
         for params in combos:
             run_id = self._run_log(params, self.weeks[0]).get_id()
             done = weekly_mod.on_disk(self.output_root, run_id)
             for week in weekly_mod.span(self.weeks, done):
-                dt_range = week.clip(*available)
+                dt_range = week.clip(first, last)
                 if dt_range is None:
                     continue
                 if week in done and not (self.force and week in self.weeks):
@@ -242,16 +250,23 @@ class Runner:
             batch_id=self.batch_id,
             config=self.config,
             profile={"module_name": self.definition.module_name, "variant_name": self.definition.variant_name},
-            preload_hours=self.weekly.preload_hours if week else None,
+            weekly=self.weekly if week else None,
             week_key=week.key if week else None,
             strategy_rev=self.strategy_rev,
         )
 
-    def _run_range(self, combos: list[dict], dt_range: DtRange, warmup_hours: int, week: Week | None = None) -> None:
-        """Every parameter set over one reported range, fed `warmup_hours` before it."""
+    def _run_range(
+        self,
+        combos: list[dict],
+        dt_range: DtRange,
+        warmup: timedelta,
+        week: Week | None = None,
+        overlap: timedelta = timedelta(),
+    ) -> None:
+        """Every parameter set over one reported range, fed `warmup` before it and `overlap` after."""
         markets = [(m, market_data_event_types(t)) for m, t in self.config.get_markets()]
         data_source = DataSource(
-            DtRange(dt_range.start_dt - timedelta(hours=warmup_hours), dt_range.end_dt),
+            DtRange(dt_range.start_dt - warmup, dt_range.end_dt + overlap),
             self.chunk_days,
         )
         for market, event_types in markets:
@@ -334,7 +349,7 @@ class Runner:
             writer = self.influx.create_writer(bucket, param_set_id=param_set_id, tags=tags)
             self.influx.delete_tagged(bucket, tags)
         run_log.influx_bucket = bucket
-        return writer, [InfluxReporter(writer, dt_range)]
+        return writer, [InfluxReporter(writer, dt_range, by_open=week is not None)]
 
     def _run_batch(self, backtests: list[Backtest], data_source: DataSource) -> None:
         """Run a batch concurrently, and do not let one failure hang the rest.

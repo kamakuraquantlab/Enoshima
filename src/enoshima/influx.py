@@ -56,8 +56,10 @@ A weekly run (`weekly`) is built up over several executions, and a window
 reads weeks written by any of them, so it has one bucket for the run rather
 than one per execution. Every point is tagged `week=<YYYY-Www>`, and a week's
 points are deleted by that tag before the week is written again: by time
-range would not do, because a position closed on a Monday has its open-aligned
-copy in the Sunday before, in the previous week's time. The bucket then holds
+range would not do, because a position the week opened on a Sunday has its
+close-aligned copy on the Monday after, in the next week's time. Its replay's
+preload and overlap are written by nothing but those copies, so the days a
+week shares with its neighbours are in the bucket once. The bucket then holds
 exactly the weeks on disk, each once. This is the one delete Enoshima makes.
 """
 
@@ -87,7 +89,7 @@ LOG = getLogger(__name__)
 
 
 def in_range(ts: float, dt_range: DtRange) -> bool:
-    return ts >= dt_range.start_ts
+    return dt_range.start_ts <= ts <= dt_range.end_ts
 
 WRITE_TIMEOUT_MS = 120_000  # large batches from a finished backtest are slow
 
@@ -299,16 +301,20 @@ class InfluxReporter(Reporter):
       close and `time_align=open` at its entry, so a chart can align PnL with the
       signal that caused it or with when it settled. A position opened during
       warmup and closed in range is reported, so its open copy is earlier than
-      the range.
+      the range -- except with `by_open`, as a weekly run's, where a position
+      is the range's if it opened in it, and its close copy can be later. Its
+      orders are then those positions' legs, as `ResultReporter` counts them.
 
     `MARKET_PRICE` and `TRADE` metrics are dropped: they are emitted per market
     event, are already in the bronze layer, and would outweigh everything else.
     """
 
-    def __init__(self, writer: InfluxdbWriter, dt_range: DtRange):
+    def __init__(self, writer: InfluxdbWriter, dt_range: DtRange, by_open: bool = False):
         super().__init__()
         self.writer = writer
         self.dt_range = dt_range
+        self.by_open = by_open
+        self._fill: OrderResponse | None = None   # see `ResultReporter.report_order`
         # Per reporter, not shared: see the note in `BacktestRuntime.__init__`.
         self._skip_measurements = frozenset(tuple(UNRECORDED_MEASUREMENTS))
 
@@ -323,11 +329,22 @@ class InfluxReporter(Reporter):
                 self._add(metric)
 
     def report_order(self, order_response: OrderResponse) -> None:
-        if in_range(order_response.get_ts(), self.dt_range):
+        if self.by_open:
+            self._fill = order_response
+        elif in_range(order_response.get_ts(), self.dt_range):
             self._add(order_response.to_metric())
 
     def report_pnl(self, pnl_update: PnlUpdate) -> None:
-        if pnl_update.settle_type != SettleType.CLOSE or not in_range(pnl_update.get_ts(), self.dt_range):
+        if self.by_open:
+            fill, self._fill = self._fill, None
+            opened = pnl_update.get_ts() if pnl_update.settle_type == SettleType.OPEN else pnl_update.open_ts
+            if not in_range(opened, self.dt_range):
+                return
+            if fill is not None:
+                self._add(fill.to_metric())
+        elif not in_range(pnl_update.get_ts(), self.dt_range):
+            return
+        if pnl_update.settle_type != SettleType.CLOSE:
             return
         for align, ts in (("close", pnl_update.get_ts()), ("open", pnl_update.open_ts)):
             metric = pnl_update.to_metric()

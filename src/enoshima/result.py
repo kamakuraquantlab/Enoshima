@@ -18,10 +18,14 @@ metrics, and do not re-enter the runtime's reporter dispatch.
 ## Strict weekly runs
 
 With `strict`, as `weekly` builds it, a run's figures must partition across
-weeks: the orders counted are only those in range, like everything else, and
-the summary is `weekly.summarize` of the trades and order counters, so a week
-alone and a window of weeks are computed the same way. `open_at_end` counts
-the positions the replay ended holding.
+weeks. A trade is the range's if it *opened* in it, wherever it closed: the
+replay goes on past the range's end (`weekly`'s overlap) to see it closed, and
+stops as soon as it has (`settled`). The orders counted are the legs of those
+trades and nothing else -- an order is reported just before the PnL update of
+its fill, and counted with it -- and the summary is `weekly.summarize` of the
+trades and order counters, so a week alone and a window of weeks are computed
+the same way. `open_at_end` counts the range's own positions the replay ended
+holding: the trades it opened and the overlap was too short to see closed.
 
 ## The three slippage evaluations
 
@@ -51,9 +55,11 @@ def in_range(ts: float, dt_range: DtRange) -> bool:
 
     A run is fed warmup data from before `dt_range.start_ts` so indicators have
     history. Those events are replayed but not reported: a PnL from the warmup
-    period would be a trade the requested range did not contain.
+    period would be a trade the requested range did not contain. A weekly
+    run's replay also goes past the end, and nothing filled there is reported
+    either.
     """
-    return ts >= dt_range.start_ts
+    return dt_range.start_ts <= ts <= dt_range.end_ts
 
 
 class ResultReporter(Reporter):
@@ -64,11 +70,14 @@ class ResultReporter(Reporter):
         self.dt_range = dt_range
         self.writer = writer
         self.strict = strict
-        # Open notional per (market, side), warmup included: what the replay ends holding.
+        # Open notional per (market, side), warmup included -- a strict run's: only
+        # the positions opened in range. What the replay ends holding.
         self._open: dict[tuple, float] = {}
         self.evals = [Evaluation(), Evaluation(SLIPPAGE_05), Evaluation(SLIPPAGE_10)]
         # One per closed position inside the range, in time order.
         self.trades: list[Trade] = []
+        # A strict run's last fill, waiting for its PnL update to say whose leg it is.
+        self._fill: OrderResponse | None = None
         # What the event loop caught. Any at all and there is no result.
         self.exceptions: list[BaseException] = []
 
@@ -78,20 +87,34 @@ class ResultReporter(Reporter):
     def report_order(self, order_response: OrderResponse) -> None:
         # Evaluations see every fill, warmup included, so the reported slippage
         # average is over the whole replay rather than a truncated tail -- except
-        # a strict run's, whose preload is the previous week's range.
-        if self.strict and not in_range(order_response.get_ts(), self.dt_range):
+        # a strict run's, which counts its trades' legs: see `report_pnl`.
+        if self.strict:
+            self._fill = order_response
             return
         for evaluation in self.evals:
             evaluation.on_order(order_response)
 
-    def report_pnl(self, pnl_update: PnlUpdate) -> None:
-        key = (pnl_update.market.id, pnl_update.side)
-        if pnl_update.settle_type == SettleType.OPEN:
-            self._open[key] = self._open.get(key, 0.0) + pnl_update.notional
-        else:
-            self._open[key] = self._open.get(key, 0.0) - pnl_update.open_cost
+    def _counts(self, pnl_update: PnlUpdate) -> bool:
+        """Whether this update is the range's: by close, or a strict run's by open."""
+        if not self.strict:
+            return in_range(pnl_update.get_ts(), self.dt_range)
+        opened = pnl_update.get_ts() if pnl_update.settle_type == SettleType.OPEN else pnl_update.open_ts
+        return in_range(opened, self.dt_range)
 
-        if not in_range(pnl_update.get_ts(), self.dt_range):
+    def report_pnl(self, pnl_update: PnlUpdate) -> None:
+        counts = self._counts(pnl_update)
+        fill, self._fill = self._fill, None
+        if counts and fill is not None:
+            for evaluation in self.evals:
+                evaluation.on_order(fill)
+        if counts or not self.strict:
+            key = (pnl_update.market.id, pnl_update.side)
+            if pnl_update.settle_type == SettleType.OPEN:
+                self._open[key] = self._open.get(key, 0.0) + pnl_update.notional
+            else:
+                self._open[key] = self._open.get(key, 0.0) - pnl_update.open_cost
+
+        if not counts:
             return
 
         if pnl_update.settle_type == SettleType.OPEN:
@@ -125,6 +148,17 @@ class ResultReporter(Reporter):
         if self.writer is not None:
             for metric in eval_metrics:
                 self.writer.add(convert_to_point(metric))
+
+    def settled(self, ts: float, pending_opens) -> bool:
+        """Whether a strict run has nothing left to report at `ts`: past its range, none of its positions open.
+
+        `pending_opens()` lists the open orders not yet filled: one made in range
+        would be a position of the range's, once filled. It is asked only past
+        the range, so a week's own events cost a comparison.
+        """
+        if not self.strict or ts <= self.dt_range.end_ts or self.open_at_end():
+            return False
+        return not any(in_range(order.get_ts(), self.dt_range) for order in pending_opens())
 
     def open_at_end(self) -> int:
         """How many (market, side) positions are still open: closed after the replay, if ever."""

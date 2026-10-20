@@ -2,25 +2,47 @@
 
 `enoshima run --weekly` widens the requested range to the ISO weeks that cover
 it, Monday 00:00 to Sunday 24:00 JST, and replays each week on its own: a fresh
-strategy and simulated exchange, fed `preload_hours` before the Monday and
-reporting from the Monday on. A week's result is then a function of the env,
-the strategy, the parameters, the preload and the week -- nothing else -- so
+strategy and simulated exchange, fed `preload_days` before the Monday and
+`overlap_days` after the Sunday. A trade belongs to the week it was *opened*
+in. For 2026-W41, 10-05 to 10-11, the replay is 10-04 to 10-12:
+
+    10-04          10-05 ... 10-11          10-12
+    preload        the week                 overlap
+    warms up the   every trade opened       closes what the week opened;
+    indicators     here is the week's       its own opens are the next week's
+
+A trade opened in the preload is the previous week's, and one opened in the
+overlap the next week's: the overlap day is the next week's own Monday, and
+each trade is counted by exactly one week. An open order made in the overlap
+is taken and never filled (`backtest.OverlapGateway`): filled, it could add to
+a position the week opened, and make it look opened in the overlap. The orders counted -- behind the
+slippage averages, and in InfluxDB -- are those trades' legs, wherever they
+filled, so they too add up across weeks. The replay ends as soon as the
+overlap has closed the week's last position (`ResultReporter.settled`): what
+a week reports is what happened to the trades it opened, and nothing else.
+
+A week's result is then a function of the env, the strategy, the parameters,
+the preload, the overlap and the week -- nothing else -- so
 
 - a week computed for one window is the week any later window needs, and is
   skipped rather than replayed: a year extended by a month replays four weeks;
 - a window's result is its weeks' trades, concatenated, and `summarize`d.
 
 The week is the ISO week because `ledger`'s `by_week.json` already is, and
-JST because bronze's day partitions are: a week is exactly seven files.
+JST because bronze's day partitions are: a week is exactly seven files, and
+its replay nine with the defaults. `by_week.json` groups by close, like every
+`by_*.json`, so a trade opened on a Sunday and closed on the Monday is in the
+next week's row there and in its own week's folder.
 
 ## What it does not promise
 
-Equality with one continuous replay of the same window. Each week starts cold,
-so a position opened before the preload and still open on the Monday is in
-neither week, and a strategy whose state needs more history than the preload
-diverges from the continuous run. `open_at_end` in a week's summary counts the
-positions still open when its replay ended: the ones that its own figures do
-not contain, and the next week has only if its preload re-creates them.
+Equality with one continuous replay of the same window. Each week starts
+cold, so a position opened before the preload and still open on the Monday is
+in neither week, and a strategy whose state needs more history than the
+preload diverges from the continuous run. A trade the week opened and the
+overlap did not see closed is in no week either. `open_at_end` in a week's
+summary counts those: the week's own positions still open when its replay
+ended. A strategy that holds for longer than the overlap needs a longer one.
 
 ## The run folder is cumulative
 
@@ -38,8 +60,10 @@ no dates in its id -- and every weekly run of them adds to it:
 
 The weekly run is the main one, and is asked for ranges the data does not yet
 reach -- to today, say. Each week is clipped to the complete days on disk,
-the first to the last day every stream the strategy reads has, so the first
-and last weeks may be partial; a week with none of those days is not run. A
+the first to the last day every stream the strategy reads has, less the
+overlap at the end: a day whose overlap is not on disk yet cannot have its
+closes, and its opens wait for it. So the first and last weeks may be
+partial, and a week with none of those days is not run. A
 partial week is recorded with its own `start_str`/`end_str` and `partial`,
 and is run again by any later weekly run whose data reaches further into it:
 a week grows to full without `--force`. A day missing *between* the first and
@@ -66,7 +90,8 @@ from . import run_dir
 from .eval import SLIPPAGE_05, SLIPPAGE_10, evaluate_strategy
 from .ledger import JST, Trade, streaks
 
-DEFAULT_PRELOAD_HOURS = 24
+DEFAULT_PRELOAD_DAYS = 1
+DEFAULT_OVERLAP_DAYS = 1
 
 # A summary's suffix, and the extra slippage rate it was evaluated at; see `eval.Evaluation`.
 RATES = {"0": 0.0, "5": SLIPPAGE_05, "10": SLIPPAGE_10}
@@ -74,13 +99,28 @@ RATES = {"0": 0.0, "5": SLIPPAGE_05, "10": SLIPPAGE_10}
 
 @dataclass
 class WeeklySettings:
-    """`enoshima.json`'s `"weekly"`. `preload_hours` is part of a weekly run's id: it changes the result."""
+    """`enoshima.json`'s `"weekly"`. Both are part of a weekly run's id: they change the result.
 
-    preload_hours: int = DEFAULT_PRELOAD_HOURS
+    `preload_days` are replayed before the Monday to warm the strategy up;
+    `overlap_days` after the Sunday, to close the trades the week opened.
+    """
+
+    preload_days: int = DEFAULT_PRELOAD_DAYS
+    overlap_days: int = DEFAULT_OVERLAP_DAYS
 
     def __post_init__(self):
-        if not isinstance(self.preload_hours, int) or isinstance(self.preload_hours, bool) or self.preload_hours < 0:
-            raise ValueError(f"weekly.preload_hours must be a whole number of hours, not {self.preload_hours!r}")
+        for name in ("preload_days", "overlap_days"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"weekly.{name} must be a whole number of days, not {value!r}")
+
+    @property
+    def preload(self) -> dt.timedelta:
+        return dt.timedelta(days=self.preload_days)
+
+    @property
+    def overlap(self) -> dt.timedelta:
+        return dt.timedelta(days=self.overlap_days)
 
 
 @dataclass(frozen=True)
@@ -110,8 +150,8 @@ class Week:
                   - dt.timedelta(microseconds=1))
         return DtRange(start, end) if start <= end else None
 
-    def replay_range(self, preload_hours: int) -> DtRange:
-        return DtRange(self.start - dt.timedelta(hours=preload_hours), self.dt_range.end_dt)
+    def replay_range(self, settings: "WeeklySettings") -> DtRange:
+        return DtRange(self.start - settings.preload, self.dt_range.end_dt + settings.overlap)
 
     @classmethod
     def of(cls, ts: float) -> "Week":
@@ -234,6 +274,8 @@ def window(root, run_id: str, weeks: list[Week]) -> tuple[list[Trade], dict]:
     """A window's trades and summary, from its weeks' folders. Replays nothing.
 
     Every week must be there: a window short of one is not that window's result.
+    The trades are put in close order, as one replay reports them: a week's last
+    can close, in its overlap, after the next week's first.
     """
     absent = missing(root, run_id, weeks)
     if absent:
@@ -244,4 +286,5 @@ def window(root, run_id: str, weeks: list[Week]) -> tuple[list[Trade], dict]:
         path = run_dir.week_dir(root, run_id, w.key)
         trades.extend(run_dir.read_trades(path))
         add_order_stats(order_stats, run_dir.read_json(path, run_dir.SUMMARY))
+    trades.sort(key=lambda t: t.close_ts)
     return trades, summarize(trades, order_stats)

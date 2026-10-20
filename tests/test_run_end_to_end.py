@@ -289,7 +289,8 @@ def test_force_reruns_a_completed_parameter_set(run_env):
 
 
 def weekly_sweep(env, dt_range, **kwargs) -> Runner:
-    runner = Runner(env, dt_range, optimize="grid", chunk_days=1, weekly=WeeklySettings(), **kwargs)
+    # The data is one day, so there is no day after it to overlap; see `test_weekly` for the overlap.
+    runner = Runner(env, dt_range, optimize="grid", chunk_days=1, weekly=WeeklySettings(overlap_days=0), **kwargs)
     runner.run()
     return runner
 

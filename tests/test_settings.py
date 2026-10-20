@@ -88,10 +88,12 @@ def test_quieting_sets_levels_on_the_strategy_and_qate_trading_only():
             logging.getLogger(n).setLevel(level)
 
 
-def test_weekly_sets_the_preload_and_refuses_unknown_keys(tmp_path):
-    assert load_settings(tmp_path).weekly.preload_hours == 24
-    write(tmp_path, {"weekly": {"preload_hours": 48}})
-    assert load_settings(tmp_path).weekly.preload_hours == 48
-    write(tmp_path, {"weekly": {"preload": 48}})
+def test_weekly_sets_the_preload_and_overlap_and_refuses_unknown_keys(tmp_path):
+    weekly = load_settings(tmp_path).weekly
+    assert (weekly.preload_days, weekly.overlap_days) == (1, 1)
+    write(tmp_path, {"weekly": {"preload_days": 2, "overlap_days": 3}})
+    weekly = load_settings(tmp_path).weekly
+    assert (weekly.preload_days, weekly.overlap_days) == (2, 3)
+    write(tmp_path, {"weekly": {"preload_hours": 24}})   # what it was called before days
     with pytest.raises(ValueError, match="Unknown key"):
         load_settings(tmp_path)

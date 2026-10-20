@@ -21,7 +21,7 @@ It was a random UUID before, which meant the "a run log exists for this range"
 check could never once have fired — every fresh log had a new id and every
 combination was recomputed. `--force` is now the way to say recompute anyway.
 
-A weekly run's id (`weekly`) has no dates in it, and the preload instead: its
+A weekly run's id (`weekly`) has no dates in it, and the preload and overlap instead: its
 folder holds every week computed for that environment, strategy and parameter
 set, and a window is whichever of them it covers.
 
@@ -39,7 +39,7 @@ from qate.util.encoder import Encoder
 from qate_env.env import Env
 from qate_env.run_log import RunLog
 
-from .weekly import Week
+from .weekly import Week, WeeklySettings
 
 
 class BacktestLog(RunLog):
@@ -52,7 +52,7 @@ class BacktestLog(RunLog):
         batch_id: int = None,
         config=None,
         profile=None,
-        preload_hours: int | None = None,
+        weekly: WeeklySettings | None = None,
         week_key: str | None = None,
         strategy_rev: str | None = None,
     ):
@@ -68,8 +68,8 @@ class BacktestLog(RunLog):
         self.influx_bucket = None
         self.result = None
         self.end_ts = None
-        # Set for one week of a weekly run: the preload is in the id, the week is not.
-        self.preload_hours = preload_hours
+        # Set for one week of a weekly run: the preload and overlap are in the id, the week is not.
+        self.weekly = weekly
         self.week_key = week_key
 
     def get_id(self) -> str:
@@ -89,7 +89,7 @@ class BacktestLog(RunLog):
         if self.week_key is None:
             identity.update({"start": self.dt_range.start_str, "end": self.dt_range.end_str})
         else:
-            identity["weekly"] = {"preload_hours": self.preload_hours}
+            identity["weekly"] = {"preload_days": self.weekly.preload_days, "overlap_days": self.weekly.overlap_days}
         raw = json.dumps(identity, sort_keys=True, cls=Encoder)
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
@@ -112,7 +112,8 @@ class BacktestLog(RunLog):
             data.update({
                 "mode": "weekly",
                 "week": self.week_key,
-                "preload_hours": self.preload_hours,
+                "preload_days": self.weekly.preload_days,
+                "overlap_days": self.weekly.overlap_days,
                 "partial": (self.dt_range.start_str, self.dt_range.end_str) != (whole.start_str, whole.end_str),
             })
         # Only a weekly run is a candidate for `select` and `walk-forward`; any other is a quick look.

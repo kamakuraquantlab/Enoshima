@@ -141,17 +141,21 @@ but it is easy to break from here:
   `Measurement`, `Tag` and `Field` are append-only in `qate`: reordering a member
   silently rewrites the meaning of every metric already recorded.
 - **A run log's id is a deterministic hash**, not a UUID, of the env, the
-  strategy and its revision, the parameters and the range (or, weekly, the preload). That is what makes a
+  strategy and its revision, the parameters and the range (or, weekly, the preload and overlap). That is what makes a
   sweep resumable, and what `--force` overrides. It was a UUID once, which meant
   the skip check could never fire and every combination was always recomputed.
 - **A weekly run (`--weekly`, `weekly`) is the cumulative backtest.** The range
   is widened to the ISO weeks covering it, Monday to Sunday JST, and each week
-  is its own replay: `enoshima.json`'s `weekly.preload_hours` before the
-  Monday, reported from the Monday, and clipped to the complete days on disk:
+  is its own replay: `enoshima.json`'s `weekly.preload_days` before the
+  Monday and `weekly.overlap_days` after the Sunday. A trade is the week's
+  if it *opened* in the week, wherever it closed: the overlap is there to see
+  it closed, and a trade opened in the overlap or the preload is a
+  neighbour's. Each week is clipped to the complete days on disk, the last
+  less the overlap:
   it runs as far as the data goes, and a partial week is run again by the
   next weekly run whose data reaches further into it -- `_weeks_to_run`
   decides this, not the skip check a temporary run uses. Its run id has no dates and has the
-  preload, so every weekly run of a parameter set adds to one folder: weeks
+  preload and overlap, so every weekly run of a parameter set adds to one folder: weeks
   go to `weeks/<YYYY-Www>/`, each written whole, and the root files are
   rebuilt from all of them (`weekly.rebuild`) -- never the current run's
   result -- over the first Monday to the last Sunday. That is what lets
@@ -161,11 +165,14 @@ but it is easy to break from here:
   and `tests/test_weekly.py` holds it: do not let state cross from one
   week's replay into the next, and do not compute a week's or a window's
   figures any way other than `summarize` -- which is also why a strict run
-  counts only in-range orders. Equality with a continuous replay is not
+  counts only its own trades' orders, never fills an open order made in the
+  overlap (`OverlapGateway`: an add-on would move the position's `open_ts`
+  into the next week), and stops replaying once the overlap has closed the
+  week's last position. Equality with a continuous replay is not
   promised; `open_at_end` shows where it can fail. Its InfluxDB bucket is one
   per run, and a week's points are deleted by their `week` tag before it is
-  rewritten -- by tag, not time, because a Monday close has its open-aligned
-  copy on the Sunday.
+  rewritten -- by tag, not time, because a Sunday open has its close-aligned
+  copy on the Monday.
 - **Every run id includes the strategy's revision** (`strategy_env.strategy_rev`):
   the commit of the checkout the strategy module is imported from, not
   Enoshima's or qate's, with `+dirty.<hash>` for uncommitted changes. A

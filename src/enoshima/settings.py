@@ -35,7 +35,8 @@
     "resamples": 10000
   },
   "weekly": {
-    "preload_hours": 24
+    "preload_days": 1,
+    "overlap_days": 1
   }
 }
 ```
@@ -62,10 +63,11 @@ Every key is optional, and a missing file means the defaults.
   or months), and for
   `--train` how often a rule is chosen again, on how much history, against
   which baseline. See `enoshima.post_analysis.walk_forward`.
-- `weekly` is how `enoshima run --weekly` replays a week: `preload_hours`
-  before its Monday, replayed and not reported. It is part of a weekly run's
-  id, so a different preload starts a different set of weeks. See
-  `enoshima.weekly`.
+- `weekly` is how `enoshima run --weekly` replays a week: `preload_days`
+  before its Monday, to warm the strategy up, and `overlap_days` after its
+  Sunday, to close the trades the week opened. A trade is the week's if it
+  opened in it. Both are part of a weekly run's id, so a different preload or
+  overlap starts a different set of weeks. See `enoshima.weekly`.
 
 This is the environment's file rather than a set of flags because it describes
 the environment: where its runs are charted and how big its data is. An unknown

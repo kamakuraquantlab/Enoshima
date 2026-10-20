@@ -29,6 +29,20 @@ It differs from `Runtime` where a replay differs from a live run:
   publishes it as `EXCEPTION`; the runtime stops its trader at the first one, and
   `Backtest.run` raises, so the run is reported failed and its log is not saved.
 
+A strict run -- a week of a weekly run -- opens nothing past its range and
+stops early. Its overlap is there only to see the week's trades closed, so
+
+- an open order made in the overlap is taken and never filled
+  (`OverlapGateway`), as a resting order the market never reaches. Filled, it
+  could add to a position of the week's, and qate's `open_ts` -- the latest
+  open's -- would make the whole position the next week's. Refused instead, it
+  would be an order error, and qate's `Strategy` stops trading at the second
+  open that fails to create, which would fail the run;
+- the replay ends at the first market event past the range at which none of
+  the week's positions is open or about to be (`ResultReporter.settled`).
+  The strategy does not see that event, and the channel is closed as on any
+  other exit.
+
 Reporters are terminal sinks. Evaluation results write directly through the
 optional InfluxDB writer owned by the run; they do not masquerade as strategy
 metrics and re-enter this dispatch.
@@ -38,7 +52,8 @@ from logging import getLogger
 
 from qate.core.ev_q import EventQueue
 from qate.core.ev_type import EventType
-from qate.core.model import ExchangeName
+from qate.core.model import EventLoopExit, ExchangeName, SettleType
+from qate.core.order import OrderRequest
 from qate.trading.gateways import BacktestGateway
 from qate.trading.reporter import Reporter
 from qate.trading.strategy import Strategy
@@ -55,6 +70,28 @@ class BacktestFailed(Exception):
     """A replay raised. Its numbers are not a result."""
 
 
+class OverlapGateway(BacktestGateway):
+    """A `BacktestGateway` that, past `opens_until`, takes open orders and never fills them.
+
+    The strategy is told the order was created, as for any resting order; a
+    later cancel of it finds nothing to cancel, which qate's gateway already
+    treats as an ordinary race rather than an error.
+    """
+
+    def __init__(self, exchange_name: ExchangeName, opens_until: float):
+        super().__init__(exchange_name)
+        self.opens_until = opens_until
+
+    def create(self, order_request: OrderRequest):
+        if order_request.settle_type != SettleType.OPEN or order_request.get_ts() <= self.opens_until:
+            super().create(order_request)
+            return
+        order_tracker = self.matching.create(order_request)
+        del self.matching.orders[order_request.ctx_id]
+        LOG.debug(f"Holding open order {order_request.ctx_id} made in the overlap: it will not fill")
+        self.publish_order_created(order_tracker.created_response())
+
+
 class BacktestRuntime(EventQueue):
     _DISPATCH = {
         EventType.TRADING_ORDER: "report_order",
@@ -63,7 +100,14 @@ class BacktestRuntime(EventQueue):
         EventType.EXCEPTION: "report_exception",
     }
 
-    def __init__(self, strategy: Strategy, exchanges: list[ExchangeName], channel: EventQueue):
+    def __init__(
+        self,
+        strategy: Strategy,
+        exchanges: list[ExchangeName],
+        channel: EventQueue,
+        opens_until: float | None = None,
+    ):
+        """`opens_until`, given, is when open orders stop filling: see `OverlapGateway`."""
         self.channel = channel
         # Nothing records these (see `influx.UNRECORDED_MEASUREMENTS`); a
         # strategy that asks `wants_metric` need not build them. A copy per
@@ -75,14 +119,42 @@ class BacktestRuntime(EventQueue):
         # would replace a sweep member partway through a deterministic replay.
         self.trader = Trader(strategy, channel, reload_params=False)
         self.reporters: list[Reporter] = []
+        self.gateways: list[BacktestGateway] = []
+        self._settled = None
 
         for exchange_name in exchanges:
-            gateway = BacktestGateway(exchange_name)
+            if opens_until is None:
+                gateway = BacktestGateway(exchange_name)
+            else:
+                gateway = OverlapGateway(exchange_name, opens_until)
             gateway.add_order_listener(self)
             self.trader.add_gateway(gateway)
             self.trader.register(EventType.MARKET_ORDER_BOOK, gateway.handle_order_book)
+            self.gateways.append(gateway)
+
+        # After the gateways, which may fill a last close on this book, and
+        # before the strategy, which registers its handlers once warmed up.
+        for event_type in (EventType.MARKET_ORDER_BOOK, EventType.MARKET_TRADE):
+            self.trader.register(event_type, self._stop_when_settled)
 
         self.trader.add_status_listener(self)
+
+    def stop_when(self, settled) -> None:
+        """End the replay at the first market event for which `settled(ts, self.pending_opens)` is true."""
+        self._settled = settled
+
+    def pending_opens(self) -> list:
+        """The open orders made and not yet filled, on every gateway."""
+        return [
+            tracker.order_request
+            for gateway in self.gateways
+            for tracker in gateway.matching.orders.values()
+            if tracker.order_request.settle_type == SettleType.OPEN
+        ]
+
+    def _stop_when_settled(self, event) -> None:
+        if self._settled is not None and self._settled(event.get_ts(), self.pending_opens):
+            raise EventLoopExit()
 
     def add_reporter(self, reporter: Reporter) -> None:
         self.reporters.append(reporter)
@@ -133,8 +205,11 @@ class Backtest:
     ):
         self.result = result
         self.run_log = run_log
-        self.runtime = BacktestRuntime(strategy, exchanges, channel)
+        opens_until = result.dt_range.end_ts if result.strict else None
+        self.runtime = BacktestRuntime(strategy, exchanges, channel, opens_until)
         self.runtime.add_reporter(result)
+        if result.strict:
+            self.runtime.stop_when(result.settled)
         for reporter in reporters:
             self.runtime.add_reporter(reporter)
 

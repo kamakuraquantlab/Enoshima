@@ -1,7 +1,7 @@
 """Strict weekly runs: weeks computed once, and any window of them the same as one run of it.
 
-The data is a sine wave of books, one a minute, over three ISO weeks and the
-day before them, so the example strategy trades through every week and across
+The data is a sine wave of books, one a minute, over three ISO weeks, the
+day before them and the day after, so the example strategy trades through every week and across
 every Monday. See `test_run_end_to_end` for the shape of a run.
 """
 
@@ -35,7 +35,7 @@ AMPLITUDE = 100_000.0
 BASE_PRICE = 15_000_000.0
 
 FIRST_DAY = dt.date(2026, 1, 4)  # the Sunday before 2026-W02: the preload
-LAST_DAY = dt.date(2026, 1, 25)  # the Sunday ending 2026-W04
+LAST_DAY = dt.date(2026, 1, 26)  # the Monday after 2026-W04: the overlap
 W02, W03, W04 = Week.parse("2026-W02"), Week.parse("2026-W03"), Week.parse("2026-W04")
 
 
@@ -102,8 +102,12 @@ def test_a_week_is_monday_to_sunday_in_jst():
     assert week.key == "2026-W41"
     assert week.dt_range.start_str == "2026-10-05 00:00:00"
     assert week.dt_range.end_str == "2026-10-11 23:59:59"
-    assert week.replay_range(24).start_str == "2026-10-04 00:00:00"
-    assert week.replay_range(24).days == [f"2026-10-{d:02d}" for d in range(4, 12)]
+    # The preload day 10-04, the week, and the overlap day 10-12.
+    assert week.replay_range(WeeklySettings()).start_str == "2026-10-04 00:00:00"
+    assert week.replay_range(WeeklySettings()).days == [f"2026-10-{d:02d}" for d in range(4, 13)]
+    assert week.replay_range(WeeklySettings(preload_days=2, overlap_days=0)).days == [
+        f"2026-10-{d:02d}" for d in range(3, 12)
+    ]
 
 
 def test_the_covering_weeks_are_the_fewest_that_contain_the_range():
@@ -117,10 +121,11 @@ def test_the_covering_weeks_are_the_fewest_that_contain_the_range():
     ]
 
 
-def test_preload_hours_is_checked():
-    for bad in (-1, 1.5, True, "24"):
-        with pytest.raises(ValueError):
-            WeeklySettings(preload_hours=bad)
+def test_the_preload_and_overlap_are_checked():
+    for name in ("preload_days", "overlap_days"):
+        for bad in (-1, 1.5, True, "1"):
+            with pytest.raises(ValueError, match=name):
+                WeeklySettings(**{name: bad})
 
 
 # ---------------------------------------------------------------- the runs
@@ -135,7 +140,7 @@ def test_a_range_is_widened_to_its_weeks(make_env):
     folder = the_run(env)
     assert sorted(p.name for p in (folder / run_dir.WEEKS_DIR).iterdir()) == ["2026-W02"]
     meta = run_dir.read_json(folder, run_dir.META)
-    assert (meta["mode"], meta["preload_hours"], meta["weeks"]) == ("weekly", 24, 1)
+    assert (meta["mode"], meta["preload_days"], meta["overlap_days"], meta["weeks"]) == ("weekly", 1, 1, 1)
     assert "batch_id" not in meta and "week" not in meta, "the root holds what every week shares"
     week_meta = run_dir.read_json(run_dir.week_dir(env.work_dir, folder.name, "2026-W02"), run_dir.META)
     assert (week_meta["week"], week_meta["start_str"]) == ("2026-W02", "2026-01-05 00:00:00")
@@ -210,15 +215,16 @@ def test_a_weekly_sweep_is_selected_from_like_any_run(make_env):
     assert (group["start_str"], group["end_str"]) == ("2026-01-05 00:00:00", "2026-01-18 23:59:59")
 
 
-def test_the_run_id_has_no_dates_but_has_the_preload(make_env):
+def test_the_run_id_has_no_dates_but_has_the_preload_and_overlap(make_env):
     env = make_env("env")
     run(env, weeks_range(W02, W02))
     first = the_run(env).name
     run(env, weeks_range(W03, W03))
     assert the_run(env).name == first, "a later week goes in the same folder"
 
-    Runner(env, weeks_range(W02, W02), chunk_days=2, weekly=WeeklySettings(preload_hours=12)).run()
-    assert len(list((Path(env.work_dir) / run_dir.RUN_LOG_DIR).iterdir())) == 2
+    Runner(env, weeks_range(W02, W02), chunk_days=2, weekly=WeeklySettings(preload_days=0)).run()
+    Runner(env, weeks_range(W02, W02), chunk_days=2, weekly=WeeklySettings(overlap_days=0)).run()
+    assert len(list((Path(env.work_dir) / run_dir.RUN_LOG_DIR).iterdir())) == 3
 
 
 def test_a_new_strategy_revision_is_a_new_folder(make_env, monkeypatch):
@@ -238,28 +244,42 @@ def test_a_new_strategy_revision_is_a_new_folder(make_env, monkeypatch):
     assert revs == {"aaaaaaaaaaaa": ["2026-W02"], "bbbbbbbbbbbb": ["2026-W03"]}
 
 
+# What differs between two runs that computed the same numbers: when, and in which batch.
+RUN_FIELDS = {"batch_id", "start_ts", "end_ts", "execution_time"}
+
+
 def test_an_extended_window_replays_only_its_new_week_and_equals_one_run(make_env):
-    """The requirement: weeks 2-3, then 2-4, gives byte for byte what 2-4 at once gives."""
+    """The requirement: weeks 2-3, then week 4 alone, gives byte for byte what 2-4 at once gives.
+
+    Every file of the folder, the root's included -- what `select` and
+    `walk-forward` read -- but for when each week ran and in which batch.
+    """
     stepwise = make_env("stepwise")
     first = run(stepwise, weeks_range(W02, W03))
-    second = run(stepwise, weeks_range(W02, W04))
+    second = run(stepwise, weeks_range(W04, W04))
 
     at_once = make_env("at_once")
     run(at_once, weeks_range(W02, W04))
 
     a, b = the_run(stepwise), the_run(at_once)
     assert a.name == b.name
+    files = sorted(str(f.relative_to(a)) for f in a.rglob("*") if f.is_file())
+    assert files == sorted(str(f.relative_to(b)) for f in b.rglob("*") if f.is_file())
+    assert {"trades.csv", "summary.json", "by_week.json", "weeks/2026-W04/trades.csv"} <= set(files)
+    for name in files:
+        if Path(name).name == run_dir.META:
+            meta_a, meta_b = (run_dir.read_json((x / name).parent, run_dir.META) for x in (a, b))
+            assert {k: v for k, v in meta_a.items() if k not in RUN_FIELDS} == \
+                   {k: v for k, v in meta_b.items() if k not in RUN_FIELDS}, name
+        else:
+            assert (a / name).read_bytes() == (b / name).read_bytes(), name
+
+    # The second run computed W04 only; the first two weeks are the first run's.
     for week in (W02, W03, W04):
-        wa = run_dir.week_dir(stepwise.work_dir, a.name, week.key)
-        wb = run_dir.week_dir(at_once.work_dir, b.name, week.key)
-        for name in (run_dir.TRADES, run_dir.SUMMARY):
-            assert (wa / name).read_bytes() == (wb / name).read_bytes(), f"{week.key} {name}"
-        # The second run computed W04 only; the first two weeks are the first run's.
-        batch = run_dir.read_json(wa, run_dir.META)["batch_id"]
+        batch = run_dir.read_json(run_dir.week_dir(stepwise.work_dir, a.name, week.key), run_dir.META)["batch_id"]
         assert batch == (second.batch_id if week == W04 else first.batch_id)
 
     trades, summary = weekly.window(stepwise.work_dir, a.name, [W02, W03, W04])
-    assert summary == weekly.window(at_once.work_dir, b.name, [W02, W03, W04])[1]
     assert summary["pnl_cnt0"] >= 9, "the strategy must trade in every week for this to test anything"
     weeks = [run_dir.read_json(run_dir.week_dir(stepwise.work_dir, a.name, w.key), run_dir.SUMMARY)
              for w in (W02, W03, W04)]
@@ -269,27 +289,44 @@ def test_an_extended_window_replays_only_its_new_week_and_equals_one_run(make_en
     assert all("open_at_end" in w for w in weeks)
 
 
+def test_a_trade_is_the_week_it_opened_in(make_env):
+    """Wherever it closed: one opened on a Sunday and closed on the Monday is the Sunday's week's."""
+    env = make_env("env")
+    run(env, weeks_range(W02, W04))
+    folder = the_run(env)
+    for week in (W02, W03, W04):
+        trades = run_dir.read_trades(run_dir.week_dir(env.work_dir, folder.name, week.key))
+        assert all(week.dt_range.start_ts <= t.open_ts <= week.dt_range.end_ts for t in trades), week.key
+    w02 = run_dir.read_trades(run_dir.week_dir(env.work_dir, folder.name, W02.key))
+    assert any(t.close_ts >= W03.start.timestamp() for t in w02), "no trade closes in W02's overlap"
+    w04 = run_dir.read_json(run_dir.week_dir(env.work_dir, folder.name, W04.key), run_dir.SUMMARY)
+    assert w04["open_at_end"] == 0, "the overlap closes everything the week opened"
+
+
 def test_a_window_equals_one_continuous_replay_when_the_preload_holds_the_state(make_env):
     """Not guaranteed in general -- see `weekly` -- but true of a strategy whose state fits in the preload.
 
-    The example's slowest average is 120 books, two hours here, and the 24-hour
-    preload re-creates a position open across a Monday. If this breaks, a week
-    started cold has stopped matching the same week inside a longer run.
+    The example's slowest average is 120 books, two hours here, so the 1-day
+    preload re-creates a position open across a Monday, and the 1-day overlap
+    sees every position closed. If this breaks, a week started cold has
+    stopped matching the same week inside a longer run.
     """
     env = make_env("weekly")
     run(env, weeks_range(W02, W04))
     stitched, summary = weekly.window(env.work_dir, the_run(env).name, [W02, W03, W04])
 
+    # One replay over the same days, its trades taken as the weeks take theirs: by open.
     continuous_env = make_env("continuous")
-    Runner(continuous_env, weeks_range(W02, W04), chunk_days=2).run()
+    Runner(continuous_env, DtRange(W02.start, W04.dt_range.end_dt + dt.timedelta(days=1)), chunk_days=2).run()
     [path] = run_dir.iter_complete(Path(continuous_env.work_dir))
-    continuous = run_dir.read_trades(path)
+    span = weeks_range(W02, W04)
+    continuous = [t for t in run_dir.read_trades(path) if span.start_ts <= t.open_ts <= span.end_ts]
 
     assert any(t.open_ts < W03.start.timestamp() <= t.close_ts for t in stitched), "no trade crosses a Monday"
     assert [(t.close_ts, t.open_ts) for t in stitched] == [(t.close_ts, t.open_ts) for t in continuous]
     for a, b in zip(stitched, continuous):
         assert a.pnl_change5 == pytest.approx(b.pnl_change5)
-    assert summary["pnl5"] == pytest.approx(run_dir.read_json(path, run_dir.SUMMARY)["pnl5"])
+    assert summary["pnl5"] == pytest.approx(sum(t.pnl_change5 for t in continuous))
 
 
 def test_a_window_of_one_week_is_that_weeks_summary(make_env):
@@ -394,6 +431,89 @@ def test_a_weekly_run_has_one_bucket_and_clears_a_week_before_writing_it(make_en
     assert forced.deletes == [(bucket, {"week": "2026-W03"})]
 
 
+def test_a_week_writes_nothing_of_its_preload_or_overlap_but_its_own_closes(make_env):
+    """The overlap day is the next week's: written by both, it would be in the bucket twice."""
+    env = make_env("env")
+    store = DeletingStore()
+    run(env, weeks_range(W02, W02), influx=store)
+    [writer] = store.writers
+    week = W02.dt_range
+    outside = [p for p in writer.points if not week.start_ts * 1000 <= p._time <= week.end_ts * 1000]
+    assert outside, "no trade closes in the overlap, so this tests nothing"
+    for point in outside:
+        assert point._time > week.end_ts * 1000
+        assert point._name in ("EVAL", "ORDER") or (point._name == "PNL" and point._tags["time_align"] == "close")
+
+
+def test_a_week_stops_as_soon_as_its_last_position_is_closed(make_env, monkeypatch):
+    """The overlap is only there to see the week's trades closed; nothing after the last of them is replayed."""
+    from enoshima.result import ResultReporter
+
+    stopped = []
+    original = ResultReporter.settled
+
+    def settled(self, ts, pending_opens):
+        done = original(self, ts, pending_opens)
+        if done:
+            stopped.append(ts)
+        return done
+
+    monkeypatch.setattr(ResultReporter, "settled", settled)
+    env = make_env("env")
+    run(env, weeks_range(W02, W02))
+    trades = run_dir.read_trades(run_dir.week_dir(env.work_dir, the_run(env).name, W02.key))
+
+    [ts] = stopped
+    assert max(t.close_ts for t in trades) <= ts < W03.start.timestamp() + 86400
+    assert ts > W02.dt_range.end_ts
+
+
+def test_no_open_fills_in_the_overlap():
+    """An add-on filled there would move a week's position's `open_ts` into the next week.
+
+    The example strategy holds one position at a time and the replay stops once
+    it is flat, so it never opens in the overlap: the gateway is tested alone.
+    """
+    from qate.core.model import ExchangeName, Market, OrderBook, OrderLevel, SettleType, Side
+    from qate.core.order import OrderRequest, OrderType
+    from qate.core.symbol import Symbol
+
+    from enoshima.backtest import OverlapGateway
+
+    market = Market(ExchangeName.GMO, Symbol.BTC_JPY)
+    end = W02.dt_range.end_ts
+    seen = []
+    gateway = OverlapGateway(ExchangeName.GMO, opens_until=end)
+    gateway.add_order_listener(type("L", (), {"put": lambda self, event: seen.append(event)})())
+
+    def order(ctx_id, ts, settle_type):
+        request = OrderRequest(ts=ts, market=market, side=Side.BUY, price=BASE_PRICE, size=0.01,
+                               settle_type=settle_type, order_type=OrderType.DEFAULT)
+        request.ctx_id = ctx_id
+        return request
+
+    gateway.create(order(1, end - 1, SettleType.OPEN))      # the week's: fills
+    gateway.create(order(2, end + 60, SettleType.OPEN))     # the overlap's: taken, never filled
+    gateway.create(order(3, end + 60, SettleType.CLOSE))    # a close: fills
+    gateway.handle_order_book(OrderBook([OrderLevel(BASE_PRICE - 500, 1.0)], [OrderLevel(BASE_PRICE + 500, 1.0)],
+                                        market.symbol, market.exchange_name, end + 120))
+    created = [e[1].order_request.ctx_id for e in seen if e[0] == "ORDER_CREATED"]
+    filled = [e[1].order_request.ctx_id for e in seen if e[0] == "ORDER_FILLED"]
+    assert (created, filled) == ([1, 2, 3], [1, 3])
+    gateway.cancel(order(2, end + 180, SettleType.OPEN))    # nothing to cancel, and no error
+    assert not any(e[0] in ("ORDER_CANCELLED", "ORDER_ERROR") for e in seen)
+
+
+def test_a_weeks_orders_are_its_trades_legs(make_env):
+    """No order of the preload's trades, nor of the overlap's: one to open and one to close each trade."""
+    env = make_env("env")
+    run(env, weeks_range(W02, W04))
+    folder = the_run(env)
+    for week in (W02, W03, W04):
+        summary = run_dir.read_json(run_dir.week_dir(env.work_dir, folder.name, week.key), run_dir.SUMMARY)
+        assert summary["order_cnt0"] == 2 * summary["pnl_cnt0"], week.key
+
+
 def test_the_writer_tags_every_point():
     from influxdb_client import Point
 
@@ -433,13 +553,15 @@ def test_a_last_week_is_run_as_far_as_the_data_goes_and_grows_when_it_arrives(ma
     first = run(env, weeks_range(W02, W04))
     folder = the_run(env)
 
+    # Wednesday is Tuesday's overlap: W04 has the trades opened Monday and Tuesday.
     w04 = run_dir.read_json(run_dir.week_dir(env.work_dir, folder.name, W04.key), run_dir.META)
-    assert (w04["start_str"], w04["end_str"], w04["partial"]) == ("2026-01-19 00:00:00", "2026-01-21 23:59:59", True)
+    assert (w04["start_str"], w04["end_str"], w04["partial"]) == ("2026-01-19 00:00:00", "2026-01-20 23:59:59", True)
     meta = run_dir.read_json(folder, run_dir.META)
-    assert (meta["start_str"], meta["end_str"]) == ("2026-01-05 00:00:00", "2026-01-21 23:59:59")
+    assert (meta["start_str"], meta["end_str"]) == ("2026-01-05 00:00:00", "2026-01-20 23:59:59")
+    assert all(t.open_ts <= w04_end("2026-01-20") for t in run_dir.read_trades(folder))
     assert all(t.close_ts <= w04_end("2026-01-21") for t in run_dir.read_trades(folder))
 
-    write_days(data_root)   # the rest of the week arrives
+    write_days(data_root)   # the rest of the week, and its overlap, arrive
     second = run(env, weeks_range(W04, W04))   # no --force
     w04 = run_dir.read_json(run_dir.week_dir(env.work_dir, folder.name, W04.key), run_dir.META)
     assert (w04["end_str"], w04["partial"], w04["batch_id"]) == ("2026-01-25 23:59:59", False, second.batch_id)
