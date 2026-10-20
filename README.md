@@ -90,11 +90,15 @@ tail -f example/env/EXAMPLE_BACKTEST/env.log
 It loses money, and it is supposed to: a crossover that crosses 1,292 times in a
 day pays the spread 1,292 times. That is the first thing a backtest is for.
 
-Then sweep the grid in `strategy_param_grid.json`:
+A run without `--weekly` like this one is a quick look: kept, listed by
+`results`, and never a candidate for `select`. The main use is weekly
+([below](#extending-a-backtest-week-by-week)): sweep the grid in
+`strategy_param_grid.json` over whole weeks, then choose when you ask to:
 
 ```bash
-enoshima run --env EXAMPLE_BACKTEST --from 2026-09-01 --to 2026-09-01 --optimize grid
+enoshima run --env EXAMPLE_BACKTEST --from 2026-09-01 --to 2026-09-30 --optimize grid --weekly
 enoshima results --env EXAMPLE_BACKTEST
+enoshima select --env EXAMPLE_BACKTEST
 ```
 
 `results` writes its table to `env.log` too:
@@ -143,6 +147,67 @@ Point an environment at your strategy and define its parameters with
 }
 ```
 
+## Extending a backtest week by week
+
+This is how Enoshima is mainly used. A backtest of a year, re-run a month
+later over thirteen months, should not replay the year again. `--weekly`
+makes that possible:
+
+```bash
+enoshima run --env EXAMPLE_BACKTEST --from 2026-01-01 --to 2026-12-31 --weekly
+enoshima run --env EXAMPLE_BACKTEST --from 2026-01-01 --to 2027-01-31 --weekly   # replays only January's weeks
+```
+
+The range is widened to the ISO weeks that cover it, Monday 00:00 to Sunday
+24:00 JST, and each week is replayed on its own: a fresh strategy and simulated
+exchange, fed `weekly.preload_hours` (24 by default) of data before the Monday,
+reporting from the Monday on. Asked for 2026-10-08, it replays 10-04 to 10-11
+and reports 10-05 to 10-11. A week's result depends only on the environment,
+the parameters, the preload and the week, so a week already on disk is skipped,
+and a window's result is its weeks' trades put together -- identical, to the
+byte, whichever run computed each week.
+
+It runs as far as there is data. Each week is clipped to the complete days on
+disk -- the first to the last day that every stream the strategy reads has --
+so a range asked for up to today runs the current week to yesterday, and a
+week with no such day is not run. A partial week records its own
+`start_str`/`end_str` and `"partial": true`, and the next weekly run whose data
+reaches further into it runs it again, so the last week grows to full without
+`--force`. A day missing between the first and the last is not clipped: it
+replays as empty, with a warning. `--force` reruns the weeks asked for.
+
+What it trades away is equality with one continuous replay. Each week starts
+cold: a position opened before the preload and still open on the Monday is in
+neither week, and a strategy whose state needs more history than the preload
+behaves differently on Mondays. Make the preload longer than the strategy's
+memory. Each week's `summary.json` has `open_at_end`, the positions its replay
+ended holding.
+
+The run is cumulative. Its folder is `run_log/<id>/`, with an id that has no
+dates in it -- the environment, the strategy and its revision, the parameters
+and the preload -- and every weekly run of them adds its weeks to
+`weeks/<YYYY-Www>/` (`meta.json`, `summary.json`, `trades.csv` per week). The
+root `meta.json`, `summary.json`, `trades.csv` and `by_*.json` are never the
+current run's: they are rebuilt from every week on disk, from the first
+week's start to the last week's end -- a partial week's own -- so `select`, `walk-forward` and
+`results` read a weekly run like any other. To keep that range true, a run
+also replays the weeks between those on disk and those asked for: weeks 1-10
+on disk and week 30 asked for replays 11-30. A root whose weeks have a gap --
+a week that failed -- has no `summary.json` until a run fills it.
+
+## The strategy's revision is part of every run's id
+
+A run's numbers come from the strategy's code as much as from its parameters,
+so the id of every run, weekly or not, includes the commit of the git checkout
+the strategy module is imported from -- the strategy's repository, not
+Enoshima's. A commit gives a new folder: a weekly run never puts weeks of two
+versions together, and `select` and `walk-forward` rank runs of one revision
+at a time (`module.variant@rev`). Uncommitted changes are a revision of their
+own, `<sha>+dirty.<hash>`, from the diff and the untracked `.py` files;
+reverting them returns to the clean revision's folder. A strategy installed
+rather than checked out is its package's version. `meta.json` records it as
+`strategy_rev`.
+
 ## An environment
 
 One directory per named run configuration, under `~/env` (or `QATE_ENV_ROOT`):
@@ -168,13 +233,14 @@ A run writes back into the same directory:
 ```text
 EXAMPLE_BACKTEST/
 ├── env.log                            everything a command logged
-├── run_log/<id>/                      one per parameter set and range
+├── run_log/<id>/                      one per strategy revision, parameter set and range (or,
+│                                      --weekly, preload: the root rebuilt from weeks/<YYYY-Www>/)
 │   ├── meta.json                      what was run: env, config, params, range, bucket
 │   ├── summary.json                   the whole-range result at each slippage rate
 │   ├── trades.csv                     every closed position, with its PnL change at each rate
 │   └── by_<grouping>.json             the trades grouped: month, week, day, weekday,
 │                                      monthday, hour, weekday_hour, holding, side
-├── best_result/<batch_id>/            a sweep's (or `select`'s) recommendations
+├── best_result/<batch_id>/            `select`'s recommendations
 │   ├── selection.json                 per range and group: ranking, folds, out-of-sample totals
 │   └── <id>.json                      each recommended run's meta.json
 └── post_analysis/
@@ -235,9 +301,16 @@ optional, and a missing file means the defaults:
     "baseline": "default",
     "block_days": 5,
     "resamples": 10000
+  },
+  "weekly": {
+    "preload_hours": 24
   }
 }
 ```
+
+`weekly` is how a `--weekly` run replays a week; see [Extending a backtest week
+by week](#extending-a-backtest-week-by-week). The preload is part of the run's
+id: a different one starts a different set of weeks.
 
 `walk_forward` is what `enoshima walk-forward` tries; see [Testing the rule
 itself](#testing-the-rule-itself).
@@ -273,7 +346,10 @@ strategy and variant are fixed, so its name stands for them, and the same values
 always give the same id. The batch id makes every execution's bucket its own: a
 `--force` re-run does not write on top of the run it repeats.
 Enoshima never expires or deletes a bucket; cleaning up is left to whatever
-manages your InfluxDB. Connection details are
+manages your InfluxDB. A `--weekly` run is the exception to one bucket per
+execution: it has one, `backtest_<param_set_id>_w<run_id>`, every point tagged
+`week=<YYYY-Www>`, and a week's points are deleted by that tag before the week
+is written again, so the bucket holds the weeks on disk, each once. Connection details are
 the entry's own: `"token"`, `"write_url"` and `"read_url"` default to a local
 server at `http://localhost:8086` with no token, and `"org"` defaults to the only
 organisation the token sees. The token sits in `enoshima.json` rather than among
@@ -295,11 +371,20 @@ survives at zero slippage and vanishes at 0.005% has told you something importan
 about itself, and reporting only the optimistic figure hides it. `--optimize`
 weighs `pnl5` and `pnl10`, never `pnl0`, for the same reason.
 
-## How `--optimize` chooses
+The extra slippage is charged when a position closes, on both legs -- the open
+leg on its cost -- as qate defers the open's fee to the close. A trade then
+carries its whole cost even when its open was replayed before the range.
+
+## How `enoshima select` chooses
+
+A run writes results and summaries; it does not choose. `enoshima select`
+recommends from the weekly run folders on disk when asked -- after a sweep,
+after extending it, after changing the rule -- replaying nothing, and
+`enoshima walk-forward` tests the rule itself, also only when asked.
 
 The best whole-range PnL is the set that fit that range best, which is not the
-set most likely to keep working. A sweep therefore chooses in four steps, all
-from the run folders it has already written:
+set most likely to keep working. `select` therefore chooses in four steps, all
+from the run folders already written:
 
 1. **Filters.** A set that loses money at `pnl10` ranks below every set that
    does not; `min_trades` and `max_drawdown` (on pnl5) can be added.
@@ -315,7 +400,7 @@ from the run folders it has already written:
    parameter -- before it is ranked, so a lone spike loses to a plateau.
    Categorical parameters have no neighbours.
 4. **Walk-forward.** Each run folder has its PnL by JST month (`by_month.json`),
-   and its trades. The sweep chooses on the months before a test month, scores
+   and its trades. `select` chooses on the months before a test month, scores
    that choice on the following `test_months`, steps forward and repeats. The
    sum of those test months is what choosing this way would have earned, out
    of sample -- the figure to trust. With `"window": "expanding"` a choice is
@@ -325,18 +410,16 @@ from the run folders it has already written:
    on the most recent ones.
 
 This is done once per **group**, not once per sweep. Every finished run folder
-in the environment is read -- not only this batch's -- and grouped by strategy
-and range, then by `group_by`: the categorical parameters by default
+in the environment is read and grouped by strategy, its revision and range, then by `group_by`: the categorical parameters by default
 (a schedule, a mode), since each is a different way of trading rather
 than a point on a scale. Each group is ranked on its own, with neighbours from its
 own runs, and gets its own recommendation; `"group_by": []` makes a range one
-group. Temporary runs are not candidates.
+group. Temporary runs -- any run without `--weekly` -- are not candidates.
 
 `best_result/<batch_id>/selection.json` holds every group's ranking, folds and
 out-of-sample totals, and each recommended run's `meta.json` is copied beside it
 as `<id>.json`. A group where no set passes the filters has no copy: nothing is
-recommended for it. `enoshima select --env NAME` does all of this again from the
-folders on disk, replaying nothing -- after changing the rule, for instance.
+recommended for it.
 
 ## Testing the rule itself
 
@@ -394,12 +477,15 @@ window, the one to trade now. Each group gets its own folder under
 settings by their p-values is the same in-sample fit one level up: decide them
 before looking.
 
+[doc/walk_forward.md](doc/walk_forward.md) collects the idea, the settings,
+the training's files and how to read them.
+
 ## Commands
 
 | Command | Does |
 |---|---|
-| `enoshima run` | Run a backtest, or a parameter sweep |
-| `enoshima select` | Recommend again from the recorded runs, per range and group |
+| `enoshima run` | Run a backtest, or a parameter sweep; `--weekly` for the cumulative weekly run |
+| `enoshima select` | Recommend from the recorded weekly runs, per range and group |
 | `enoshima walk-forward` | Test the selection rule's window, history and reselection interval; `--train` chooses among them monthly against no switching |
 | `enoshima results` | Recorded runs for an environment, best first |
 
@@ -458,6 +544,3 @@ results on disk, which is the test to read first and to keep passing.
 ## Licence
 
 Apache 2.0. See [LICENSE.md](LICENSE.md).
-[doc/walk_forward.md](doc/walk_forward.md) collects the idea, the settings,
-the training's files and how to read them.
-

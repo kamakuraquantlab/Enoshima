@@ -140,9 +140,41 @@ but it is easy to break from here:
 - **Metric objects pack enum *values*, not names.** `ExchangeName`, `Symbol`,
   `Measurement`, `Tag` and `Field` are append-only in `qate`: reordering a member
   silently rewrites the meaning of every metric already recorded.
-- **A run log's id is a deterministic hash**, not a UUID. That is what makes a
+- **A run log's id is a deterministic hash**, not a UUID, of the env, the
+  strategy and its revision, the parameters and the range (or, weekly, the preload). That is what makes a
   sweep resumable, and what `--force` overrides. It was a UUID once, which meant
   the skip check could never fire and every combination was always recomputed.
+- **A weekly run (`--weekly`, `weekly`) is the cumulative backtest.** The range
+  is widened to the ISO weeks covering it, Monday to Sunday JST, and each week
+  is its own replay: `enoshima.json`'s `weekly.preload_hours` before the
+  Monday, reported from the Monday, and clipped to the complete days on disk:
+  it runs as far as the data goes, and a partial week is run again by the
+  next weekly run whose data reaches further into it -- `_weeks_to_run`
+  decides this, not the skip check a temporary run uses. Its run id has no dates and has the
+  preload, so every weekly run of a parameter set adds to one folder: weeks
+  go to `weeks/<YYYY-Www>/`, each written whole, and the root files are
+  rebuilt from all of them (`weekly.rebuild`) -- never the current run's
+  result -- over the first Monday to the last Sunday. That is what lets
+  `select` and `walk-forward` read it unchanged, and why a run fills the gap
+  between the weeks on disk and the weeks asked for, and a root with a gap
+  has no `summary.json`. A week is byte-identical whichever run computed it,
+  and `tests/test_weekly.py` holds it: do not let state cross from one
+  week's replay into the next, and do not compute a week's or a window's
+  figures any way other than `summarize` -- which is also why a strict run
+  counts only in-range orders. Equality with a continuous replay is not
+  promised; `open_at_end` shows where it can fail. Its InfluxDB bucket is one
+  per run, and a week's points are deleted by their `week` tag before it is
+  rewritten -- by tag, not time, because a Monday close has its open-aligned
+  copy on the Sunday.
+- **Every run id includes the strategy's revision** (`strategy_env.strategy_rev`):
+  the commit of the checkout the strategy module is imported from, not
+  Enoshima's or qate's, with `+dirty.<hash>` for uncommitted changes. A
+  change to the strategy must be a new folder, or a weekly run would stitch
+  weeks of two versions together; `best.group` ranks one revision at a time.
+  `meta.json`'s `git_rev` is `qate_env`'s own and says nothing about the strategy.
+- **Extra slippage is charged at the close, on both legs** (`Evaluation`),
+  the open leg on `open_cost`, as qate defers the open's fee. Charged at the
+  open, a position opened in warmup lost that leg's cost.
 - **A parameter set's id is Enoshima's, built from `strategy_param_grid.json`** (`param_id`):
   the env name, then the values as plain decimals in grid order. There are no
   scaling factors: they made ids unreadable without the grid, and a missing one
@@ -155,6 +187,10 @@ but it is easy to break from here:
   leaving the old run's points beside the new. There is no `--temporary` any more;
   it was the opt-in for what is now always true. The batch id goes in the bucket,
   never in the run's id, which must stay deterministic for a sweep to resume.
+- **A run does not choose.** `enoshima run` writes results and summaries;
+  `select` and `walk-forward` run only when asked. Only weekly runs are
+  candidates: any other run is temporary (`is_temporary_run`), a quick look at
+  some days, with the range and revision in its id.
 - **A recommendation is per range and per group, from every run folder**, not
   per batch (`best.recommend`). Runs are grouped by strategy and range, then by
   `group_by` -- the categorical parameters by default -- and each group is
@@ -202,7 +238,7 @@ but it is easy to break from here:
   recorded `"config": null` for two commits. `tests/test_run_end_to_end.py` now
   holds the provenance fields, because a result you cannot attribute to a
   configuration is not a result.
-- **`--optimize` does not take the highest `pnl5`.** Ranking on `pnl0` selects
+- **`select` does not take the highest `pnl5`.** Ranking on `pnl0` selects
   for strategies whose edge is thinnest, and ranking on any one figure selects
   for the set that is exceptional on it. `selection` filters (no loss at pnl10
   by default), scores each set by its mean percentile on pnl5, pnl10, dd5 and

@@ -49,8 +49,19 @@ Every bucket is kept. Enoshima creates buckets and writes to them, and never
 expires or deletes one: cleaning up is a separate tool's job. A retention on
 temporary buckets used to make InfluxDB refuse any point older than 30 days,
 which is every point of a backtest of last year.
+
+## A weekly run's bucket: `backtest_<param_set_id>_w<run_id>`
+
+A weekly run (`weekly`) is built up over several executions, and a window
+reads weeks written by any of them, so it has one bucket for the run rather
+than one per execution. Every point is tagged `week=<YYYY-Www>`, and a week's
+points are deleted by that tag before the week is written again: by time
+range would not do, because a position closed on a Monday has its open-aligned
+copy in the Sunday before, in the previous week's time. The bucket then holds
+exactly the weeks on disk, each once. This is the one delete Enoshima makes.
 """
 
+import datetime as dt
 from logging import getLogger
 
 from influxdb_client import InfluxDBClient, Point, WritePrecision
@@ -125,11 +136,14 @@ class InfluxdbWriter(BufferedWriter):
         bucket_name: str,
         buffer_size: int = 2048,
         param_set_id: str | None = None,
+        tags: dict[str, str] | None = None,
     ):
         super(InfluxdbWriter, self).__init__(buffer_size)
         self.client = create_client(url, token, org)
         self.bucket_name = bucket_name
-        self.param_set_id = param_set_id
+        self.tags = dict(tags or {})
+        if param_set_id:
+            self.tags["param_set_id"] = param_set_id
         self._spread_timestamps = TimestampSpreader()
         self._init_bucket()
         self.w = self.client.write_api(
@@ -148,9 +162,9 @@ class InfluxdbWriter(BufferedWriter):
 
     def write(self, points: list[Point]):
         self._spread_timestamps(points)
-        if self.param_set_id:
-            for p in points:
-                p.tag("param_set_id", self.param_set_id)
+        for p in points:
+            for k, v in self.tags.items():
+                p.tag(k, v)
         self.w.write(self.bucket_name, record=points, write_precision=WritePrecision.US)
 
     def close(self):
@@ -236,6 +250,7 @@ class InfluxdbStore:
         bucket_name: str,
         buffer_size: int = 2048,
         param_set_id: str | None = None,
+        tags: dict[str, str] | None = None,
     ) -> InfluxdbWriter:
         return InfluxdbWriter(
             self._write_url,
@@ -244,7 +259,23 @@ class InfluxdbStore:
             bucket_name,
             buffer_size,
             param_set_id,
+            tags,
         )
+
+    def delete_tagged(self, bucket_name: str, tags: dict[str, str]) -> None:
+        """Delete every point in `bucket_name` carrying all of `tags`, at any time. See the note on weekly buckets."""
+        predicate = " AND ".join(f'{k}="{v}"' for k, v in tags.items())
+        client = create_client(self._write_url, self._token, self.org)
+        try:
+            client.delete_api().delete(
+                dt.datetime(1970, 1, 1, tzinfo=dt.UTC),
+                dt.datetime(2262, 1, 1, tzinfo=dt.UTC),
+                predicate,
+                bucket=bucket_name,
+                org=self.org,
+            )
+        finally:
+            client.close()
 
     def ping(self) -> bool:
         """Whether the server answers. Asked before a run, not after its replay."""
@@ -316,3 +347,7 @@ BUCKET_PREFIX = "backtest"
 
 def bucket_name(param_set_id: str, batch_id: int) -> str:
     return f"{BUCKET_PREFIX}_{param_set_id}_{batch_id}"
+
+
+def weekly_bucket_name(param_set_id: str, run_id: str) -> str:
+    return f"{BUCKET_PREFIX}_{param_set_id}_w{run_id}"

@@ -9,7 +9,8 @@ re-run. The numbers themselves are beside it in the run's folder; see
 ## The id is deterministic, and that is what makes a run resumable
 
 The id is a hash of everything that decides what a run computes: the
-environment, the strategy and variant, the parameter set, and the date range.
+environment, the strategy and variant, the revision of the strategy's code
+(`strategy_env.strategy_rev`), the parameter set, and the date range.
 Two runs that would compute the same thing therefore have the same id -- the
 name of their folder -- so `Runner` can see that a result already exists and
 skip it. An optimize sweep over
@@ -19,6 +20,14 @@ than starting again.
 It was a random UUID before, which meant the "a run log exists for this range"
 check could never once have fired — every fresh log had a new id and every
 combination was recomputed. `--force` is now the way to say recompute anyway.
+
+A weekly run's id (`weekly`) has no dates in it, and the preload instead: its
+folder holds every week computed for that environment, strategy and parameter
+set, and a window is whichever of them it covers.
+
+Any other run is temporary (`is_temporary_run`): a quick look at some days,
+kept and listed by `results`, and never a candidate for `select` or
+`walk-forward`, which compare weekly runs.
 """
 
 import hashlib
@@ -29,6 +38,8 @@ from qate.util.dt_range import DtRange
 from qate.util.encoder import Encoder
 from qate_env.env import Env
 from qate_env.run_log import RunLog
+
+from .weekly import Week
 
 
 class BacktestLog(RunLog):
@@ -41,6 +52,9 @@ class BacktestLog(RunLog):
         batch_id: int = None,
         config=None,
         profile=None,
+        preload_hours: int | None = None,
+        week_key: str | None = None,
+        strategy_rev: str | None = None,
     ):
         # config and profile go to RunLog, which records them: they are the
         # provenance of the result, and a run log without them cannot say which
@@ -48,11 +62,15 @@ class BacktestLog(RunLog):
         super().__init__(env, config=config, profile=profile, params=params)
         self.dt_range = dt_range
         self.strategy_name = strategy_name
+        self.strategy_rev = strategy_rev
         self.batch_id = batch_id
         self.param_set_id = None
         self.influx_bucket = None
         self.result = None
         self.end_ts = None
+        # Set for one week of a weekly run: the preload is in the id, the week is not.
+        self.preload_hours = preload_hours
+        self.week_key = week_key
 
     def get_id(self) -> str:
         """A hash of what the run computes, so an identical run is recognisable.
@@ -65,10 +83,13 @@ class BacktestLog(RunLog):
         identity = {
             "env": str(self.env.name),
             "strategy": self.strategy_name,
+            "strategy_rev": self.strategy_rev,
             "params": self.params,
-            "start": self.dt_range.start_str,
-            "end": self.dt_range.end_str,
         }
+        if self.week_key is None:
+            identity.update({"start": self.dt_range.start_str, "end": self.dt_range.end_str})
+        else:
+            identity["weekly"] = {"preload_hours": self.preload_hours}
         raw = json.dumps(identity, sort_keys=True, cls=Encoder)
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
@@ -80,15 +101,33 @@ class BacktestLog(RunLog):
                 "param_set_id": self.param_set_id,
                 "params": self.params,
                 "strategy": self.strategy_name,
+                "strategy_rev": self.strategy_rev,
                 "start_str": self.dt_range.start_str,
                 "end_str": self.dt_range.end_str,
                 "influx_bucket": self.influx_bucket,
             }
         )
+        if self.week_key is not None:
+            whole = Week.parse(self.week_key).dt_range
+            data.update({
+                "mode": "weekly",
+                "week": self.week_key,
+                "preload_hours": self.preload_hours,
+                "partial": (self.dt_range.start_str, self.dt_range.end_str) != (whole.start_str, whole.end_str),
+            })
+        # Only a weekly run is a candidate for `select` and `walk-forward`; any other is a quick look.
+        data["is_temporary_run"] = self.week_key is None
         data["id"] = self.get_id()
         if self.end_ts is not None:
             data["end_ts"] = self.end_ts
             data["execution_time"] = str(int(self.end_ts - self.start_ts)) + "s"
+        return data
+
+    def weekly_meta(self) -> dict:
+        """What every week of a weekly run shares, for its root `meta.json`: no range, no batch, no timings."""
+        data = self.to_dict()
+        for key in ("start_ts", "batch_id", "start_str", "end_str", "week", "partial", "end_ts", "execution_time"):
+            data.pop(key, None)
         return data
 
     def set_result(self, result: dict) -> None:

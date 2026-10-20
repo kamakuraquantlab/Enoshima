@@ -4,15 +4,22 @@ Run as: `enoshima <command>`, or from a checkout
 `PYTHONPATH=src python -m enoshima.cli <command>`.
 
 ```
-enoshima run     --env NAME --from 2026-06-01 --to 2026-06-10
+enoshima run     --env NAME --from 2026-06-01 --to 2026-06-10 [--weekly]
 enoshima select  --env NAME
 enoshima walk-forward --env NAME [--train]
 enoshima results --env NAME
 ```
 
-`run` is the one that matters. `select` recommends again from the run folders
-already written -- after a change to the rule in `enoshima.json`, say -- without
-replaying anything; a sweep does the same when it finishes. `walk-forward` tests
+`run` is the one that matters, and `run --weekly` is how it is mainly used: it
+replays the ISO weeks (Monday to Sunday, JST) that cover the range, each on
+its own, as far as there is data for them, and reuses every week already
+computed, so a range extended later replays only its new weeks
+(`enoshima.weekly`). A run without `--weekly` is a quick look at some days:
+it has its summary, and is never a candidate for `select`.
+
+A run writes results; it does not choose. `select` recommends from the weekly
+run folders already written -- after a sweep, or after a change to the rule in
+`enoshima.json` -- without replaying anything. `walk-forward` tests
 the rule itself: how each window, history and reselection interval in
 `enoshima.json`'s `"walk_forward"` would have done out of sample, and with
 `--train` chooses among them every month against a baseline that never
@@ -97,12 +104,10 @@ def cmd_run(args) -> int:
             max_concurrency=args.max_concurrency or settings.max_concurrency,
             force=args.force,
             influx=influx,
-            selection_settings=settings.selection,
+            weekly=settings.weekly if args.weekly else None,
         )
         quiet_strategy_logs(runner.definition.module_name, settings.strategy_log_level)
         runner.run()
-        if args.optimize:
-            runner.post_analysis()
         if runner.failed:
             LOG.error(f"{len(runner.failed)} backtest(s) failed; their results were not saved")
             return 1
@@ -220,7 +225,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"parameter sets per data pass; overrides {SETTINGS_FILE}",
     )
-    run.add_argument("--force", action="store_true", help="re-run parameter sets that already have a result")
+    run.add_argument(
+        "--weekly",
+        action="store_true",
+        help="replay the whole ISO weeks (Mon-Sun JST) covering the range, one at a time, reusing weeks already run",
+    )
+    run.add_argument("--force", action="store_true", help="re-run what already has a result (with --weekly: the weeks asked for)")
     run.set_defaults(func=cmd_run)
 
     select = sub.add_parser("select", help="recommend from the recorded runs again, replaying nothing")

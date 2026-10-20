@@ -3,7 +3,7 @@
 `ResultReporter` is the reporter every backtest has. It evaluates each fill and
 each closed position, and keeps the closed positions themselves as
 `ledger.Trade`s. Its `get_result` is the run's summary -- the whole-range
-figures a run folder's `summary.json` holds and `--optimize` filters on -- and
+figures a run folder's `summary.json` holds and `select` filters on -- and
 `trades` is what the folder's `trades.csv` and `by_*.json` are written from.
 
 PnL is the one kind of trading data a run keeps on disk, because it is what a
@@ -14,6 +14,14 @@ replay. Orders and the strategy's bars go to InfluxDB through
 When InfluxDB recording is enabled, the evaluations write their own `EVAL`
 metrics directly through the run's writer. They are results, not strategy
 metrics, and do not re-enter the runtime's reporter dispatch.
+
+## Strict weekly runs
+
+With `strict`, as `weekly` builds it, a run's figures must partition across
+weeks: the orders counted are only those in range, like everything else, and
+the summary is `weekly.summarize` of the trades and order counters, so a week
+alone and a window of weeks are computed the same way. `open_at_end` counts
+the positions the replay ended holding.
 
 ## The three slippage evaluations
 
@@ -29,15 +37,13 @@ from qate.trading.pnl_tracker import PnlUpdate
 from qate.trading.reporter import Reporter
 from qate.util.dt_range import DtRange
 
-from .eval import Evaluation
+from .eval import SLIPPAGE_05, SLIPPAGE_10, Evaluation
 from .influx import InfluxdbWriter, convert_to_point
 from .ledger import Trade, streaks
+from .weekly import summarize
 
-# Extra slippage rates the run is evaluated at, beyond the simulated fill.
-# 0.005% is what live execution logs have actually shown for small orders in
-# this niche; 0.01% is the pessimistic case. See Evaluation.on_order.
-SLIPPAGE_05 = 0.00005
-SLIPPAGE_10 = 0.0001
+# Below this, what is left of a position's open notional is rounding, not a position.
+OPEN_EPSILON = 1e-6
 
 
 def in_range(ts: float, dt_range: DtRange) -> bool:
@@ -53,10 +59,13 @@ def in_range(ts: float, dt_range: DtRange) -> bool:
 class ResultReporter(Reporter):
     """Evaluates a backtest at each slippage rate."""
 
-    def __init__(self, dt_range: DtRange, writer: InfluxdbWriter | None = None):
+    def __init__(self, dt_range: DtRange, writer: InfluxdbWriter | None = None, strict: bool = False):
         super().__init__()
         self.dt_range = dt_range
         self.writer = writer
+        self.strict = strict
+        # Open notional per (market, side), warmup included: what the replay ends holding.
+        self._open: dict[tuple, float] = {}
         self.evals = [Evaluation(), Evaluation(SLIPPAGE_05), Evaluation(SLIPPAGE_10)]
         # One per closed position inside the range, in time order.
         self.trades: list[Trade] = []
@@ -68,11 +77,20 @@ class ResultReporter(Reporter):
 
     def report_order(self, order_response: OrderResponse) -> None:
         # Evaluations see every fill, warmup included, so the reported slippage
-        # average is over the whole replay rather than a truncated tail.
+        # average is over the whole replay rather than a truncated tail -- except
+        # a strict run's, whose preload is the previous week's range.
+        if self.strict and not in_range(order_response.get_ts(), self.dt_range):
+            return
         for evaluation in self.evals:
             evaluation.on_order(order_response)
 
     def report_pnl(self, pnl_update: PnlUpdate) -> None:
+        key = (pnl_update.market.id, pnl_update.side)
+        if pnl_update.settle_type == SettleType.OPEN:
+            self._open[key] = self._open.get(key, 0.0) + pnl_update.notional
+        else:
+            self._open[key] = self._open.get(key, 0.0) - pnl_update.open_cost
+
         if not in_range(pnl_update.get_ts(), self.dt_range):
             return
 
@@ -108,8 +126,21 @@ class ResultReporter(Reporter):
             for metric in eval_metrics:
                 self.writer.add(convert_to_point(metric))
 
+    def open_at_end(self) -> int:
+        """How many (market, side) positions are still open: closed after the replay, if ever."""
+        return sum(1 for notional in self._open.values() if notional > OPEN_EPSILON)
+
+    def order_stats(self) -> dict:
+        stats: dict = {}
+        for evaluation in self.evals:
+            stats.update(evaluation.order_stats())
+        return stats
+
     def get_result(self) -> dict:
         """Every evaluation's whole-range numbers, suffixed by its slippage rate."""
+        if self.strict:
+            return {**summarize(self.trades, self.order_stats()), **self.order_stats(),
+                    "open_at_end": self.open_at_end()}
         result: dict = {}
         for evaluation in self.evals:
             result.update(evaluation.get_result())

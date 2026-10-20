@@ -4,6 +4,12 @@ from qate.core.order import OrderResponse
 from qate.trading.pnl_tracker import PnlUpdate
 from qate.util.counter import Counter
 
+# Extra slippage rates the run is evaluated at, beyond the simulated fill.
+# 0.005% is what live execution logs have actually shown for small orders in
+# this niche; 0.01% is the pessimistic case. See Evaluation.on_order.
+SLIPPAGE_05 = 0.00005
+SLIPPAGE_10 = 0.0001
+
 
 def evaluate_strategy(updates: list, risk_free_rate=0):
     if len(updates) < 2:
@@ -78,8 +84,8 @@ class Evaluation:
         # extra_slippage is calculated in different places and it is not double counted:
         # - here we include it when accumulating order-level averages so the reported slippage rate
         #   reflects the total latency/infra penalty we expect in production.
-        # - on_position we add the same surcharge to the overall PnL so the curve shows the net effect
-        #   once fills settle with the added cushion.
+        # - on_close_pnl_update we add the same surcharge, for both legs, to the overall PnL so the curve
+        #   shows the net effect once the position settles.
         # Empirically, an extra_slippage_rate of 0.005% mirrors what the current trading stack incurs
         # (code paths, hosting, connectivity, etc.).
         #
@@ -95,15 +101,17 @@ class Evaluation:
         self.order_slippage_rate += slippage_rate
         self.order_cnt += 1
 
-    def _on_pnl_update(self, pnl_update: PnlUpdate):
-        self.total_fee += pnl_update.fee
-        self.extra_slippage += pnl_update.notional * self.extra_slippage_rate
-
     def on_open_pnl_update(self, pnl_update: PnlUpdate):
-        self._on_pnl_update(pnl_update)
+        # An open's fee is 0: qate defers it to the close, as the extra slippage is here.
+        self.total_fee += pnl_update.fee
 
     def on_close_pnl_update(self, pnl_update: PnlUpdate) -> Metric:
-        self._on_pnl_update(pnl_update)
+        # Both legs' extra slippage is charged at the close, the open leg's on `open_cost`, so a
+        # trade carries its whole cost whether or not its open was replayed in range. Charged at
+        # the open, a position opened during warmup lost that leg's cost, and a week computed on
+        # its own (`weekly`) differed from the same week inside a longer run.
+        self.total_fee += pnl_update.fee
+        self.extra_slippage += (pnl_update.open_cost + pnl_update.notional) * self.extra_slippage_rate
 
         last_pnl = self.overall_pnl
         self.trading_pnl += pnl_update.pnl
@@ -138,6 +146,14 @@ class Evaluation:
                 pnl_change,
             ],
         )
+
+    def order_stats(self) -> dict:
+        """The order counters behind the slippage averages, as sums, so weeks of them add up."""
+        return {
+            f"order_cnt{self.suffix}": self.order_cnt,
+            f"order_slippage{self.suffix}": self.order_slippage,
+            f"order_slippage_rate{self.suffix}": self.order_slippage_rate,
+        }
 
     def get_result(self) -> dict:
         return_result = evaluate_strategy(self.updates)

@@ -1,6 +1,6 @@
 # Walk-forward: the selection rule's own parameters
 
-`--optimize` recommends one parameter set per group. A deployment does not have
+`enoshima select` recommends one parameter set per group. A deployment does not have
 to hold that set forever: it could choose again every so often, on the recent
 past. `enoshima walk-forward` asks whether that would have earned more, and
 `--train` asks it the way a deployment would. This page records the idea, the
@@ -19,7 +19,7 @@ A **rule** is three values:
 
 At each choice the rule takes the group's runs, cuts each run's `trades.csv` to
 the X hours before, and ranks them with `selection.rank`, the same filters,
-score and grid-neighbour smoothing that `--optimize` uses. It then trades the
+score and grid-neighbour smoothing that `select` uses. It then trades the
 winner for the next Y hours. Chained together, those choices make the rule's
 **switching** curve, built entirely out of sample.
 

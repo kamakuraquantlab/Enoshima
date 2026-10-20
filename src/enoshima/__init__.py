@@ -6,6 +6,7 @@ exchange, evaluates what happened, and optionally records it in InfluxDB.
 | Module | Holds |
 |---|---|
 | `runner` | Which parameter sets to run, and one shared pass over the data for all of them |
+| `weekly` | Strict weekly runs: ISO weeks replayed alone, and any window built from them |
 | `data_source` | Chunked replay: asks hase for a few days at a time, one copy shared |
 | `backtest` | `BacktestRuntime`: one strategy, one replay, reported to its reporters |
 | `result` | `ResultReporter`: the evaluations, the closed trades, and a run's summary |

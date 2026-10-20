@@ -27,8 +27,29 @@ indicators and charts have history before anything trades. Those events are
 replayed but not reported — see `result.in_range`. Without it the
 first hours of every backtest measure a strategy whose indicators are still
 converging.
+
+## Weekly runs
+
+With `weekly`, the range is widened to the ISO weeks covering it, clipped to
+the complete days on disk, and each week is replayed on its own -- one pass
+over the week and its preload for every parameter set that needs it, in
+batches as above. A week already written is skipped unless the data now
+reaches further into it than when it ran; the weeks between those on disk and
+those asked for are filled in, so each parameter set's weeks stay contiguous.
+After each week the run's root files are rebuilt from all of its weeks
+(`weekly.rebuild`). See `weekly`.
+
+Any other run is temporary: a quick look at some days, with its own summary,
+and not a candidate for `enoshima select`.
+
+## Choosing is not part of a run
+
+A run writes results and its summaries, and nothing else. Recommending a
+parameter set -- `enoshima select` -- and testing the rule that does it --
+`enoshima walk-forward` -- are asked for, when there are results to choose from.
 """
 
+import datetime as dt
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
@@ -39,13 +60,15 @@ from qate.trading.param import ParamGrid
 from qate.util.dt_range import DtRange
 from qate_env.env import Env
 
-from . import best, param_id, run_dir, selection
+from . import param_id, run_dir
+from . import weekly as weekly_mod
 from .backtest import Backtest
-from .data_source import DEFAULT_CHUNK_DAYS, DataSource, market_data_event_types
-from .influx import InfluxdbStore, InfluxdbWriter, InfluxReporter, bucket_name
+from .data_source import DEFAULT_CHUNK_DAYS, DataSource, Stream, market_data_event_types
+from .influx import InfluxdbStore, InfluxdbWriter, InfluxReporter, bucket_name, weekly_bucket_name
 from .result import ResultReporter
 from .run_log import BacktestLog
-from .strategy_env import get_strategy_class, load_strategy_env
+from .strategy_env import get_strategy_class, load_strategy_env, strategy_rev
+from .weekly import Week, WeeklySettings
 
 LOG = getLogger(__name__)
 
@@ -78,10 +101,18 @@ class Runner:
         max_concurrency: int = MAX_CONCURRENCY,
         force: bool = False,
         influx: InfluxdbStore | None = None,
-        selection_settings: selection.SelectionSettings | None = None,
+        weekly: WeeklySettings | None = None,
     ):
-        """`influx` is an `influx.InfluxdbStore`, or None to record no metric stream."""
+        """`influx` is an `influx.InfluxdbStore`, or None to record no metric stream.
+
+        `weekly`, given, makes this a strict weekly run: `dt_range` is widened
+        to the weeks that cover it, and `weeks` lists them.
+        """
         self.env = env
+        self.weekly = weekly
+        self.weeks: list[Week] = weekly_mod.covering(dt_range) if weekly else []
+        if weekly:
+            dt_range = DtRange(self.weeks[0].start, self.weeks[-1].dt_range.end_dt)
         self.dt_range = dt_range
         self.optimize = optimize
         self.chunk_days = chunk_days
@@ -89,7 +120,6 @@ class Runner:
         self.force = force
         self.output_root = Path(env.work_dir)
         self.influx = influx
-        self.selection_settings = selection_settings or selection.SelectionSettings()
         self.batch_id = self._next_batch_id(self.output_root)
         # The parameter sets whose backtest raised. A run with any is a failed
         # run, whatever else it computed: `enoshima run` exits non-zero.
@@ -98,6 +128,8 @@ class Runner:
         strategy_env = load_strategy_env(env)
         self.definition = strategy_env.definition
         self.config = strategy_env.config
+        # Part of every run's id: a commit to the strategy is a new folder.
+        self.strategy_rev = strategy_rev(self.definition.module_name)
 
     @staticmethod
     def _next_batch_id(output_root: Path) -> int:
@@ -109,7 +141,7 @@ class Runner:
         `int(time.time())` collides whenever two runs start inside the same
         second, which is ordinary when they are launched from a script.
 
-        Only a sweep writes a `best_result` folder, so a single run leaves nothing
+        Only `select` writes a `best_result` folder, so a run leaves nothing
         on disk to advance past; the last id this process issued covers the
         common case of two runs started one after the other.
         """
@@ -134,15 +166,92 @@ class Runner:
 
     def run(self) -> None:
         combos = self.param_sets()
+        mode = self.optimize or "single"
+        if self.weekly:
+            mode += f" weekly({len(self.weeks)} weeks, preload {self.weekly.preload_hours}h)"
         LOG.info(
             f"START env={self.env.name} strategy={self.definition.strategy_name} "
             f"range={self.dt_range.start_str}..{self.dt_range.end_str} "
-            f"mode={self.optimize or 'single'} combos={len(combos)}"
+            f"mode={mode} combos={len(combos)}"
+        )
+        if not self.weekly:
+            self._run_range(combos, self.dt_range, WARMUP_HOURS)
+            return
+        available = self._available_days()
+        if available is None:
+            LOG.warning("No day is complete on disk for every stream the strategy reads; nothing to run")
+            return
+        LOG.info(f"Complete days on disk: {available[0]}..{available[1]}")
+        todo = self._weeks_to_run(combos, available)
+        for week in sorted(todo, key=lambda w: w.monday):
+            dt_range, params = todo[week]
+            part = "" if dt_range.start_dt == week.start and dt_range.end_dt == week.dt_range.end_dt else \
+                f" (partial: {dt_range.start_str}..{dt_range.end_str})"
+            LOG.info(f"Week {week.key}{part}: {len(params)} parameter set(s)")
+            self._run_range(params, dt_range, self.weekly.preload_hours, week)
+        self._rebuild_all(combos)
+
+    def _available_days(self) -> tuple[dt.date, dt.date] | None:
+        """The first and last day complete on disk for every stream the strategy reads."""
+        common: set[str] | None = None
+        for market, event_types in self.config.get_markets():
+            for event_type in market_data_event_types(event_types):
+                days = set(Stream(market, event_type).available_dates())
+                common = days if common is None else common & days
+        if not common:
+            return None
+        return dt.date.fromisoformat(min(common)), dt.date.fromisoformat(max(common))
+
+    def _weeks_to_run(
+        self, combos: list[dict], available: tuple[dt.date, dt.date]
+    ) -> dict[Week, tuple[DtRange, list[dict]]]:
+        """Each week, the part of it with data, and the parameter sets that need it.
+
+        A set needs a week asked for or between its weeks on disk, that it has
+        no result for, or whose result the data now reaches past -- a week
+        that was partial. `--force` reruns the weeks asked for.
+        """
+        todo: dict[Week, tuple[DtRange, list[dict]]] = {}
+        grown = set()
+        for params in combos:
+            run_id = self._run_log(params, self.weeks[0]).get_id()
+            done = weekly_mod.on_disk(self.output_root, run_id)
+            for week in weekly_mod.span(self.weeks, done):
+                dt_range = week.clip(*available)
+                if dt_range is None:
+                    continue
+                if week in done and not (self.force and week in self.weeks):
+                    start, end = weekly_mod.recorded_range(self.output_root, run_id, week)
+                    if dt_range.start_str >= start and dt_range.end_str <= end:
+                        continue
+                    grown.add(week.key)
+                todo.setdefault(week, (dt_range, []))[1].append(params)
+        filled = sorted({w.key for w in todo} - {w.key for w in self.weeks})
+        if filled:
+            LOG.info(f"Filling {len(filled)} week(s) between those on disk and those asked for: {', '.join(filled)}")
+        if grown:
+            LOG.info(f"Running again {len(grown)} week(s) the data now reaches further into: {', '.join(sorted(grown))}")
+        return todo
+
+    def _run_log(self, params: dict, week: Week | None = None, dt_range: DtRange | None = None) -> BacktestLog:
+        return BacktestLog(
+            self.env,
+            params,
+            dt_range or week.dt_range,
+            self.definition.strategy_name,
+            batch_id=self.batch_id,
+            config=self.config,
+            profile={"module_name": self.definition.module_name, "variant_name": self.definition.variant_name},
+            preload_hours=self.weekly.preload_hours if week else None,
+            week_key=week.key if week else None,
+            strategy_rev=self.strategy_rev,
         )
 
+    def _run_range(self, combos: list[dict], dt_range: DtRange, warmup_hours: int, week: Week | None = None) -> None:
+        """Every parameter set over one reported range, fed `warmup_hours` before it."""
         markets = [(m, market_data_event_types(t)) for m, t in self.config.get_markets()]
         data_source = DataSource(
-            DtRange(self.dt_range.start_dt - timedelta(hours=WARMUP_HOURS), self.dt_range.end_dt),
+            DtRange(dt_range.start_dt - timedelta(hours=warmup_hours), dt_range.end_dt),
             self.chunk_days,
         )
         for market, event_types in markets:
@@ -157,7 +266,7 @@ class Runner:
 
             backtests = []
             for params in combos[i : i + self.max_concurrency]:
-                backtest = self._create_backtest(data_source, params)
+                backtest = self._create_backtest(data_source, params, dt_range, week)
                 if backtest:
                     backtests.append(backtest)
 
@@ -183,28 +292,23 @@ class Runner:
         if len(missing) > 20:
             LOG.warning(f"  ... and {len(missing) - 20} more")
 
-    def _create_backtest(self, data_source: DataSource, params: dict) -> Backtest | None:
+    def _create_backtest(
+        self, data_source: DataSource, params: dict, dt_range: DtRange, week: Week | None = None
+    ) -> Backtest | None:
         StrategyClass = get_strategy_class(self.definition.module_name, self.definition.variant_name)
         strategy = StrategyClass(self.config, params)
         param_set_id = param_id.param_set_id(str(self.env.name), params, self.definition.params)
 
-        run_log = BacktestLog(
-            self.env,
-            params,
-            self.dt_range,
-            self.definition.strategy_name,
-            batch_id=self.batch_id,
-            config=self.config,
-            profile={"module_name": self.definition.module_name, "variant_name": self.definition.variant_name},
-        )
+        run_log = self._run_log(params, week, dt_range)
         run_log.param_set_id = param_set_id
 
-        if not self.force and run_dir.is_complete(run_dir.run_dir(self.output_root, run_log.get_id())):
+        # A weekly run's weeks were chosen by `_weeks_to_run`, which knows a partial week from a finished one.
+        if not week and not self.force and run_dir.is_complete(run_dir.run_dir(self.output_root, run_log.get_id())):
             LOG.info(f"Skipping {param_set_id}: a result for this range already exists (--force to redo)")
             return None
 
-        writer, reporters = self._recording(run_log, param_set_id)
-        result = ResultReporter(self.dt_range, writer)
+        writer, reporters = self._recording(run_log, param_set_id, dt_range, week)
+        result = ResultReporter(dt_range, writer, strict=week is not None)
         return Backtest(
             strategy,
             self.config.get_exchanges(),
@@ -214,14 +318,23 @@ class Runner:
             reporters,
         )
 
-    def _recording(self, run_log: BacktestLog, param_set_id: str) -> tuple[InfluxdbWriter | None, list[InfluxReporter]]:
+    def _recording(
+        self, run_log: BacktestLog, param_set_id: str, dt_range: DtRange, week: Week | None
+    ) -> tuple[InfluxdbWriter | None, list[InfluxReporter]]:
         if self.influx is None:
             return None, []
 
-        bucket = bucket_name(param_set_id, self.batch_id)
+        if week is None:
+            bucket = bucket_name(param_set_id, self.batch_id)
+            writer = self.influx.create_writer(bucket, param_set_id=param_set_id)
+        else:
+            # The run's one bucket, with this week's earlier points cleared; see `influx`.
+            bucket = weekly_bucket_name(param_set_id, run_log.get_id())
+            tags = {"week": week.key}
+            writer = self.influx.create_writer(bucket, param_set_id=param_set_id, tags=tags)
+            self.influx.delete_tagged(bucket, tags)
         run_log.influx_bucket = bucket
-        writer = self.influx.create_writer(bucket, param_set_id=param_set_id)
-        return writer, [InfluxReporter(writer, self.dt_range)]
+        return writer, [InfluxReporter(writer, dt_range)]
 
     def _run_batch(self, backtests: list[Backtest], data_source: DataSource) -> None:
         """Run a batch concurrently, and do not let one failure hang the rest.
@@ -255,36 +368,40 @@ class Runner:
 
     def _save(self, backtest: Backtest) -> None:
         log = backtest.run_log
-        path = run_dir.write(self.output_root, log.get_id(), log.to_dict(), log.result, backtest.result.trades)
+        if log.week_key is None:
+            path = run_dir.write(self.output_root, log.get_id(), log.to_dict(), log.result, backtest.result.trades)
+        else:
+            path = run_dir.write_week(
+                self.output_root, log.get_id(), log.week_key, log.to_dict(), log.result, backtest.result.trades
+            )
+            # Every week, not once at the end: a run stopped part-way leaves a root that matches its weeks.
+            weekly_mod.rebuild(self.output_root, log.get_id(), log.weekly_meta())
         LOG.info(f"Saved {path}")
 
-    def _log_result(self, run_log: BacktestLog) -> None:
-        result = run_log.result or {}
+    def _log_result(self, run_log: BacktestLog, result: dict | None = None, label: str | None = None) -> None:
+        result = (run_log.result if result is None else result) or {}
         params = " ".join(f"{k}={v}" for k, v in (run_log.params or {}).items())
         pnl = result.get("pnl5")
         sharpe = result.get("sharpe_ratio_annualized0")
+        label = label or run_log.week_key
         LOG.info(
-            f"RESULT params=({params}) "
+            f"RESULT {label + ' ' if label else ''}params=({params}) "
             f"pnl5={_fmt(pnl, '+.2f')} "
             f"trades={result.get('pnl_cnt0')} "
             f"sharpe={_fmt(sharpe, '.3f')}"
         )
 
-    # ----------------------------------------------------------- post-analysis
-
-    def post_analysis(self) -> list[dict] | None:
-        """Recommend for every range and group in this environment; see `best`.
-
-        Every run folder is a candidate, *not* only the ones this batch ran.
-        That is what makes a resumed sweep give the right answer: the parameter
-        sets skipped because they already had a result are still candidates.
-        Ranking by batch id instead meant an interrupted sweep, resumed, chose
-        its winner from only the combinations it happened to re-run.
-        """
-        if not self.optimize:
-            return None
-        groups = best.recommend(self.output_root, self.batch_id, self.selection_settings)
-        if not groups:
-            LOG.warning(f"No results with a pnl5 figure in {self.output_root}")
-            return None
-        return groups
+    def _rebuild_all(self, combos: list[dict]) -> None:
+        """Rebuild every parameter set's root, ran or skipped, and log its figures over all its weeks."""
+        for params in combos:
+            run_log = self._run_log(params, self.weeks[0])
+            run_log.param_set_id = param_id.param_set_id(str(self.env.name), params, self.definition.params)
+            if self.influx is not None:
+                run_log.influx_bucket = weekly_bucket_name(run_log.param_set_id, run_log.get_id())
+            folder = run_dir.run_dir(self.output_root, run_log.get_id())
+            if not weekly_mod.rebuild(self.output_root, run_log.get_id(), run_log.weekly_meta()):
+                LOG.warning(f"{folder.name}: its weeks have a gap, so it has no summary until a run fills it")
+                continue
+            meta = run_dir.read_json(folder, run_dir.META)
+            label = f"{meta['start_str'][:10]}..{meta['end_str'][:10]} ({meta['weeks']} weeks)"
+            self._log_result(run_log, run_dir.read_json(folder, run_dir.SUMMARY), label)

@@ -86,3 +86,12 @@ def test_quieting_sets_levels_on_the_strategy_and_qate_trading_only():
     finally:
         for n, level in before.items():
             logging.getLogger(n).setLevel(level)
+
+
+def test_weekly_sets_the_preload_and_refuses_unknown_keys(tmp_path):
+    assert load_settings(tmp_path).weekly.preload_hours == 24
+    write(tmp_path, {"weekly": {"preload_hours": 48}})
+    assert load_settings(tmp_path).weekly.preload_hours == 48
+    write(tmp_path, {"weekly": {"preload": 48}})
+    with pytest.raises(ValueError, match="Unknown key"):
+        load_settings(tmp_path)

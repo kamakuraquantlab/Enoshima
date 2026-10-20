@@ -12,12 +12,12 @@ JULY = DtRange.from_strings("2026-07-01", "2026-07-31")
 AUGUST = DtRange.from_strings("2026-08-01", "2026-08-31")
 
 
-def write_run(root, run_id, params, dt_range, pnl, strategy="s.v1", temporary=False):
+def write_run(root, run_id, params, dt_range, pnl, strategy="s.v1", temporary=False, rev=None):
     """A finished run folder whose one trade made `pnl` at every slippage."""
     ts = dt_range.start_ts + 3600
     trades = [Trade(ts, ts - 60, "X", "Y", "long", 1.0, 1.0, pnl, 0.0, pnl, pnl, pnl)]
     meta = {"params": params, "strategy": strategy, "start_str": dt_range.start_str, "end_str": dt_range.end_str,
-            "is_temporary_run": temporary}
+            "is_temporary_run": temporary, "strategy_rev": rev}
     summary = {"pnl0": pnl, "pnl5": pnl, "pnl10": pnl, "pnl_cnt5": 1, "max_drawdown5": 0.0}
     run_dir.write(root, run_id, meta, summary, trades)
 
@@ -70,3 +70,12 @@ def test_a_group_where_nothing_passes_recommends_nothing(tmp_path):
     assert groups["a"]["recommended_run_id"] is None and groups["a"]["recommended"] is None
     assert groups["b"]["recommended_run_id"] == "win"
     assert sorted(p.name for p in (tmp_path / "best_result" / "3").iterdir()) == ["selection.json", "win.json"]
+
+
+def test_runs_of_two_revisions_of_a_strategy_are_not_ranked_together(tmp_path):
+    write_run(tmp_path, "old", {"box": 1}, JULY, 99.0, rev="aaaa")
+    write_run(tmp_path, "new1", {"box": 1}, JULY, 10.0, rev="bbbb")
+    write_run(tmp_path, "new2", {"box": 2}, JULY, 20.0, rev="bbbb")
+
+    groups = best.recommend(tmp_path, 7, SelectionSettings(neighbors=False))
+    assert {g["strategy"]: g["runs"] for g in groups} == {"s.v1@aaaa": 1, "s.v1@bbbb": 2}

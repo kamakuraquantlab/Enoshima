@@ -3,7 +3,8 @@
 `recommend` reads every finished run folder under `run_log/`, and
 
 1. groups them by strategy and range -- two runs over different days, or of
-   different variants, are not measuring the same thing;
+   different variants or revisions of the strategy, are not measuring the
+   same thing (`strategy_label`);
 2. splits each of those by the values of `group_by`, the categorical
    parameters by default;
 3. applies `selection` to each group on its own, and recommends from it.
@@ -96,12 +97,18 @@ def axes(runs: list[dict]) -> list[dict]:
     return [{"name": name, "values": vs} for name, vs in values.items()]
 
 
+def strategy_label(run: dict) -> str | None:
+    """The strategy and the revision of its code, `module.variant@rev`; a run from before revisions has none."""
+    rev = run.get("strategy_rev")
+    return f"{run.get('strategy')}@{rev}" if rev else run.get("strategy")
+
+
 def group(runs: list[dict], group_by: list[str] | None) -> dict[tuple, dict[tuple, list[dict]]]:
-    """`(strategy, start_str, end_str)` -> `((name, value), ...)` -> the runs."""
+    """`(strategy_label, start_str, end_str)` -> `((name, value), ...)` -> the runs."""
     out: dict[tuple, dict[tuple, list[dict]]] = {}
     by_range: dict[tuple, list[dict]] = {}
     for r in runs:
-        by_range.setdefault((r.get("strategy"), r["start_str"], r["end_str"]), []).append(r)
+        by_range.setdefault((strategy_label(r), r["start_str"], r["end_str"]), []).append(r)
     for key, members in by_range.items():
         names = categorical(members) if group_by is None else list(group_by)
         groups = out[key] = {}

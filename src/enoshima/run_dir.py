@@ -16,6 +16,12 @@ missing its trades. `--force` replaces the old folder the same way.
 
 PnL is the trading data kept here rather than in InfluxDB, because it is what a
 result is evaluated from; see `result`.
+
+A weekly run (`weekly`) has the same files at its root, and under
+`weeks/<YYYY-Www>/` each week's `meta.json`, `summary.json` and `trades.csv`,
+each week written whole the same way. The weeks are what a run writes; the
+root is rebuilt from them (`write_cumulative`), so it reads as an ordinary run
+over its weeks' range.
 """
 
 import csv
@@ -33,6 +39,7 @@ RUN_LOG_DIR = "run_log"
 META = "meta.json"
 SUMMARY = "summary.json"
 TRADES = "trades.csv"
+WEEKS_DIR = "weeks"
 
 
 def grouping_file(name: str) -> str:
@@ -41,6 +48,10 @@ def grouping_file(name: str) -> str:
 
 def run_dir(root: Path, run_id: str) -> Path:
     return Path(root) / RUN_LOG_DIR / run_id
+
+
+def week_dir(root: Path, run_id: str, week_key: str) -> Path:
+    return run_dir(root, run_id) / WEEKS_DIR / week_key
 
 
 def is_complete(path: Path) -> bool:
@@ -53,25 +64,69 @@ def _dump(path: Path, data) -> None:
 
 def write(root: Path, run_id: str, meta: dict, summary: dict, trades: list[Trade]) -> Path:
     """Write a run's folder, replacing any earlier one of the same id."""
+    return _write_whole(run_dir(root, run_id), meta, summary, trades, GROUPINGS)
+
+
+def write_week(root: Path, run_id: str, week_key: str, meta: dict, summary: dict, trades: list[Trade]) -> Path:
+    """Write one week of a weekly run, replacing any earlier one of the same week.
+
+    No `by_*.json`: a window's groupings are computed from its weeks' trades together.
+    """
+    return _write_whole(week_dir(root, run_id, week_key), meta, summary, trades, ())
+
+
+def write_cumulative(root: Path, run_id: str, meta: dict, summary: dict, trades: list[Trade]) -> Path:
+    """A weekly run's root files, rebuilt in place around its `weeks/`.
+
+    The folder cannot be renamed into place, as it holds the weeks, so each file
+    is. `summary.json` is removed first and written last: in between the folder
+    is not complete, rather than complete with a summary of other trades.
+    """
     final = run_dir(root, run_id)
+    final.mkdir(parents=True, exist_ok=True)
+    (final / SUMMARY).unlink(missing_ok=True)
+    _replace(final / META, lambda f: _dump(f, meta))
+    _replace(final / TRADES, lambda f: _write_trades(f, trades))
+    for name in GROUPINGS:
+        _replace(final / grouping_file(name), lambda f, name=name: _dump(f, aggregate(trades, name)))
+    _replace(final / SUMMARY, lambda f: _dump(f, summary))
+    return final
+
+
+def remove_summary(root: Path, run_id: str) -> None:
+    """Mark a weekly run's root not complete. Its weeks are kept; the root is rebuilt from them."""
+    (run_dir(root, run_id) / SUMMARY).unlink(missing_ok=True)
+
+
+def _replace(path: Path, write) -> None:
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    write(tmp)
+    tmp.replace(path)
+
+
+def _write_trades(path: Path, trades: list[Trade]) -> None:
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(TRADE_COLUMNS)
+        writer.writerows(astuple(t) for t in trades)
+
+
+def _write_whole(final: Path, meta: dict, summary: dict, trades: list[Trade], groupings) -> Path:
     final.parent.mkdir(parents=True, exist_ok=True)
-    tmp = final.with_name(f"{run_id}.tmp-{os.getpid()}")
+    tmp = final.with_name(f"{final.name}.tmp-{os.getpid()}")
     if tmp.exists():
         shutil.rmtree(tmp)
     tmp.mkdir()
 
     _dump(tmp / META, meta)
-    with open(tmp / TRADES, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(TRADE_COLUMNS)
-        writer.writerows(astuple(t) for t in trades)
-    for name in GROUPINGS:
+    _write_trades(tmp / TRADES, trades)
+    for name in groupings:
         _dump(tmp / grouping_file(name), aggregate(trades, name))
     _dump(tmp / SUMMARY, summary)  # last: its presence is what "complete" means
 
     old = None
     if final.exists():
-        old = final.with_name(f"{run_id}.old-{os.getpid()}")
+        old = final.with_name(f"{final.name}.old-{os.getpid()}")
         final.rename(old)
     tmp.rename(final)
     if old is not None:

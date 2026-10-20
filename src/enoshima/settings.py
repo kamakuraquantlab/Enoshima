@@ -33,6 +33,9 @@
     "baseline": "default",
     "block_days": 5,
     "resamples": 10000
+  },
+  "weekly": {
+    "preload_hours": 24
   }
 }
 ```
@@ -52,13 +55,17 @@ Every key is optional, and a missing file means the defaults.
   INFO, which is what you want when one fails; a sweep would write that line for
   every fill of every parameter set (1.4 million lines, 600 MB, in one 45-way
   sweep). `"INFO"` brings it back when a backtest needs debugging.
-- `selection` is how `--optimize` chooses: filters, the score, grid-neighbour
+- `selection` is how `enoshima select` chooses: filters, the score, grid-neighbour
   smoothing and the walk-forward window. See `enoshima.selection`.
 - `walk_forward` is what `enoshima walk-forward` tries: the rules (window,
   and each history with its own reselection intervals, in hours, days, weeks
   or months), and for
   `--train` how often a rule is chosen again, on how much history, against
   which baseline. See `enoshima.post_analysis.walk_forward`.
+- `weekly` is how `enoshima run --weekly` replays a week: `preload_hours`
+  before its Monday, replayed and not reported. It is part of a weekly run's
+  id, so a different preload starts a different set of weeks. See
+  `enoshima.weekly`.
 
 This is the environment's file rather than a set of flags because it describes
 the environment: where its runs are charted and how big its data is. An unknown
@@ -75,6 +82,7 @@ from .data_source import DEFAULT_CHUNK_DAYS
 from .post_analysis.walk_forward import WalkForwardSettings
 from .runner import MAX_CONCURRENCY
 from .selection import SelectionSettings
+from .weekly import WeeklySettings
 
 SETTINGS_FILE = "enoshima.json"
 
@@ -95,6 +103,7 @@ class Settings:
     influx: InfluxSettings | None = None
     selection: SelectionSettings = field(default_factory=SelectionSettings)
     walk_forward: WalkForwardSettings = field(default_factory=WalkForwardSettings)
+    weekly: WeeklySettings = field(default_factory=WeeklySettings)
 
     def __post_init__(self):
         if not isinstance(logging.getLevelName(self.strategy_log_level), int):
@@ -124,7 +133,8 @@ def load_settings(work_dir: str | Path) -> Settings:
         influx = InfluxSettings(**influx)
 
     sections = {}
-    for name, cls in (("selection", SelectionSettings), ("walk_forward", WalkForwardSettings)):
+    for name, cls in (("selection", SelectionSettings), ("walk_forward", WalkForwardSettings),
+                      ("weekly", WeeklySettings)):
         section = data.pop(name, None)
         if section is None:
             section = cls()
