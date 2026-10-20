@@ -18,7 +18,7 @@ from hase.bronze import DataType
 from hase.layout import data_path
 from qate.util.dt_range import DtRange
 from qate_env.env import Env
-from test_run_end_to_end import ENV_NAME, EXAMPLE_ROOT, MARKET, MemoryStore
+from test_run_end_to_end import ENV_NAME, EXAMPLE_ROOT, FEES, MARKET, MemoryStore
 
 from enoshima import run_dir, weekly
 from enoshima.eval import SLIPPAGE_05, SLIPPAGE_10
@@ -83,7 +83,7 @@ def weeks_range(first: Week, last: Week) -> DtRange:
 
 
 def run(env: Env, dt_range: DtRange, **kwargs) -> Runner:
-    runner = Runner(env, dt_range, chunk_days=2, weekly=WeeklySettings(), **kwargs)
+    runner = Runner(env, dt_range, fee_rates=FEES, chunk_days=2, weekly=WeeklySettings(), **kwargs)
     runner.run()
     assert not runner.failed
     return runner
@@ -207,7 +207,7 @@ def test_a_weekly_sweep_is_selected_from_like_any_run(make_env):
     from enoshima.selection import SelectionSettings
 
     env = make_env("env")
-    runner = Runner(env, weeks_range(W02, W03), optimize="grid", chunk_days=2, weekly=WeeklySettings())
+    runner = Runner(env, weeks_range(W02, W03), optimize="grid", fee_rates=FEES, chunk_days=2, weekly=WeeklySettings())
     runner.run()
     assert not runner.failed
     [group] = best.recommend(Path(env.work_dir), runner.batch_id, SelectionSettings())
@@ -222,8 +222,8 @@ def test_the_run_id_has_no_dates_but_has_the_preload_and_overlap(make_env):
     run(env, weeks_range(W03, W03))
     assert the_run(env).name == first, "a later week goes in the same folder"
 
-    Runner(env, weeks_range(W02, W02), chunk_days=2, weekly=WeeklySettings(preload_days=0)).run()
-    Runner(env, weeks_range(W02, W02), chunk_days=2, weekly=WeeklySettings(overlap_days=0)).run()
+    Runner(env, weeks_range(W02, W02), fee_rates=FEES, chunk_days=2, weekly=WeeklySettings(preload_days=0)).run()
+    Runner(env, weeks_range(W02, W02), fee_rates=FEES, chunk_days=2, weekly=WeeklySettings(overlap_days=0)).run()
     assert len(list((Path(env.work_dir) / run_dir.RUN_LOG_DIR).iterdir())) == 3
 
 
@@ -317,7 +317,7 @@ def test_a_window_equals_one_continuous_replay_when_the_preload_holds_the_state(
 
     # One replay over the same days, its trades taken as the weeks take theirs: by open.
     continuous_env = make_env("continuous")
-    Runner(continuous_env, DtRange(W02.start, W04.dt_range.end_dt + dt.timedelta(days=1)), chunk_days=2).run()
+    Runner(continuous_env, DtRange(W02.start, W04.dt_range.end_dt + dt.timedelta(days=1)), fee_rates=FEES, chunk_days=2).run()
     [path] = run_dir.iter_complete(Path(continuous_env.work_dir))
     span = weeks_range(W02, W04)
     continuous = [t for t in run_dir.read_trades(path) if span.start_ts <= t.open_ts <= span.end_ts]
@@ -369,7 +369,7 @@ def test_summarize_reproduces_the_evaluations(make_env, monkeypatch):
         original(self, backtest)
 
     monkeypatch.setattr(Runner, "_save", save)
-    Runner(env, DtRange.from_strings("2026-01-05", "2026-01-09"), chunk_days=2).run()
+    Runner(env, DtRange.from_strings("2026-01-05", "2026-01-09"), fee_rates=FEES, chunk_days=2).run()
     [reporter] = captured
     expected = reporter.get_result()
     actual = weekly.summarize(reporter.trades, reporter.order_stats())

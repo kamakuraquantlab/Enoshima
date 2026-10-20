@@ -8,6 +8,9 @@
     "read_url": "http://localhost:8086",
     "org": null
   },
+  "fee_rates": {
+    "GMO:XRP_JPY": {"maker": 0.0, "taker": 0.0}
+  },
   "chunk_days": 2,
   "max_concurrency": 16,
   "strategy_log_level": "WARNING",
@@ -49,6 +52,11 @@ Every key is optional, and a missing file means the defaults.
   one the token sees. The token lives here rather than among the credentials
   because it is not one an outside service issued: the InfluxDB is ours, set up
   for these runs, and the env says which one it charts to.
+- `fee_rates` is what each market charges a fill, as a fraction of notional
+  (a negative maker rate is a rebate). Every market the strategy trades needs
+  one, zero written out, or the run is refused before it starts: a backtest
+  installs no venue package, so this is the only place a rate can come from.
+  Non-zero rates are part of a run's id. See `enoshima.fees`.
 - `chunk_days` is how many days are loaded at once (memory).
 - `max_concurrency` is how many parameter sets share one pass over the data.
 - `strategy_log_level` is the level of the strategy's own loggers -- its
@@ -80,6 +88,9 @@ import logging
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
+from qate.exchange import FeeSchedule
+
+from . import fees
 from .data_source import DEFAULT_CHUNK_DAYS
 from .post_analysis.walk_forward import WalkForwardSettings
 from .runner import MAX_CONCURRENCY
@@ -103,6 +114,7 @@ class Settings:
     max_concurrency: int = MAX_CONCURRENCY
     strategy_log_level: str = "WARNING"
     influx: InfluxSettings | None = None
+    fee_rates: dict[str, FeeSchedule] = field(default_factory=dict)
     selection: SelectionSettings = field(default_factory=SelectionSettings)
     walk_forward: WalkForwardSettings = field(default_factory=WalkForwardSettings)
     weekly: WeeklySettings = field(default_factory=WeeklySettings)
@@ -134,6 +146,8 @@ def load_settings(work_dir: str | Path) -> Settings:
         _check_keys(influx, InfluxSettings, f'"influx" in {path}')
         influx = InfluxSettings(**influx)
 
+    fee_rates = fees.parse(data.pop("fee_rates", {}), str(path))
+
     sections = {}
     for name, cls in (("selection", SelectionSettings), ("walk_forward", WalkForwardSettings),
                       ("weekly", WeeklySettings)):
@@ -146,4 +160,4 @@ def load_settings(work_dir: str | Path) -> Settings:
             _check_keys(section, cls, f'"{name}" in {path}')
             section = cls(**section)
         sections[name] = section
-    return Settings(**data, influx=influx, **sections)
+    return Settings(**data, influx=influx, fee_rates=fee_rates, **sections)

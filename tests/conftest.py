@@ -8,6 +8,7 @@ replay whatever happens to be in the real data lake.
 
 import pytest
 from komachi import settings
+from qate.exchange import registry
 
 
 @pytest.fixture(autouse=True)
@@ -17,3 +18,10 @@ def data_root(tmp_path, monkeypatch):
     env_file.write_text(f"ROOT_PATH={root}\n")
     monkeypatch.setattr(settings, "ENV_FILE", env_file)
     return root
+
+
+@pytest.fixture(autouse=True)
+def exchange_registry(monkeypatch):
+    """No installed venue plugin, and no rate a run registers outliving its test."""
+    monkeypatch.setattr(registry, "_discovered", True)
+    monkeypatch.setattr(registry, "_ADAPTERS", {})

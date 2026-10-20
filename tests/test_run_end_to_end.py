@@ -27,6 +27,7 @@ from hase.bronze import DataType
 from hase.layout import data_path
 from qate.core.model import ExchangeName, Market
 from qate.core.symbol import Symbol
+from qate.exchange import FeeSchedule
 from qate.util.dt_range import DtRange
 from qate_env.env import Env
 from qate_env.env_name import EnvName
@@ -40,6 +41,8 @@ from enoshima.weekly import WeeklySettings
 EXAMPLE_ROOT = Path(__file__).resolve().parent.parent / "example"
 ENV_NAME = EnvName("EXAMPLE_BACKTEST")
 MARKET = Market(ExchangeName.COINCHECK, Symbol.BTC_SPOT)
+# What the example env's enoshima.json states: Coincheck charges nothing.
+FEES = {MARKET.id: FeeSchedule(maker=0.0, taker=0.0)}
 DATE = "2026-01-02"
 DEPTH = 3
 SPREAD = 1000.0
@@ -118,7 +121,7 @@ def run_env(tmp_path, data_root, monkeypatch):
 def test_a_run_trades_and_writes_its_results(run_env):
     env, dt_range = run_env
 
-    runner = Runner(env, dt_range, chunk_days=1)
+    runner = Runner(env, dt_range, fee_rates=FEES, chunk_days=1)
     runner.run()
 
     # A run log per parameter set, holding the provenance of the numbers.
@@ -194,7 +197,7 @@ class MemoryStore:
 def test_a_run_without_influx_still_has_its_result(run_env):
     """InfluxDB is optional: the result is computed from the reporters every run has."""
     env, dt_range = run_env
-    Runner(env, dt_range, chunk_days=1).run()
+    Runner(env, dt_range, fee_rates=FEES, chunk_days=1).run()
 
     log = load(run_dirs(env)[0])
     assert log["result"]["pnl_cnt0"] >= 1
@@ -204,7 +207,7 @@ def test_a_run_without_influx_still_has_its_result(run_env):
 def test_influx_records_orders_pnl_and_evaluations(run_env):
     env, dt_range = run_env
     store = MemoryStore()
-    runner = Runner(env, dt_range, chunk_days=1, influx=store)
+    runner = Runner(env, dt_range, fee_rates=FEES, chunk_days=1, influx=store)
     runner.run()
 
     log = load(run_dirs(env)[0])
@@ -239,10 +242,10 @@ def test_influx_records_orders_pnl_and_evaluations(run_env):
 def test_a_skipped_parameter_set_opens_no_bucket(run_env):
     """A resumed sweep must not touch the database for results it already has."""
     env, dt_range = run_env
-    Runner(env, dt_range, chunk_days=1).run()
+    Runner(env, dt_range, fee_rates=FEES, chunk_days=1).run()
 
     store = MemoryStore()
-    Runner(env, dt_range, chunk_days=1, influx=store).run()
+    Runner(env, dt_range, fee_rates=FEES, chunk_days=1, influx=store).run()
     assert store.writers == []
 
 
@@ -250,11 +253,11 @@ def test_a_second_identical_run_is_skipped(run_env):
     """The deterministic run-log id is what makes an interrupted sweep resumable."""
     env, dt_range = run_env
 
-    Runner(env, dt_range, chunk_days=1).run()
+    Runner(env, dt_range, fee_rates=FEES, chunk_days=1).run()
     [log_path] = run_dirs(env)
     first = load(log_path)
 
-    Runner(env, dt_range, chunk_days=1).run()
+    Runner(env, dt_range, fee_rates=FEES, chunk_days=1).run()
     # Same identity, so no second log, and the first was not rewritten.
     assert run_dirs(env) == [log_path]
     assert load(log_path)["start_ts"] == first["start_ts"]
@@ -263,11 +266,11 @@ def test_a_second_identical_run_is_skipped(run_env):
 def test_a_forced_rerun_writes_a_bucket_of_its_own_and_replaces_the_folder(run_env):
     """Re-running must not write on top of the earlier run's points; the folder is the run's id, so it is replaced."""
     env, dt_range = run_env
-    first = Runner(env, dt_range, chunk_days=1, influx=MemoryStore())
+    first = Runner(env, dt_range, fee_rates=FEES, chunk_days=1, influx=MemoryStore())
     first.run()
 
     store = MemoryStore()
-    second = Runner(env, dt_range, chunk_days=1, influx=store, force=True)
+    second = Runner(env, dt_range, fee_rates=FEES, chunk_days=1, influx=store, force=True)
     second.run()
 
     [writer] = store.writers
@@ -280,17 +283,17 @@ def test_a_forced_rerun_writes_a_bucket_of_its_own_and_replaces_the_folder(run_e
 def test_force_reruns_a_completed_parameter_set(run_env):
     env, dt_range = run_env
 
-    Runner(env, dt_range, chunk_days=1).run()
+    Runner(env, dt_range, fee_rates=FEES, chunk_days=1).run()
     [log_path] = run_dirs(env)
     first = load(log_path)
 
-    Runner(env, dt_range, chunk_days=1, force=True).run()
+    Runner(env, dt_range, fee_rates=FEES, chunk_days=1, force=True).run()
     assert load(log_path)["start_ts"] > first["start_ts"]
 
 
 def weekly_sweep(env, dt_range, **kwargs) -> Runner:
     # The data is one day, so there is no day after it to overlap; see `test_weekly` for the overlap.
-    runner = Runner(env, dt_range, optimize="grid", chunk_days=1, weekly=WeeklySettings(overlap_days=0), **kwargs)
+    runner = Runner(env, dt_range, optimize="grid", fee_rates=FEES, chunk_days=1, weekly=WeeklySettings(overlap_days=0), **kwargs)
     runner.run()
     return runner
 
@@ -300,7 +303,7 @@ def test_a_run_does_not_choose_and_select_chooses_from_weekly_runs_only(run_env)
     root = Path(env.work_dir)
 
     # A sweep without --weekly is a quick look: its results, and no recommendation.
-    Runner(env, dt_range, optimize="grid", chunk_days=1).run()
+    Runner(env, dt_range, optimize="grid", fee_rates=FEES, chunk_days=1).run()
     assert not (root / "best_result").exists(), "a run writes results; it does not choose"
     assert all(load(p)["is_temporary_run"] for p in run_dirs(env))
     assert best.recommend(root, 1, SelectionSettings()) == []
@@ -343,11 +346,11 @@ def test_a_sweep_in_several_batches_gets_the_same_results_as_one(run_env, tmp_pa
     """Between batches the data source is rewound while a chunk may be loading ahead."""
     env, dt_range = run_env
 
-    Runner(env, dt_range, optimize="grid", chunk_days=1, max_concurrency=6).run()
+    Runner(env, dt_range, optimize="grid", fee_rates=FEES, chunk_days=1, max_concurrency=6).run()
     one_batch = {p.name: load(p)["result"] for p in run_dirs(env)}
 
     shutil.rmtree(Path(env.work_dir) / "run_log")
-    Runner(env, dt_range, optimize="grid", chunk_days=1, max_concurrency=4).run()
+    Runner(env, dt_range, optimize="grid", fee_rates=FEES, chunk_days=1, max_concurrency=4).run()
     two_batches = {p.name: load(p)["result"] for p in run_dirs(env)}
 
     assert len(one_batch) == 6
@@ -377,7 +380,7 @@ def test_a_backtest_that_raises_fails_without_stopping_the_others(run_env, monke
 
     monkeypatch.setattr(Variant, "handle_order_book", flaky)
 
-    runner = Runner(env, dt_range, optimize="grid", chunk_days=1)
+    runner = Runner(env, dt_range, optimize="grid", fee_rates=FEES, chunk_days=1)
     runner.run()   # must return: a hang here is the deadlock
 
     logs = [load(p) for p in run_dirs(env)]
@@ -419,7 +422,7 @@ def test_a_backtest_never_reloads_parameters(run_env, monkeypatch):
     offered = []
     monkeypatch.setattr(Strategy, "update_params", lambda self, new: offered.append(new) or False)
 
-    Runner(env, dt_range, optimize="grid", chunk_days=1).run()
+    Runner(env, dt_range, optimize="grid", fee_rates=FEES, chunk_days=1).run()
 
     assert len(run_dirs(env)) == 6
     assert offered == [], "a backtest tried to reload a strategy's parameters"
@@ -428,7 +431,7 @@ def test_a_backtest_never_reloads_parameters(run_env, monkeypatch):
 def test_a_single_run_uses_the_grid_defaults(run_env):
     env, dt_range = run_env
 
-    runner = Runner(env, dt_range, chunk_days=1)
+    runner = Runner(env, dt_range, fee_rates=FEES, chunk_days=1)
     assert runner.param_sets() == [{"fast_period": 20, "slow_period": 120}]
 
 
@@ -436,7 +439,7 @@ def test_optimize_still_reads_the_grid(run_env):
     """Optimization expands every value in the same definition."""
     env, dt_range = run_env
 
-    runner = Runner(env, dt_range, optimize="grid", chunk_days=1)
+    runner = Runner(env, dt_range, optimize="grid", fee_rates=FEES, chunk_days=1)
     combos = runner.param_sets()
     assert len(combos) == 6
 
@@ -446,7 +449,7 @@ def test_an_env_needs_no_desc_json(run_env):
     env, dt_range = run_env
     assert not (Path(env.work_dir) / "desc.json").exists()
 
-    runner = Runner(env, dt_range, chunk_days=1)
+    runner = Runner(env, dt_range, fee_rates=FEES, chunk_days=1)
     runner.run()
     assert run_dirs(env)
 
@@ -454,7 +457,7 @@ def test_an_env_needs_no_desc_json(run_env):
 def test_a_run_log_records_the_config_that_produced_it(run_env):
     """Provenance: a result you cannot attribute to a configuration is not a result."""
     env, dt_range = run_env
-    Runner(env, dt_range, chunk_days=1).run()
+    Runner(env, dt_range, fee_rates=FEES, chunk_days=1).run()
 
     log = load(run_dirs(env)[0])
     assert log["env"] == str(ENV_NAME)
@@ -468,7 +471,7 @@ def test_a_range_with_no_data_is_reported_not_silently_empty(run_env, caplog):
     env, _ = run_env
     empty_range = DtRange.from_strings("20260201", "20260202")
 
-    runner = Runner(env, empty_range, chunk_days=1)
+    runner = Runner(env, empty_range, fee_rates=FEES, chunk_days=1)
     with caplog.at_level("WARNING"):
         runner.run()
 

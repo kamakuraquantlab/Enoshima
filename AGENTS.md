@@ -179,6 +179,13 @@ but it is easy to break from here:
   change to the strategy must be a new folder, or a weekly run would stitch
   weeks of two versions together; `best.group` ranks one revision at a time.
   `meta.json`'s `git_rev` is `qate_env`'s own and says nothing about the strategy.
+- **A backtest's fee rates are `enoshima.json`'s `fee_rates`** (`fees`). qate
+  reads a rate off the market's `ExchangeAdapter`, which only a venue package
+  registers, and a backtest installs none -- so every fill was once costed at
+  zero, with a warning per tracker as the only sign. `fees.register` gives qate
+  fee-only adapters; a traded market without a rate refuses the run. Non-zero
+  rates are in the run id, zero ones are not, so stating a zero kept every
+  earlier folder. Do not fill the gap by depending on a venue package.
 - **Extra slippage is charged at the close, on both legs** (`Evaluation`),
   the open leg on `open_cost`, as qate defers the open's fee. Charged at the
   open, a position opened in warmup lost that leg's cost.

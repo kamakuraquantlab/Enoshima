@@ -105,6 +105,7 @@ def cmd_run(args) -> int:
             force=args.force,
             influx=influx,
             weekly=settings.weekly if args.weekly else None,
+            fee_rates=settings.fee_rates,
         )
         quiet_strategy_logs(runner.definition.module_name, settings.strategy_log_level)
         runner.run()

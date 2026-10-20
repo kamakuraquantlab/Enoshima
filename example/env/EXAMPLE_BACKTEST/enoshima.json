@@ -1,0 +1,5 @@
+{
+  "fee_rates": {
+    "COINCHECK:BTC_SPOT": {"maker": 0.0, "taker": 0.0}
+  }
+}

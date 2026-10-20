@@ -105,10 +105,28 @@ silently change what a run does.
 | `weekly` | `preload_days`, `overlap_days` (1 and 1) | [01_weekly_run.md](01_weekly_run.md) |
 | `selection` | how `select` filters, scores, smooths and groups | [02_selection.md](02_selection.md) |
 | `walk_forward` | the rules `walk-forward` tests, and `--train`'s settings | [03_walk_forward.md](03_walk_forward.md) |
+| `fee_rates` | what each traded market charges, by market id; a traded market without one refuses the run | below |
 | `influx` | record orders, PnL and bars to InfluxDB; absent means record nothing | below |
 | `chunk_days` | days loaded at once (2); `--chunk-days` overrides it | memory |
 | `max_concurrency` | parameter sets sharing one pass over the data (16); `--max-concurrency` overrides it | speed |
 | `strategy_log_level` | level of the strategy's and `qate.trading`'s loggers during a run (`WARNING`) | `"INFO"` to debug |
+
+### Fee rates
+
+qate costs a fill with its market's rate, which normally comes from the venue
+package that also connects to the exchange. A backtest installs no such package,
+so the env states the rates itself:
+
+```json
+"fee_rates": {"GMO:XRP_JPY": {"maker": 0.0, "taker": 0.0}}
+```
+
+A rate is a fraction of notional, and a negative maker rate is a rebate. Every
+market the strategy trades (a market on one of the config's `get_exchanges()`)
+needs a rate, zero written out, or the run is refused before anything is
+replayed. A market read only for its data, such as a reference price on another
+venue, needs none. Non-zero rates are part of the run's id. A zero rate is not,
+so stating one keeps the folders of runs made before rates were stated.
 
 ## Two kinds of run
 

@@ -10,7 +10,8 @@ re-run. The numbers themselves are beside it in the run's folder; see
 
 The id is a hash of everything that decides what a run computes: the
 environment, the strategy and variant, the revision of the strategy's code
-(`strategy_env.strategy_rev`), the parameter set, and the date range.
+(`strategy_env.strategy_rev`), the parameter set, the non-zero fee rates of
+the markets it trades (`fees.identity`), and the date range.
 Two runs that would compute the same thing therefore have the same id -- the
 name of their folder -- so `Runner` can see that a result already exists and
 skip it. An optimize sweep over
@@ -39,6 +40,9 @@ from qate.util.encoder import Encoder
 from qate_env.env import Env
 from qate_env.run_log import RunLog
 
+from qate.exchange import FeeSchedule
+
+from . import fees
 from .weekly import Week, WeeklySettings
 
 
@@ -55,6 +59,7 @@ class BacktestLog(RunLog):
         weekly: WeeklySettings | None = None,
         week_key: str | None = None,
         strategy_rev: str | None = None,
+        fee_rates: dict[str, FeeSchedule] | None = None,
     ):
         # config and profile go to RunLog, which records them: they are the
         # provenance of the result, and a run log without them cannot say which
@@ -63,6 +68,7 @@ class BacktestLog(RunLog):
         self.dt_range = dt_range
         self.strategy_name = strategy_name
         self.strategy_rev = strategy_rev
+        self.fee_rates = fee_rates or {}
         self.batch_id = batch_id
         self.param_set_id = None
         self.influx_bucket = None
@@ -86,6 +92,10 @@ class BacktestLog(RunLog):
             "strategy_rev": self.strategy_rev,
             "params": self.params,
         }
+        # Only when one is non-zero: a zero rate computes what a run made before
+        # rates were stated, and must keep that run's folder.
+        if charged := fees.identity(self.fee_rates):
+            identity["fee_rates"] = charged
         if self.week_key is None:
             identity.update({"start": self.dt_range.start_str, "end": self.dt_range.end_str})
         else:
@@ -102,6 +112,7 @@ class BacktestLog(RunLog):
                 "params": self.params,
                 "strategy": self.strategy_name,
                 "strategy_rev": self.strategy_rev,
+                "fee_rates": fees.to_json(self.fee_rates),
                 "start_str": self.dt_range.start_str,
                 "end_str": self.dt_range.end_str,
                 "influx_bucket": self.influx_bucket,

@@ -60,7 +60,9 @@ from qate.trading.param import ParamGrid
 from qate.util.dt_range import DtRange
 from qate_env.env import Env
 
-from . import param_id, run_dir
+from qate.exchange import FeeSchedule
+
+from . import fees, param_id, run_dir
 from . import weekly as weekly_mod
 from .backtest import Backtest
 from .data_source import DEFAULT_CHUNK_DAYS, DataSource, Stream, market_data_event_types
@@ -102,8 +104,12 @@ class Runner:
         force: bool = False,
         influx: InfluxdbStore | None = None,
         weekly: WeeklySettings | None = None,
+        fee_rates: dict[str, FeeSchedule] | None = None,
     ):
         """`influx` is an `influx.InfluxdbStore`, or None to record no metric stream.
+
+        `fee_rates` is `enoshima.json`'s, by market id. Every market the strategy
+        trades must have one, or this raises before anything is replayed; see `fees`.
 
         `weekly`, given, makes this a strict weekly run: `dt_range` is widened
         to the weeks that cover it, and `weeks` lists them.
@@ -130,6 +136,8 @@ class Runner:
         self.config = strategy_env.config
         # Part of every run's id: a commit to the strategy is a new folder.
         self.strategy_rev = strategy_rev(self.definition.module_name)
+        self.fee_rates = fees.check(fee_rates or {}, self.config)
+        fees.register(self.fee_rates)
 
     @staticmethod
     def _next_batch_id(output_root: Path) -> int:
@@ -253,6 +261,7 @@ class Runner:
             weekly=self.weekly if week else None,
             week_key=week.key if week else None,
             strategy_rev=self.strategy_rev,
+            fee_rates=self.fee_rates,
         )
 
     def _run_range(
