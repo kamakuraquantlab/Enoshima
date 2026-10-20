@@ -205,6 +205,15 @@ also replays the weeks between those on disk and those asked for: weeks 1-10
 on disk and week 30 asked for replays 11-30. A root whose weeks have a gap --
 a week that failed -- has no `summary.json` until a run fills it.
 
+That an extended run is the run made at once is held by `tests/test_weekly.py`
+on synthetic data, and checked on yours by `tools/weekly_consistency.py`: it
+copies an env twice, runs one copy in two steps and the other in one, and
+compares every trade and figure of the two, point to point.
+
+```bash
+python tools/weekly_consistency.py --env NAME --from 2026-09-07 --split 2026-09-21 --to 2026-10-04
+```
+
 ## The strategy's revision is part of every run's id
 
 A run's numbers come from the strategy's code as much as from its parameters,
