@@ -64,8 +64,15 @@ def test_only_complete_jst_hours_count():
     assert wf.complete_hours(partial.start_ts, partial.end_ts) == (at("2026-01-01", 10), at("2026-01-31", 12))
 
 
-def test_an_expanding_rule_takes_one_history_and_combinations_are_unique():
-    got = wf.rules(["expanding", "rolling"], ["1m", "3m"], ["1w", "never"])
+def test_each_history_takes_its_own_intervals():
+    got = wf.rules(["rolling"], {"3d": ["4h", "1d"], "2m": ["1w"]})
+    assert [r.key for r in got] == ["rolling_3d_4h", "rolling_3d_1d", "rolling_2m_1w"]
+    assert wf.default_test_from(at("2026-01-01"), got) == at("2026-03-01")
+    assert wf.default_test_from(at("2026-01-01"), got, earliest=True) == at("2026-01-04")
+
+
+def test_on_common_hours_an_expanding_rule_takes_one_history_and_combinations_are_unique():
+    got = wf.on_common_hours(wf.rules(["expanding", "rolling"], {"1m": ["1w", "never"], "3m": ["1w", "never"]}))
     assert [r.label for r in got] == ["expanding, every 1w", "expanding, once",
                                       "rolling 1m, every 1w", "rolling 1m, once",
                                       "rolling 3m, every 1w", "rolling 3m, once"]
@@ -160,7 +167,7 @@ def test_the_command_writes_every_group_and_rule_and_the_sums(tmp_path):
     for mode, box, pnl in [("a", 1, 1.0), ("a", 2, 2.0), ("b", 1, 3.0), ("b", 2, -1.0)]:
         write_run(tmp_path, f"{mode}{box}", {"mode": mode, "box": box}, {d: [pnl] for d in days("2026-01-01", 21)})
 
-    rule_list = wf.rules(["expanding"], ["1w"], ["1w", "never"])
+    rule_list = wf.rules(["expanding"], {"1w": ["1w", "never"]})
     path = wf.run(tmp_path, rule_list, SelectionSettings(neighbors=False), sum_names=[["a", "b"]])
     report = json.loads(path.read_text())
     assert path.parent.name == "post_analysis" and path.with_suffix(".txt").is_file()
@@ -201,9 +208,9 @@ def regime_runs() -> list[dict]:
 def test_training_chooses_a_rule_every_month_against_the_baseline():
     runs = regime_runs()
     settings = SelectionSettings(score="pnl5", neighbors=False, positive_pnl10=False)
-    rule_list = wf.rules(["rolling"], ["12h", "48h"], ["12h", "24h"])
-    s = wf.WalkForwardSettings(window=["rolling"], history=["12h", "48h"], every=["12h", "24h"],
+    s = wf.WalkForwardSettings(window=["rolling"], history={"12h": ["12h", "24h"], "48h": ["12h", "24h"]},
                                train_history="2w", retrain="2w", resamples=500)
+    rule_list = s.rules()
     first, stop = at("2026-01-01"), at("2026-03-02")
     inner_from = wf.default_test_from(first, rule_list)
     got = wf.train(runs, {}, settings, s, rule_list, {"x": 1}, first, stop, inner_from)
@@ -231,9 +238,57 @@ def test_training_chooses_a_rule_every_month_against_the_baseline():
     assert {r["series"] for r in got["curve"]} == {"trained", "baseline", "hindsight", *(r.key for r in rule_list)}
 
 
+def test_training_starts_each_rule_on_its_own_history_and_ranks_those_that_traded_the_window():
+    runs = regime_runs()
+    settings = SelectionSettings(score="pnl5", neighbors=False, positive_pnl10=False)
+    s = wf.WalkForwardSettings(window=["rolling"], history={"1d": ["12h"], "2w": ["1d"]}, train_window="rolling",
+                               train_history="1w", retrain="1w", resamples=200)
+    rule_list = s.rules()
+    first, stop = at("2026-01-01"), at("2026-03-02")
+    got = wf.train(runs, {}, settings, s, rule_list, {"x": 1}, first, stop,
+                   wf.default_test_from(first, rule_list, earliest=True))
+
+    # The one-day rule is tested from 01-02 and trained on from 01-09; the two-week one from 01-15.
+    assert {r["key"]: r["from"] for r in got["meta"]["rules"]} == {"rolling_1d_12h": "2026-01-02 00:00",
+                                                                  "rolling_2w_1d": "2026-01-15 00:00"}
+    assert got["meta"]["test"] == ["2026-01-09 00:00", "2026-03-02 00:00"]
+    ranked = [{r["key"] for r in f["ranking"]} for f in got["folds"]]
+    # Until the two-week rule has a week of its own, it is not ranked.
+    assert ranked[:2] == [{"rolling_1d_12h", "baseline"}] * 2
+    assert all(k == {"rolling_1d_12h", "rolling_2w_1d", "baseline"} for k in ranked[2:])
+    assert [f["train"] for f in got["folds"][:3]] == [["2026-01-02 00:00", "2026-01-09 00:00"],
+                                                      ["2026-01-09 00:00", "2026-01-16 00:00"],
+                                                      ["2026-01-16 00:00", "2026-01-23 00:00"]]
+
+    # Each run of the group held, against each rule switching, over that rule's own test hours.
+    against = got["runs"]
+    assert set(against["runs"]) == {"up", "down"}
+    for rule in against["rules"]:
+        a = at(rule["from"].split()[0])
+        assert rule["pnl5"] == pytest.approx(sum(c["pnl5"] for c in got["curve"] if c["series"] == rule["key"]))
+        for r in runs:
+            assert against["runs"][r["run_id"]]["rules"][rule["key"]]["pnl5"] == pytest.approx(
+                r["series"].stats(a, stop)["pnl5"])
+    assert against["best"] == max(against["rules"], key=lambda r: r["pnl5"])["key"]
+    # A rule's curve starts where it does.
+    assert min(c["ts"] for c in got["curve"] if c["series"] == "rolling_2w_1d") >= at("2026-01-15").timestamp()
+
+
+def test_an_expanding_training_window_starts_with_its_latest_candidate():
+    runs = regime_runs()
+    s = wf.WalkForwardSettings(window=["rolling"], history={"1d": ["12h"], "2w": ["1d"]}, train_history="1w",
+                               retrain="1w", resamples=200)
+    rule_list = s.rules()
+    first, stop = at("2026-01-01"), at("2026-02-15")
+    got = wf.train(runs, {}, SelectionSettings(score="pnl5", neighbors=False, positive_pnl10=False), s, rule_list,
+                   {"x": 1}, first, stop, wf.default_test_from(first, rule_list, earliest=True))
+    assert [f["train"][0] for f in got["folds"]] == ["2026-01-02 00:00", "2026-01-02 00:00",
+                                                     *["2026-01-15 00:00"] * (len(got["folds"]) - 2)]
+
+
 def test_a_training_fold_where_no_rule_passes_trades_the_baseline():
     losing = run("l", {"x": 1}, {d: [-1.0] for d in days("2026-01-01", 30)})
-    s = wf.WalkForwardSettings(window=["rolling"], history=["1d"], every=["1d"], train_history="1w", retrain="1w")
+    s = wf.WalkForwardSettings(window=["rolling"], history={"1d": ["1d"]}, train_history="1w", retrain="1w")
     rule_list = s.rules()
     first, stop = at("2026-01-01"), at("2026-01-31")
     got = wf.train([losing], {}, SelectionSettings(neighbors=False), s, rule_list, {"x": 1}, first, stop,
@@ -244,7 +299,7 @@ def test_a_training_fold_where_no_rule_passes_trades_the_baseline():
 
 def test_without_a_default_run_the_baseline_is_chosen_once():
     runs = regime_runs()
-    s = wf.WalkForwardSettings(window=["rolling"], history=["12h"], every=["24h"], train_history="1w", retrain="1w")
+    s = wf.WalkForwardSettings(window=["rolling"], history={"12h": ["24h"]}, train_history="1w", retrain="1w")
     got = wf.train(runs, {}, SelectionSettings(score="pnl5", neighbors=False, positive_pnl10=False), s,
                    s.rules(), {"x": 99}, at("2026-01-01"), at("2026-01-31"), at("2026-01-02"))
     assert got["meta"]["baseline"]["kind"] == "once" and got["meta"]["baseline"]["run_id"] in ("up", "down")
@@ -253,7 +308,7 @@ def test_without_a_default_run_the_baseline_is_chosen_once():
 def test_the_train_command_writes_a_folder_per_group(tmp_path):
     for mode, box, pnl in [("a", 1, 1.0), ("a", 2, 2.0), ("b", 1, 3.0), ("b", 2, -1.0)]:
         write_run(tmp_path, f"{mode}{box}", {"mode": mode, "box": box}, {d: [pnl] for d in days("2026-01-01", 21)})
-    s = wf.WalkForwardSettings(window=["expanding"], history=["2d"], every=["1d", "never"],
+    s = wf.WalkForwardSettings(window=["expanding"], history={"2d": ["1d", "never"]},
                                train_history="3d", retrain="1w", resamples=200)
     paths = wf.run_train(tmp_path, s, SelectionSettings(neighbors=False), {"mode": "a", "box": 1})
     assert len(paths) == 2 and all(p.parent == tmp_path / "post_analysis" / "train" for p in paths)
@@ -279,11 +334,12 @@ def test_the_train_command_writes_a_folder_per_group(tmp_path):
 
 def test_walk_forward_settings_come_from_the_env_file(tmp_path):
     assert load_settings(tmp_path).walk_forward == wf.WalkForwardSettings()
-    (tmp_path / "enoshima.json").write_text(json.dumps({"walk_forward": {"history": ["24h"], "every": ["4h"]}}))
+    (tmp_path / "enoshima.json").write_text(json.dumps({"walk_forward": {"history": {"24h": ["4h"]}}}))
     got = load_settings(tmp_path).walk_forward
     assert [r.label for r in got.rules()] == ["expanding, every 4h"]
-    for bad in ({"histroy": ["1d"]}, {"every": "4h"}, {"retrain": "1y"}, {"baseline": "best"},
-                {"window": ["rolling"], "history": ["1m", "30d"]}):
+    for bad in ({"histroy": {"1d": ["1d"]}}, {"every": ["4h"]}, {"history": ["1d"]}, {"history": {"1d": []}},
+                {"history": {"1d": "4h"}}, {"retrain": "1y"}, {"baseline": "best"},
+                {"window": ["rolling"], "history": {"1m": ["1d"], "30d": ["1d"]}}):
         (tmp_path / "enoshima.json").write_text(json.dumps({"walk_forward": bad}))
         with pytest.raises(ValueError):
             load_settings(tmp_path)

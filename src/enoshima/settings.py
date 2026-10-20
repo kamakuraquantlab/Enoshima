@@ -25,8 +25,7 @@
   },
   "walk_forward": {
     "window": ["expanding"],
-    "history": ["6m"],
-    "every": ["1m", "never"],
+    "history": {"6m": ["1m", "never"]},
     "test_from": null,
     "train_window": "expanding",
     "train_history": "1m",
@@ -56,7 +55,8 @@ Every key is optional, and a missing file means the defaults.
 - `selection` is how `--optimize` chooses: filters, the score, grid-neighbour
   smoothing and the walk-forward window. See `enoshima.selection`.
 - `walk_forward` is what `enoshima walk-forward` tries: the rules (window,
-  history, reselection interval, in hours, days, weeks or months), and for
+  and each history with its own reselection intervals, in hours, days, weeks
+  or months), and for
   `--train` how often a rule is chosen again, on how much history, against
   which baseline. See `enoshima.post_analysis.walk_forward`.
 

@@ -227,8 +227,7 @@ optional, and a missing file means the defaults:
   },
   "walk_forward": {
     "window": ["expanding"],
-    "history": ["6m"],
-    "every": ["1m", "never"],
+    "history": {"6m": ["1m", "never"]},
     "test_from": null,
     "train_window": "expanding",
     "train_history": "1m",
@@ -344,7 +343,9 @@ folders on disk, replaying nothing -- after changing the rule, for instance.
 The walk-forward above has parameters of its own -- the window, how much
 history, how often it chooses again -- and `enoshima walk-forward` tests them,
 from the same run folders, to the hour. The rules are `enoshima.json`'s
-`"walk_forward"`: every combination of its `window`, `history` and `every`.
+`"walk_forward"`: each `window` with each `history` and that history's own
+reselection intervals -- `"history": {"3d": ["4h", "1d"], "2m": ["1w", "1m"]}` --
+since an interval that suits three days of history is noise on two months.
 
 ```bash
 enoshima walk-forward --env NAME --sum A+B
@@ -375,7 +376,10 @@ enoshima walk-forward --env NAME --train
 `retrain` (a month by default) it ranks the rules on how they did out of sample
 over the `train_history` before -- with `selection.rank`, a rule's history and
 interval in hours being its grid axes -- and trades the winner until the next
-retraining. One candidate is always **no switching**: the parameter set of the
+retraining. Each rule starts as soon as its own history allows, so a
+three-day rule is not held back by a two-month one; a retraining ranks the
+rules that traded the whole of its window, and longer ones join as they do.
+One candidate is always **no switching**: the parameter set of the
 grid's `default_value`s (with the group's own values for grouped parameters),
 held throughout; `"baseline": "once"`, or a default set that was never run,
 means the set chosen once at the start of the test instead. A retraining where
@@ -454,3 +458,6 @@ results on disk, which is the test to read first and to keep passing.
 ## Licence
 
 Apache 2.0. See [LICENSE.md](LICENSE.md).
+[doc/walk_forward.md](doc/walk_forward.md) collects the idea, the settings,
+the training's files and how to read them.
+

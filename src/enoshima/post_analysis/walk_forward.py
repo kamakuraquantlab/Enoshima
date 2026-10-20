@@ -12,6 +12,10 @@ done better. A rule is
 - `every`: how often the choice is made again -- `"4h"`, `"1d"`, `"1m"` -- or
   `"never"`, chosen once at the start of the test and held to its end.
 
+An interval only makes sense against a history -- choosing again every 4h is
+reasonable on three days of history and noise on two months -- so the
+settings list each history's own intervals, not two axes crossed.
+
 Spans are hours (`h`), JST days (`d`), weeks of seven days (`w`) or calendar
 months (`m`), and every boundary falls on a JST hour. The rules to try are
 `enoshima.json`'s `"walk_forward"` (`WalkForwardSettings`). The choice itself
@@ -45,6 +49,15 @@ rule's history and interval in hours as its grid axes -- and so is the
 that set was not run, the set chosen once at the start of the test and held
 (`"once"`). A training fold where no candidate passes trades the baseline.
 
+Unlike the table, a rule here starts as soon as its own history allows -- the
+range start plus its `history`, or `test_from` when later -- not when the
+longest rule's does, so a three-day rule is not held back two months by a
+two-month one. The test starts `train_history` after the earliest rule. A
+retraining ranks only the rules that traded the whole of its window, and a
+rule with a longer history joins once it has; an expanding `train_window`
+starts at the latest of their starts, so every candidate is ranked on the same
+hours.
+
 The trained curve is one strategy, chosen without seeing its test hours, so it
 can be compared with the baseline directly: the difference of their daily
 pnl5 is tested with a moving-block bootstrap (blocks of `block_days`, since a
@@ -59,7 +72,6 @@ whole or not at all, to be charted.
 import calendar
 import csv
 import datetime as dt
-import itertools
 import json
 import math
 import os
@@ -171,36 +183,51 @@ class Rule:
                 "every_h": None if self.every == NEVER else span_hours(self.every)}
 
 
-def rules(windows: list[str], histories: list[str], everies: list[str]) -> list[Rule]:
-    """Every combination, once: an expanding window's history changes nothing once `test_from` is
-    fixed, so it takes the longest."""
-    longest = max(histories, key=lambda h: advance(dt.datetime(2000, 1, 1, tzinfo=JST), parse_span(h)))
+def rules(windows: list[str], histories: dict[str, list[str]]) -> list[Rule]:
+    """Every window with every history and each of that history's intervals."""
+    return [Rule(w, h, e) for w in windows for h, everies in histories.items() for e in everies]
+
+
+def on_common_hours(rule_list: list[Rule]) -> list[Rule]:
+    """The rules as the table tests them, from one `test_from`: there an expanding window's history
+    changes nothing, so it takes the longest, and rules that differ only in it are one."""
+    if not rule_list:
+        return []
+    longest = max((r.history for r in rule_list), key=lambda h: advance(dt.datetime(2000, 1, 1, tzinfo=JST),
+                                                                        parse_span(h)))
     out = []
-    for w, h, e in itertools.product(windows, histories, everies):
-        rule = Rule(w, h if w == "rolling" else longest, e)
+    for r in rule_list:
+        rule = r if r.window == "rolling" else Rule(r.window, longest, r.every)
         if rule not in out:
             out.append(rule)
     return out
 
 
-def default_test_from(first: dt.datetime, rule_list: list[Rule]) -> dt.datetime:
-    return max(advance(first, parse_span(r.history)) for r in rule_list)
+def rule_start(first: dt.datetime, rule: Rule) -> dt.datetime:
+    return advance(first, parse_span(rule.history))
+
+
+def default_test_from(first: dt.datetime, rule_list: list[Rule], earliest: bool = False) -> dt.datetime:
+    """The range start plus the longest history: every rule can be tested from there. `earliest`, the
+    shortest: where the first rule can."""
+    starts = [rule_start(first, r) for r in rule_list]
+    return min(starts) if earliest else max(starts)
 
 
 @dataclass
 class WalkForwardSettings:
     """`enoshima.json`'s `"walk_forward"`. Every key optional.
 
-    `window`, `history` and `every` are the rules to try, every combination of
-    them. `test_from` is the first test hour, by default the range start plus
-    the longest history. The rest is `--train`'s: a rule is chosen every
+    The rules to try are each `window` with each `history` and that history's
+    own intervals: `history` maps a history to its list of `every`. `test_from`
+    is the first test hour, by default the range start plus the longest
+    history. The rest is `--train`'s: a rule is chosen every
     `retrain` on the `train_history` before (`train_window` as `window` is for
     a rule), against `baseline`; `block_days` and `resamples` are the bootstrap's.
     """
 
     window: list[str] = field(default_factory=lambda: ["expanding"])
-    history: list[str] = field(default_factory=lambda: ["6m"])
-    every: list[str] = field(default_factory=lambda: ["1m", NEVER])
+    history: dict[str, list[str]] = field(default_factory=lambda: {"6m": ["1m", NEVER]})
     test_from: str | None = None
     train_window: str = "expanding"
     train_history: str = "1m"
@@ -210,10 +237,12 @@ class WalkForwardSettings:
     resamples: int = 10000
 
     def __post_init__(self):
-        for name in ("window", "history", "every"):
-            value = getattr(self, name)
-            if not (isinstance(value, list) and value and all(isinstance(v, str) for v in value)):
-                raise ValueError(f"walk_forward {name} is a non-empty list of strings")
+        if not (isinstance(self.window, list) and self.window and all(isinstance(v, str) for v in self.window)):
+            raise ValueError("walk_forward window is a non-empty list of strings")
+        if not (isinstance(self.history, dict) and self.history
+                and all(isinstance(e, list) and e and all(isinstance(v, str) for v in e)
+                        for e in self.history.values())):
+            raise ValueError('walk_forward history maps each history to its intervals, e.g. {"1w": ["1d", "3d"]}')
         seen = {}
         for rule in self.rules():
             other = seen.setdefault(tuple(sorted(rule.params.items(), key=str)), rule)
@@ -232,7 +261,7 @@ class WalkForwardSettings:
             raise ValueError("walk_forward block_days and resamples are at least 1")
 
     def rules(self) -> list[Rule]:
-        return rules(self.window, self.history, self.every)
+        return rules(self.window, self.history)
 
 
 # ------------------------------------------------------------------ a curve
@@ -407,14 +436,16 @@ def _load(root: Path) -> list[dict]:
 
 
 def _tasks(root: Path, settings: selection.SelectionSettings, rule_list: list[Rule],
-           test_from: dt.datetime | None) -> list[tuple]:
-    """`(strategy, start_str, end_str, group, members, first, stop, test_from)` for every range and group."""
+           test_from: dt.datetime | None, earliest: bool = False) -> list[tuple]:
+    """`(strategy, start_str, end_str, group, members, first, stop, test_from)` for every range and group.
+
+    `test_from` defaults to where every rule can be tested, or with `earliest` where the first can."""
     tasks = []
     for (strategy, start_str, end_str), groups in sorted(best.group(_load(root), settings.group_by).items(),
                                                          key=lambda kv: tuple(str(k) for k in kv[0])):
         dt_range = DtRange.from_strings(start_str, end_str)
         first, stop = complete_hours(dt_range.start_ts, dt_range.end_ts)
-        tf = test_from or default_test_from(first, rule_list)
+        tf = test_from or default_test_from(first, rule_list, earliest)
         if not first < tf < stop:
             LOG.warning(f"{strategy} {start_str}..{end_str}: test from {stamp(tf)} leaves no training "
                         f"or no test hours; skipped")
@@ -519,6 +550,7 @@ def _new_path(out_dir: Path, name: str, suffix: str = "") -> Path:
 def run(root: Path, rule_list: list[Rule], settings: selection.SelectionSettings,
         test_from: dt.datetime | None = None, sum_names: list[list[str]] | None = None) -> Path | None:
     """Analyse, log the table, and write `post_analysis/walk_forward_<stamp>.{json,txt}`; return the JSON's path."""
+    rule_list = on_common_hours(rule_list)
     groups = analyse(root, rule_list, settings, test_from)
     if not groups:
         return None
@@ -636,29 +668,37 @@ def train(members: list[dict], group: dict, settings: selection.SelectionSetting
           inner_from: dt.datetime) -> dict | None:
     """Choose a rule every `retrain` on the `train_history` before, against the baseline, over one group.
 
-    Returns the training as `write_training` writes it, or None when the range
-    leaves no training fold.
+    `inner_from` is the earliest any rule is tested; each starts there or at the
+    range start plus its own history, whichever is later. Returns the training
+    as `write_training` writes it, or None when the range leaves no training fold.
     """
     grid, cache = best.axes(members), {}
-    walks = [walk(members, grid, settings, first, stop, inner_from, r, cache) for r in rule_list]
-    candidates = [{"key": r.key, "label": r.label, "params": r.params, "rule": asdict(r),
-                   "series": w["_series"], "spans": w["_spans"]} for r, w in zip(rule_list, walks)]
+    candidates = []
+    for r in rule_list:
+        start = max(inner_from, rule_start(first, r))
+        if not start < stop:
+            LOG.warning(f"{_group_name(group)}: {r.label} needs {r.history} of history, which leaves it no "
+                        f"test before {stamp(stop)}; left out")
+            continue
+        w = walk(members, grid, settings, first, stop, start, r, cache)
+        candidates.append({"key": r.key, "label": r.label, "params": r.params, "rule": asdict(r), "from": start,
+                           "series": w["_series"], "spans": w["_spans"]})
 
     run = baseline_run(members, defaults, group) if wf.baseline == "default" else None
     if run is not None:
-        base = {"kind": "default", "run_id": run["run_id"], "params": run["params"],
+        base = {"kind": "default", "run_id": run["run_id"], "params": run["params"], "from": first,
                 "series": run["series"], "spans": [(first, stop, run)]}
     else:
         if wf.baseline == "default":
             LOG.warning(f"{_group_name(group)}: no run of the grid's default values; the baseline is "
                         f"the set chosen once at the start of the test")
-        longest = max((r.history for r in rule_list), key=lambda h: advance(first, parse_span(h)))
-        once = walk(members, grid, settings, first, stop, inner_from, Rule("expanding", longest, NEVER), cache)
+        once = walk(members, grid, settings, first, stop, inner_from, Rule("expanding", rule_list[0].history,
+                                                                           NEVER), cache)
         chosen = once["folds"][0]
-        base = {"kind": "once", "run_id": chosen["run_id"], "params": chosen["params"],
+        base = {"kind": "once", "run_id": chosen["run_id"], "params": chosen["params"], "from": inner_from,
                 "series": once["_series"], "spans": once["_spans"]}
     baseline = {"key": "baseline", "label": f"no switching ({base['kind']})", "params": {"window": "baseline"},
-                "series": base["series"], "spans": base["spans"]}
+                "from": base["from"], "series": base["series"], "spans": base["spans"]}
 
     everyone = candidates + [baseline]
     by_params = {selection._key(c["params"]): c for c in everyone}
@@ -671,10 +711,13 @@ def train(members: list[dict], group: dict, settings: selection.SelectionSetting
     def window_before(t: dt.datetime) -> dt.datetime:
         return inner_from if wf.train_window == "expanding" else max(inner_from, advance(t, train_history, back=True))
 
-    def pick(a: dt.datetime, b: dt.datetime) -> tuple[dict, list[dict]]:
-        ranked = ranking(everyone, a, b, outer_grid, settings)
+    def pick(t: dt.datetime) -> tuple[dt.datetime, dict, list[dict]]:
+        """At `t`: the window, the choice and the ranking, among the candidates that traded all of it."""
+        ready = [c for c in everyone if advance(c["from"], train_history) <= t]
+        a = max([window_before(t), *(c["from"] for c in ready)])
+        ranked = ranking(ready, a, t, outer_grid, settings)
         top = by_params[selection._key(ranked[0]["params"])] if ranked and ranked[0]["passes"] else None
-        return top, [_rank_row(r, by_params) for r in ranked]
+        return a, top, [_rank_row(r, by_params) for r in ranked]
 
     outer_from = advance(inner_from, train_history)
     if not outer_from < stop:
@@ -686,8 +729,7 @@ def train(members: list[dict], group: dict, settings: selection.SelectionSetting
     t = outer_from
     while t < stop:
         end = min(stop, advance(t, retrain))
-        a = window_before(t)
-        top, ranked = pick(a, t)
+        a, top, ranked = pick(t)
         chosen = top or baseline
         tested, base_tested = chosen["series"].stats(t, end), baseline["series"].stats(t, end)
         folds.append({"train": [stamp(a), stamp(t)], "test": [stamp(t), stamp(end)],
@@ -702,7 +744,7 @@ def train(members: list[dict], group: dict, settings: selection.SelectionSetting
 
     trained = Series.concat(parts)
     switches = _merge(switches)
-    top, _ = pick(window_before(stop), stop)
+    now_from, top, _ = pick(stop)
     current = top or baseline
     seen = hindsight(members, grid, settings, first, stop, outer_from)
     keys = [f["chosen"] for f in folds]
@@ -719,14 +761,15 @@ def train(members: list[dict], group: dict, settings: selection.SelectionSetting
         "rules": {c["key"]: _totals(c["series"].stats(outer_from, stop)) for c in candidates},
         "significance": compare(trained, baseline["series"], outer_from, stop, folds, wf.block_days, wf.resamples),
         "current": {"chosen": current["key"], "label": current["label"], "rule": current.get("rule"),
-                    "fallback": top is None, "train": [stamp(window_before(stop)), stamp(stop)]},
+                    "fallback": top is None, "train": [stamp(now_from), stamp(stop)]},
     }
 
-    series = {"trained": trained, "baseline": baseline["series"], "hindsight": seen["_series"],
-              **{c["key"]: c["series"] for c in candidates}}
+    # A rule's curve from its own first test hour, as `runs` compares it; the rest from the trained test's.
+    series = {"trained": (trained, outer_from), "baseline": (baseline["series"], outer_from),
+              "hindsight": (seen["_series"], outer_from), **{c["key"]: (c["series"], c["from"]) for c in candidates}}
     curve = []
-    for name, s in series.items():
-        for hour, row in s.part(outer_from, stop).hourly().items():
+    for name, (s, a) in series.items():
+        for hour, row in s.part(a, stop).hourly().items():
             curve.append({"ts": hour, "series": name, **row})
     curve.sort(key=lambda r: (r["ts"], r["series"]))
 
@@ -735,16 +778,37 @@ def train(members: list[dict], group: dict, settings: selection.SelectionSetting
             "inner_from": stamp(inner_from),
             "test": [stamp(outer_from), stamp(stop)],
             "baseline": {"kind": base["kind"], "run_id": base["run_id"], "params": base["params"]},
-            "rules": [{"key": c["key"], "label": c["label"], **c["rule"], **c["params"]} for c in candidates],
+            "rules": [{"key": c["key"], "label": c["label"], **c["rule"], **c["params"], "from": stamp(c["from"])}
+                      for c in candidates],
         },
         "summary": summary,
         "folds": folds,
         "switches": switches,
         "curve": curve,
+        "runs": against_each_run(members, candidates, stop),
     }
 
 
-TRAIN_FILES = ("meta.json", "folds.json", "switches.json", "curve.csv", "summary.json")
+def against_each_run(members: list[dict], candidates: list[dict], stop: dt.datetime) -> dict:
+    """Each rule, switching among the group's sets, against each set held -- over the rule's own test hours.
+
+    Every run of the group can then be shown what switching would have done in
+    its place: the rule's curve is the group's, the no-switching one is the run's.
+    `best` is the rule with the highest pnl5.
+    """
+    rules_out = [{"key": c["key"], "label": c["label"], **c["rule"], "from": stamp(c["from"]), "to": stamp(stop),
+                  **_totals(c["series"].stats(c["from"], stop))} for c in candidates]
+    best_rule = max(rules_out, key=lambda r: r["pnl5"], default=None)
+    return {
+        "best": best_rule["key"] if best_rule else None,
+        "rules": rules_out,
+        "runs": {r["run_id"]: {"params": r["params"],
+                               "rules": {c["key"]: _totals(r["series"].stats(c["from"], stop)) for c in candidates}}
+                 for r in members},
+    }
+
+
+TRAIN_FILES = ("meta.json", "folds.json", "switches.json", "runs.json", "curve.csv", "summary.json")
 CURVE_COLUMNS = ["ts", "series", "trades", *(f"pnl{s}" for s in SLIPPAGES)]
 
 
@@ -754,7 +818,9 @@ def write_training(root: Path, train_id: str, training: dict) -> Path:
         meta.json      what was trained: env, range, group, rules, baseline, settings
         folds.json     each retraining: its windows, every candidate's ranking, the choice and its test
         switches.json  which rule and parameter set the trained curve traded, and when
+        runs.json      each rule against each of the group's runs held, over the rule's own test hours
         curve.csv      PnL closed per JST hour, per series: trained, baseline, hindsight, each rule
+                       (a rule's from its own first test hour)
         summary.json   the totals, the significance and the rule to trade now -- written last
     """
     final = Path(root) / OUTPUT_DIR / TRAIN_DIR / train_id
@@ -763,7 +829,7 @@ def write_training(root: Path, train_id: str, training: dict) -> Path:
     if tmp.exists():
         shutil.rmtree(tmp)
     tmp.mkdir()
-    for name in ("meta", "folds", "switches"):
+    for name in ("meta", "folds", "switches", "runs"):
         (tmp / f"{name}.json").write_text(json.dumps(training[name], indent=2))
     with open(tmp / "curve.csv", "w", newline="") as f:
         writer = csv.DictWriter(f, CURVE_COLUMNS)
@@ -815,7 +881,8 @@ def run_train(root: Path, wf: WalkForwardSettings, settings: selection.Selection
                                 "settings": {"selection": asdict(settings), "walk_forward": asdict(wf)}}
         return training
 
-    trainings = [t for t in _map(one, _tasks(root, settings, rule_list, test_from)) if t is not None]
+    trainings = [t for t in _map(one, _tasks(root, settings, rule_list, test_from, earliest=True))
+                 if t is not None]
     out_dir = Path(root) / OUTPUT_DIR / TRAIN_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     base = _new_path(out_dir, "train").name

@@ -165,9 +165,13 @@ but it is easy to break from here:
   (`post_analysis.walk_forward`) tests the rule's own window, history and
   reselection interval to the hour, every rule on the same test hours; it reuses
   `selection.rank` and must not grow a second way of choosing. Its rules are
-  `enoshima.json`'s `"walk_forward"`, not flags. `--train` ranks the rules'
-  out-of-sample curves, and a no-switching baseline, with that same
-  `selection.rank`, and is compared with the baseline only out of sample; its
+  `enoshima.json`'s `"walk_forward"`, not flags; `history` maps each history to
+  its own intervals, because an interval is only sensible against a history.
+  `--train` ranks the rules' out-of-sample curves, and a no-switching baseline,
+  with that same `selection.rank`, and is compared with the baseline only out
+  of sample. There each rule starts when its own history allows, and a
+  retraining ranks only the rules that traded its whole window; do not align
+  them on the longest history, which held a 3d rule back by two months. Its
   folders under `post_analysis/train/` are written whole, `summary.json` last,
   and a results viewer may read them -- add to their files rather than rename.
 - **A single run uses the defaults in `strategy_param_grid.json`.** An optimize
