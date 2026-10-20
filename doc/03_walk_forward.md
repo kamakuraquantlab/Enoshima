@@ -1,11 +1,17 @@
-# Walk-forward: the selection rule's own parameters
+# Walk-forward: `enoshima walk-forward`
 
-`enoshima select` recommends one parameter set per group. A deployment does not have
-to hold that set forever: it could choose again every so often, on the recent
-past. `enoshima walk-forward` asks whether that would have earned more, and
-`--train` asks it the way a deployment would. This page records the idea, the
-settings and how the code does it. The module docstring
-(`enoshima.post_analysis.walk_forward`) is the reference; this is the map.
+```bash
+enoshima walk-forward --env NAME [--sum A+B]   # the table: every rule on the same hours
+enoshima walk-forward --env NAME --train       # choose among the rules monthly, against no switching
+```
+
+[Selection](02_selection.md) recommends one parameter set per group. A
+deployment does not have to hold that set forever: it could choose again every
+so often, on the recent past. `walk-forward` asks whether that would have earned
+more, and `--train` asks it the way a deployment would. Like `select`, it reads
+the [weekly run](01_weekly_run.md) folders on disk and replays nothing. The
+module docstring (`enoshima.post_analysis.walk_forward`) is the reference, and
+this page is the map.
 
 ## The idea
 
@@ -18,8 +24,10 @@ A **rule** is three values:
 | `every` (Y) | how often the choice is made again; `never` chooses once and holds | `2d` |
 
 At each choice the rule takes the group's runs, cuts each run's `trades.csv` to
-the X hours before, and ranks them with `selection.rank`, the same filters,
-score and grid-neighbour smoothing that `select` uses. It then trades the
+the X hours before, and ranks them with `selection.rank`. That is the same
+filters, score and grid-neighbour smoothing that `select` uses
+([02_selection.md](02_selection.md)), with the env's own `"selection"`
+settings, and there is no second way of choosing. It then trades the
 winner for the next Y hours. Chained together, those choices make the rule's
 **switching** curve, built entirely out of sample.
 
@@ -32,6 +40,10 @@ disk, and a trade belongs to the JST hour it closed in, so any split on an
 hour is exact.
 
 ## Settings (`enoshima.json`)
+
+The rules are `"walk_forward"`'s, not flags. Without it, the default is one
+history, `{"6m": ["1m", "never"]}`, with an expanding window. A grid of X and Y
+to try looks like this:
 
 ```json
 {
@@ -66,8 +78,9 @@ hour is exact.
   are refused, so list only one of `1w` and `7d`.
 - **Spans** are `h`, JST days `d`, weeks `w`, or calendar months `m`, and
   every boundary falls on a JST hour.
-- **Groups come from `selection.group_by`.** `null` means every categorical
-  parameter of `strategy_param_grid.json`. Each group (for example one
+- **Groups come from `selection.group_by`**, as in
+  [selection](02_selection.md#which-runs-in-which-groups). `null` means every
+  categorical parameter of `strategy_param_grid.json`. Each group (for example one
   `schedule_version`) is trained alone, on its own runs, as `best.recommend`
   groups them. A rule only ever switches among the sets of one group.
 - `test_from` is the first test hour of the plain table. By default it is the
@@ -91,6 +104,13 @@ their totals compare. An expanding rule's history only sets where its test may
 start, so expanding rules are collapsed to the longest history
 (`on_common_hours`). `hindsight` is the set chosen on the whole range, scored
 on the same hours. It has seen them, so it is a ceiling, not a rule.
+`--sum A+B` adds groups traded side by side, such as two schedules that split
+the day. The table goes to `env.log` and to
+`post_analysis/walk_forward_<stamp>.json` (and `.txt`).
+
+Trying many rules on the same test hours is itself a choice made in sample.
+Prefer the rule that holds up across groups and environments over the one with
+the best total in one.
 
 ### `enoshima walk-forward --env NAME --train`: training the rule
 
