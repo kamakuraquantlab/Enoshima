@@ -35,12 +35,11 @@ import hashlib
 import json
 import time
 
+from qate.exchange import FeeSchedule
 from qate.util.dt_range import DtRange
 from qate.util.encoder import Encoder
 from qate_env.env import Env
 from qate_env.run_log import RunLog
-
-from qate.exchange import FeeSchedule
 
 from . import fees
 from .weekly import Week, WeeklySettings

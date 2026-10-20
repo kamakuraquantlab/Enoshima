@@ -68,6 +68,12 @@ class ResultReporter(Reporter):
     def __init__(self, dt_range: DtRange, writer: InfluxdbWriter | None = None, strict: bool = False):
         super().__init__()
         self.dt_range = dt_range
+        # The range as this reporter's own floats, compared on every event.
+        # `DtRange.end_ts` is a `datetime.timestamp()`, and the `DtRange` is the
+        # batch's: on free-threaded Python 45 threads asking one shared datetime
+        # per event made `settled` 90% of a weekly sweep, and a day 10x slower.
+        self._start_ts = dt_range.start_ts
+        self._end_ts = dt_range.end_ts
         self.writer = writer
         self.strict = strict
         # Open notional per (market, side), warmup included -- a strict run's: only
@@ -97,9 +103,9 @@ class ResultReporter(Reporter):
     def _counts(self, pnl_update: PnlUpdate) -> bool:
         """Whether this update is the range's: by close, or a strict run's by open."""
         if not self.strict:
-            return in_range(pnl_update.get_ts(), self.dt_range)
+            return self._start_ts <= pnl_update.get_ts() <= self._end_ts
         opened = pnl_update.get_ts() if pnl_update.settle_type == SettleType.OPEN else pnl_update.open_ts
-        return in_range(opened, self.dt_range)
+        return self._start_ts <= opened <= self._end_ts
 
     def report_pnl(self, pnl_update: PnlUpdate) -> None:
         counts = self._counts(pnl_update)
@@ -156,9 +162,9 @@ class ResultReporter(Reporter):
         would be a position of the range's, once filled. It is asked only past
         the range, so a week's own events cost a comparison.
         """
-        if not self.strict or ts <= self.dt_range.end_ts or self.open_at_end():
+        if not self.strict or ts <= self._end_ts or self.open_at_end():
             return False
-        return not any(in_range(order.get_ts(), self.dt_range) for order in pending_opens())
+        return not any(self._start_ts <= order.get_ts() <= self._end_ts for order in pending_opens())
 
     def open_at_end(self) -> int:
         """How many (market, side) positions are still open: closed after the replay, if ever."""

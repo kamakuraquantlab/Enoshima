@@ -70,14 +70,14 @@ def test_registered_rates_are_what_qate_costs_a_fill_with():
     assert factory.get_fee_rate(Market(ExchangeName.GMO, Symbol.BTC_JPY)) is None
 
 
-def test_a_run_is_refused_before_it_replays_when_its_market_has_no_rate(run_env):
+def test_a_run_is_refused_before_it_replays_when_its_market_has_no_rate(run_env):  # noqa: F811
     env, dt_range = run_env
     with pytest.raises(ValueError, match=f"No fee rate for {MARKET.id}"):
         Runner(env, dt_range, fee_rates={}, chunk_days=1)
     assert run_dirs(env) == []
 
 
-def test_a_charged_rate_reaches_the_trades_and_is_a_run_of_its_own(run_env):
+def test_a_charged_rate_reaches_the_trades_and_is_a_run_of_its_own(run_env):  # noqa: F811
     env, dt_range = run_env
     Runner(env, dt_range, fee_rates=FEES, chunk_days=1).run()
     [free] = run_dirs(env)

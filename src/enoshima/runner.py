@@ -56,11 +56,10 @@ from datetime import timedelta
 from logging import getLogger
 from pathlib import Path
 
+from qate.exchange import FeeSchedule
 from qate.trading.param import ParamGrid
 from qate.util.dt_range import DtRange
 from qate_env.env import Env
-
-from qate.exchange import FeeSchedule
 
 from . import fees, param_id, run_dir
 from . import weekly as weekly_mod

@@ -88,9 +88,6 @@ from qate.util.dt_range import DtRange
 LOG = getLogger(__name__)
 
 
-def in_range(ts: float, dt_range: DtRange) -> bool:
-    return dt_range.start_ts <= ts <= dt_range.end_ts
-
 WRITE_TIMEOUT_MS = 120_000  # large batches from a finished backtest are slow
 
 
@@ -313,10 +310,16 @@ class InfluxReporter(Reporter):
         super().__init__()
         self.writer = writer
         self.dt_range = dt_range
+        # Its own floats, as `ResultReporter`'s: a shared `DtRange` asked per metric is contended.
+        self._start_ts = dt_range.start_ts
+        self._end_ts = dt_range.end_ts
         self.by_open = by_open
         self._fill: OrderResponse | None = None   # see `ResultReporter.report_order`
         # Per reporter, not shared: see the note in `BacktestRuntime.__init__`.
         self._skip_measurements = frozenset(tuple(UNRECORDED_MEASUREMENTS))
+
+    def _in_range(self, ts: float) -> bool:
+        return self._start_ts <= ts <= self._end_ts
 
     def _add(self, metric: Metric) -> None:
         self.writer.add(convert_to_point(metric))
@@ -325,24 +328,24 @@ class InfluxReporter(Reporter):
         for metric in metrics:
             if metric.measurement in self._skip_measurements:
                 continue
-            if in_range(metric.ts, self.dt_range):
+            if self._in_range(metric.ts):
                 self._add(metric)
 
     def report_order(self, order_response: OrderResponse) -> None:
         if self.by_open:
             self._fill = order_response
-        elif in_range(order_response.get_ts(), self.dt_range):
+        elif self._in_range(order_response.get_ts()):
             self._add(order_response.to_metric())
 
     def report_pnl(self, pnl_update: PnlUpdate) -> None:
         if self.by_open:
             fill, self._fill = self._fill, None
             opened = pnl_update.get_ts() if pnl_update.settle_type == SettleType.OPEN else pnl_update.open_ts
-            if not in_range(opened, self.dt_range):
+            if not self._in_range(opened):
                 return
             if fill is not None:
                 self._add(fill.to_metric())
-        elif not in_range(pnl_update.get_ts(), self.dt_range):
+        elif not self._in_range(pnl_update.get_ts()):
             return
         if pnl_update.settle_type != SettleType.CLOSE:
             return

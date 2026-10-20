@@ -133,7 +133,9 @@ but it is easy to break from here:
 - **No Python object may be touched by every backtest thread on every event.**
   On free-threaded Python, threads reading one shared object contend on its
   reference count; a single `frozenset` shared by 45 strategies and checked per
-  event made a sweep 2.4x slower. Give each backtest its own copy (and note that
+  event made a sweep 2.4x slower, and the batch's one `DtRange` asked for
+  `end_ts` (a `datetime.timestamp()`) per event by every reporter made a 45-way
+  weekly sweep 7x slower; a reporter keeps its range as floats of its own. Give each backtest its own copy (and note that
   `frozenset(a_frozenset)` is not a copy). Market data is the exception the
   design accepts: the chunk is shared, and a recorded book (`hase`'s
   `RecordedOrderBook`) caches its market price per size for every reader.
