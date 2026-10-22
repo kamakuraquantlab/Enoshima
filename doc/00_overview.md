@@ -170,6 +170,7 @@ NAME/
 │   ├── meta.json              what was run: env, config, params, range, revision, bucket
 │   ├── summary.json           the whole-range result at each slippage; "finished" means this exists
 │   ├── trades.csv             every closed position, with its PnL at each slippage
+│   │                          and its closing fill's price
 │   ├── by_<grouping>.json     the trades by month, week, day, weekday, monthday, hour,
 │   │                          weekday_hour, holding, side
 │   └── weeks/<YYYY-Www>/      weekly only: each week's meta, summary and trades

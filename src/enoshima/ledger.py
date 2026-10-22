@@ -60,6 +60,9 @@ class Trade:
     pnl_change0: float
     pnl_change5: float
     pnl_change10: float
+    # The closing fill's execution price. Last, and optional, so a trades.csv
+    # written before it was recorded still reads.
+    close_price: float | None = None
 
     @property
     def holding_s(self) -> float | None:

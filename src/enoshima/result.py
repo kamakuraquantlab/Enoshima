@@ -84,6 +84,8 @@ class ResultReporter(Reporter):
         self.trades: list[Trade] = []
         # A strict run's last fill, waiting for its PnL update to say whose leg it is.
         self._fill: OrderResponse | None = None
+        # The last fill's price, any run's: qate publishes a fill before its PnL update.
+        self._price: float | None = None
         # What the event loop caught. Any at all and there is no result.
         self.exceptions: list[BaseException] = []
 
@@ -91,6 +93,7 @@ class ResultReporter(Reporter):
         self.exceptions.append(error)
 
     def report_order(self, order_response: OrderResponse) -> None:
+        self._price = order_response.exec_price
         # Evaluations see every fill, warmup included, so the reported slippage
         # average is over the whole replay rather than a truncated tail -- except
         # a strict run's, which counts its trades' legs: see `report_pnl`.
@@ -148,6 +151,7 @@ class ResultReporter(Reporter):
                 pnl_change0=changes[0],
                 pnl_change5=changes[1],
                 pnl_change10=changes[2],
+                close_price=self._price,
             )
         )
 

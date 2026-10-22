@@ -148,6 +148,8 @@ def test_a_run_trades_and_writes_its_results(run_env):
     assert len(trades) == result["pnl_cnt0"]
     assert sum(float(t["pnl_change5"]) for t in trades) == pytest.approx(result["pnl5"])
     assert {t["side"] for t in trades} <= {"long", "short"}
+    # Each close records its fill's price, which is what a results viewer charts.
+    assert all(float(t["close_price"]) > 0 for t in trades)
     for name in GROUPINGS:
         rows = run_dir.read_json(folder, run_dir.grouping_file(name))
         assert sum(r["trades"] for r in rows.values()) == result["pnl_cnt0"], name
