@@ -9,7 +9,7 @@ re-run. The numbers themselves are beside it in the run's folder; see
 ## The id is deterministic, and that is what makes a run resumable
 
 The id is a hash of everything that decides what a run computes: the
-environment, the strategy and variant, the revision of the strategy's code
+environment, the strategy and variant, the revision of the variant's source
 (`strategy_env.strategy_rev`), the parameter set, the non-zero fee rates of
 the markets it trades (`fees.identity`), and the date range.
 Two runs that would compute the same thing therefore have the same id -- the
@@ -45,6 +45,49 @@ from . import fees
 from .weekly import Week, WeeklySettings
 
 
+def identity(env: str, strategy: str, strategy_rev: str, params: dict, fee_rates: dict, dt_range, weekly) -> dict:
+    """What decides a run's numbers, and nothing else: hashed, it is the run's id.
+
+    `dt_range` is `(start_str, end_str)` and counts only for a run that is not
+    weekly; `weekly` is the preload and overlap of one that is.
+    """
+    data = {"env": env, "strategy": strategy, "strategy_rev": strategy_rev, "params": params}
+    # Only when one is non-zero: a zero rate computes what a run made before
+    # rates were stated, and must keep that run's folder.
+    if charged := fees.identity(fee_rates):
+        data["fee_rates"] = charged
+    if weekly is None:
+        data.update({"start": dt_range[0], "end": dt_range[1]})
+    else:
+        data["weekly"] = weekly
+    return data
+
+
+def run_id(identity: dict) -> str:
+    raw = json.dumps(identity, sort_keys=True, cls=Encoder)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def identity_from_meta(meta: dict, strategy_rev: str | None = None) -> dict:
+    """A recorded run's identity, from its `meta.json`, with its revision replaced if given.
+
+    With the meta's own revision it should hash back to the folder's name; a
+    caller relying on this checks that before trusting it.
+    """
+    weekly = None
+    if meta.get("mode") == "weekly":
+        weekly = {"preload_days": meta["preload_days"], "overlap_days": meta["overlap_days"]}
+    return identity(
+        meta["env"],
+        meta["strategy"],
+        strategy_rev or meta.get("strategy_rev"),
+        meta["params"],
+        fees.parse(meta.get("fee_rates") or {}, f"run {meta.get('id')}"),
+        (meta.get("start_str"), meta.get("end_str")),
+        weekly,
+    )
+
+
 class BacktestLog(RunLog):
     def __init__(
         self,
@@ -58,6 +101,7 @@ class BacktestLog(RunLog):
         weekly: WeeklySettings | None = None,
         week_key: str | None = None,
         strategy_rev: str | None = None,
+        strategy_commit: str | None = None,
         fee_rates: dict[str, FeeSchedule] | None = None,
     ):
         # config and profile go to RunLog, which records them: they are the
@@ -67,6 +111,7 @@ class BacktestLog(RunLog):
         self.dt_range = dt_range
         self.strategy_name = strategy_name
         self.strategy_rev = strategy_rev
+        self.strategy_commit = strategy_commit
         self.fee_rates = fee_rates or {}
         self.batch_id = batch_id
         self.param_set_id = None
@@ -85,22 +130,11 @@ class BacktestLog(RunLog):
         InfluxDB bucket instead, so a `--force` re-run replaces this folder and writes
         a bucket of its own.
         """
-        identity = {
-            "env": str(self.env.name),
-            "strategy": self.strategy_name,
-            "strategy_rev": self.strategy_rev,
-            "params": self.params,
-        }
-        # Only when one is non-zero: a zero rate computes what a run made before
-        # rates were stated, and must keep that run's folder.
-        if charged := fees.identity(self.fee_rates):
-            identity["fee_rates"] = charged
-        if self.week_key is None:
-            identity.update({"start": self.dt_range.start_str, "end": self.dt_range.end_str})
-        else:
-            identity["weekly"] = {"preload_days": self.weekly.preload_days, "overlap_days": self.weekly.overlap_days}
-        raw = json.dumps(identity, sort_keys=True, cls=Encoder)
-        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+        weekly = None
+        if self.week_key is not None:
+            weekly = {"preload_days": self.weekly.preload_days, "overlap_days": self.weekly.overlap_days}
+        return run_id(identity(str(self.env.name), self.strategy_name, self.strategy_rev, self.params,
+                               self.fee_rates, (self.dt_range.start_str, self.dt_range.end_str), weekly))
 
     def to_dict(self) -> dict:
         data = super().to_dict()
@@ -111,6 +145,7 @@ class BacktestLog(RunLog):
                 "params": self.params,
                 "strategy": self.strategy_name,
                 "strategy_rev": self.strategy_rev,
+                "strategy_commit": self.strategy_commit,
                 "fee_rates": fees.to_json(self.fee_rates),
                 "start_str": self.dt_range.start_str,
                 "end_str": self.dt_range.end_str,

@@ -232,9 +232,9 @@ def test_a_new_strategy_revision_is_a_new_folder(make_env, monkeypatch):
     import enoshima.runner
 
     env = make_env("env")
-    monkeypatch.setattr(enoshima.runner, "strategy_rev", lambda module: "aaaaaaaaaaaa")
+    monkeypatch.setattr(enoshima.runner, "strategy_rev", lambda module, variant: "aaaaaaaaaaaa")
     run(env, weeks_range(W02, W02))
-    monkeypatch.setattr(enoshima.runner, "strategy_rev", lambda module: "bbbbbbbbbbbb")
+    monkeypatch.setattr(enoshima.runner, "strategy_rev", lambda module, variant: "bbbbbbbbbbbb")
     run(env, weeks_range(W03, W03))
 
     folders = sorted((Path(env.work_dir) / run_dir.RUN_LOG_DIR).iterdir())

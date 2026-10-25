@@ -8,6 +8,8 @@ enoshima run     --env NAME --from 2026-06-01 --to 2026-06-10 [--weekly]
 enoshima select  --env NAME
 enoshima walk-forward --env NAME [--train]
 enoshima results --env NAME
+enoshima migrate-revisions --env NAME [--apply]
+enoshima merge   --env NAME --from RUN_ID --into RUN_ID [--unverified] [--apply]
 ```
 
 `run` is the one that matters, and `run --weekly` is how it is mainly used: it
@@ -58,7 +60,7 @@ from qate_env import sys_env
 from qate_env.env import Env
 from qate_env.env_name import EnvName
 
-from enoshima import best, run_dir
+from enoshima import best, revisions, run_dir
 from enoshima.influx import InfluxdbStore
 from enoshima.post_analysis import walk_forward
 from enoshima.runner import Runner
@@ -203,6 +205,32 @@ def cmd_results(args) -> int:
     return 0
 
 
+def cmd_migrate_revisions(args) -> int:
+    env = Env(sys_env.get_env_root_dir(), args.env)
+    env.enter()
+    try:
+        revisions.migrate(Path(env.work_dir), apply=args.apply)
+    except Exception:
+        LOG.exception("migrate-revisions failed")
+        return 1
+    finally:
+        env.leave()
+    return 0
+
+
+def cmd_merge(args) -> int:
+    env = Env(sys_env.get_env_root_dir(), args.env)
+    env.enter()
+    try:
+        revisions.merge(Path(env.work_dir), args.source, args.target, unverified=args.unverified, apply=args.apply)
+    except Exception:
+        LOG.exception("merge failed")
+        return 1
+    finally:
+        env.leave()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="enoshima", description="Backtest a strategy against recorded market data.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -252,6 +280,31 @@ def build_parser() -> argparse.ArgumentParser:
     results.add_argument("--env", required=True, type=EnvName)
     results.add_argument("--limit", type=int, default=25)
     results.set_defaults(func=cmd_results)
+
+    migrate = sub.add_parser(
+        "migrate-revisions",
+        help="give runs recorded at a commit the source revision of "
+        "their variant at that commit, renaming their folders; a dry run without --apply",
+    )
+    migrate.add_argument("--env", required=True, type=EnvName)
+    migrate.add_argument("--apply", action="store_true", help="rename and rewrite, rather than only report")
+    migrate.set_defaults(func=cmd_migrate_revisions)
+
+    merge = sub.add_parser(
+        "merge",
+        help="copy one weekly run's weeks into another of the same parameters "
+        "and rebuild it; a dry run without --apply",
+    )
+    merge.add_argument("--env", required=True, type=EnvName)
+    merge.add_argument("--from", dest="source", required=True, help="run id whose weeks are copied")
+    merge.add_argument("--into", dest="target", required=True, help="run id they are copied into")
+    merge.add_argument(
+        "--unverified",
+        action="store_true",
+        help="merge although the two revisions cannot be shown to run the same source",
+    )
+    merge.add_argument("--apply", action="store_true", help="copy and rebuild, rather than only report")
+    merge.set_defaults(func=cmd_merge)
 
     return parser
 

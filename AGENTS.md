@@ -176,11 +176,28 @@ but it is easy to break from here:
   rewritten -- by tag, not time, because a Sunday open has its close-aligned
   copy on the Monday.
 - **Every run id includes the strategy's revision** (`strategy_env.strategy_rev`):
-  the commit of the checkout the strategy module is imported from, not
-  Enoshima's or qate's, with `+dirty.<hash>` for uncommitted changes. A
-  change to the strategy must be a new folder, or a weekly run would stitch
-  weeks of two versions together; `best.group` ranks one revision at a time.
+  a hash of the variant's own source -- its module and every module of its
+  package it imports, followed through the import statements, with each
+  package's `__init__.py` -- spelt `src.<12 hex>`. A change to what the variant
+  runs must be a new folder, or a weekly run would stitch weeks of two versions
+  together; `best.group` ranks one revision at a time. A change that does not
+  reach the variant -- a new `vNNN.py` beside it, a test, a note -- must not
+  be: it was the checkout's commit once, and every experiment committed moved
+  every older variant's results to a new folder. The commit is still recorded,
+  as `meta.json`'s `strategy_commit` (`+dirty.<hash>` when uncommitted), and is
+  provenance only. A module imported by a string is not followed; a strategy
+  that does that must name it in an import statement too.
   `meta.json`'s `git_rev` is `qate_env`'s own and says nothing about the strategy.
+- **Folders from the commit-revision days are migrated, not replayed**
+  (`revisions`). `enoshima migrate-revisions` gives a folder recorded at a
+  clean commit the source revision of its variant at that commit, read with
+  `git show`, and renames it to the id that gives; one recorded `+dirty` names
+  no source anyone can read back and is left alone. `enoshima merge` joins
+  two weekly folders of one run split across revisions, only when both name
+  the same source or `--unverified` says so -- recorded in the copied weeks and
+  the root -- and never when a week both hold differs. The merged-from folder
+  is renamed `<id>.merged`, which `run_dir.iter_complete` skips: nothing is
+  deleted. Both are dry runs without `--apply`.
 - **A backtest's fee rates are `enoshima.json`'s `fee_rates`** (`fees`). qate
   reads a rate off the market's `ExchangeAdapter`, which only a venue package
   registers, and a backtest installs none -- so every fill was once costed at

@@ -68,7 +68,7 @@ from .data_source import DEFAULT_CHUNK_DAYS, DataSource, Stream, market_data_eve
 from .influx import InfluxdbStore, InfluxdbWriter, InfluxReporter, bucket_name, weekly_bucket_name
 from .result import ResultReporter
 from .run_log import BacktestLog
-from .strategy_env import get_strategy_class, load_strategy_env, strategy_rev
+from .strategy_env import get_strategy_class, load_strategy_env, strategy_commit, strategy_rev
 from .weekly import Week, WeeklySettings
 
 LOG = getLogger(__name__)
@@ -133,8 +133,10 @@ class Runner:
         strategy_env = load_strategy_env(env)
         self.definition = strategy_env.definition
         self.config = strategy_env.config
-        # Part of every run's id: a commit to the strategy is a new folder.
-        self.strategy_rev = strategy_rev(self.definition.module_name)
+        # Part of every run's id: a change to the variant's source is a new folder.
+        self.strategy_rev = strategy_rev(self.definition.module_name, self.definition.variant_name)
+        # Provenance only: which commit that source was run from.
+        self.strategy_commit = strategy_commit(self.definition.module_name)
         self.fee_rates = fees.check(fee_rates or {}, self.config)
         fees.register(self.fee_rates)
 
@@ -260,6 +262,7 @@ class Runner:
             weekly=self.weekly if week else None,
             week_key=week.key if week else None,
             strategy_rev=self.strategy_rev,
+            strategy_commit=self.strategy_commit,
             fee_rates=self.fee_rates,
         )
 
