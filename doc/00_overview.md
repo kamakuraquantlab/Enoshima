@@ -10,6 +10,7 @@ is the map; each part has its own page:
 | [01_weekly_run.md](01_weekly_run.md) | The cumulative weekly run: preload, overlap, which week a trade belongs to, how weeks are stored and stitched |
 | [02_selection.md](02_selection.md) | `enoshima select`: filters, score, neighbour smoothing, groups, its walk-forward over months |
 | [03_walk_forward.md](03_walk_forward.md) | `enoshima walk-forward`: testing how often to choose again, on how much history (X, Y), and `--train` |
+| [04_web.md](04_web.md) | `enoshima web`: every run and training as a page, and links to a dashboard |
 
 ## What it is
 
@@ -184,9 +185,10 @@ and renamed into place. Any window or grouping can be recomputed from
 A grouping row has `trades` and, per slippage N, `winsN`, `pnlN`, `peakN`,
 `troughN` and `ddN` (worst drawdown).
 
-`enoshima results --env NAME` lists the recorded runs, best first, in `env.log`.
-Enoshima never deletes results. To clear them, delete `run_log/`, `best_result/`
-and `post_analysis/`.
+`enoshima results --env NAME` lists the recorded runs, best first, in `env.log`;
+`enoshima web` shows every env's as a page ([04_web.md](04_web.md)). No command
+deletes results, and the viewer deletes only a run folder it is asked to. To
+clear them, delete `run_log/`, `best_result/` and `post_analysis/`.
 
 ### InfluxDB, for looking at a run
 

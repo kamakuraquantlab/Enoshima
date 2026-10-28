@@ -47,6 +47,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# `enoshima web`, the results viewer. The engine itself serves nothing.
+web = ["Flask>=3.0,<4"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.1",

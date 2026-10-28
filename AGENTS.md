@@ -8,11 +8,17 @@ first; this page holds what will cost you if you miss it.
 It is the CLI backtest engine: replay recorded bronze data through a strategy and
 a simulated exchange, and write the results to disk.
 
-It is **not** the seller's backtest operations tooling. The REST API, the React
-results browser, the Grafana dashboard and the queue that launches runs from a web
-page stayed private, because they name a production strategy's dashboard, spawn
-subprocesses, and exist to operate one particular machine. If a public reason to
-publish a results UI appears, it should be written fresh rather than ported.
+It also serves what it wrote: `enoshima web` (`enoshima.web`, the page in
+`web/`, the `web` extra) shows every run folder and training as a page.
+
+It is **not** the seller's backtest operations tooling. The queue that launches
+runs from a web page and any production strategy's Grafana dashboard stayed
+private, because they spawn subprocesses, name a strategy, and exist to operate
+one particular machine. The results viewer came here once it did none of that:
+it reads run folders, names no strategy or dashboard (an env's
+`grafana_dashboard.json` does), and launches nothing. Keep it that way: **no
+endpoint that runs, queues or configures a backtest**, and no strategy, env or
+dashboard name in `web.py` or `web/`.
 
 ## Where the pieces live
 
@@ -289,6 +295,15 @@ but it is easy to break from here:
   wants them gone deletes `run_log/`, `best_result/` and `post_analysis/`. An
   earlier version pruned run logs older than seven days automatically, on every
   run.
+- **The viewer reads only what the commands write.** `web.py` serves a run
+  folder's `meta.json`, `summary.json`, `trades.csv` and `by_*.json` and a
+  training's `TRAIN_FILES`, named from `run_dir`, `ledger` and `walk_forward`,
+  so a new file is served once it is added there and not before. Whatever the
+  page shows is computed in the browser from those files or read from them;
+  a figure the page needs that no file has belongs in the command that writes
+  the folder, not in a second computation here. It deletes a run folder when
+  asked and changes nothing else. Flask is the `web` extra so that the engine
+  installs no web server: `cli.cmd_web` imports `enoshima.web` only when run.
 - **A strategy is imported by module name, and is the user's to make importable**
   -- installed, or on `PYTHONPATH`. Enoshima does not add the launch directory to
   `sys.path`.
@@ -304,6 +319,8 @@ but it is easy to break from here:
 | A way of reading recorded data, or converting it to qate objects | `hase` |
 | Where a file lives, or whether a day is complete | `komachi` |
 | Replay scheduling, batching, evaluation, the CLI | here |
+| The viewer's pages and the API that serves run folders | here, `web.py` and `web/` |
+| A strategy's dashboard, or its link from the viewer | the strategy's repository, and the `ENOSHIMA_API` env |
 
 The example strategy is documentation. Keep it the most ordinary thing that works
 and keep it honest about losing money; it is there to show the contract, not an

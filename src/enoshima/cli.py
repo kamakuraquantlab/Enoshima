@@ -10,6 +10,7 @@ enoshima walk-forward --env NAME [--train]
 enoshima results --env NAME
 enoshima migrate-revisions --env NAME [--apply]
 enoshima merge   --env NAME --from RUN_ID --into RUN_ID [--unverified] [--apply]
+enoshima web     [--setup]
 ```
 
 `run` is the one that matters, and `run --weekly` is how it is mainly used: it
@@ -26,7 +27,8 @@ the rule itself: how each window, history and reselection interval in
 `enoshima.json`'s `"walk_forward"` would have done out of sample, and with
 `--train` chooses among them every month against a baseline that never
 switches (`enoshima.post_analysis.walk_forward`). `results` exists so
-that what a run produced can be found and read without reading the source.
+that what a run produced can be found and read without reading the source;
+`web` serves the same folders as a page (`enoshima.web`, the `web` extra).
 
 Everything a run needs to know beyond the dates is somewhere already, so it is not
 a flag here:
@@ -51,6 +53,7 @@ environment directory is how a run is watched.
 import argparse
 import json
 import logging
+import signal
 import sys
 from logging import getLogger
 from pathlib import Path
@@ -231,6 +234,31 @@ def cmd_merge(args) -> int:
     return 0
 
 
+def cmd_web(args) -> int:
+    try:
+        from enoshima import web
+    except ImportError as e:
+        sys.exit(f"enoshima web needs the web extra, pip install 'kamakuraquantlab-enoshima[web]': {e}")
+    if args.setup:
+        Env.setup_env(sys_env.get_env_root_dir(), web.ENV_NAME,
+                      {"config": web.Config(), "grafana_dashboard": {"dashboards": []}})
+        return 0
+    env = Env(sys_env.get_env_root_dir(), web.ENV_NAME)
+    env.enter()
+    # A service manager stops it with SIGTERM; the finally releases the lock.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        web.serve(env)
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        LOG.exception("web failed")
+        return 1
+    finally:
+        env.leave()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="enoshima", description="Backtest a strategy against recorded market data.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -305,6 +333,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     merge.add_argument("--apply", action="store_true", help="copy and rebuild, rather than only report")
     merge.set_defaults(func=cmd_merge)
+
+    web = sub.add_parser("web", help="serve the recorded runs and trainings as a page, replaying nothing")
+    web.add_argument("--setup", action="store_true", help="create the viewer's own env, ENOSHIMA_API")
+    web.set_defaults(func=cmd_web)
 
     return parser
 

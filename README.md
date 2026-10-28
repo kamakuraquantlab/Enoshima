@@ -26,6 +26,7 @@ out whether an idea would have worked.
 | [doc/01_weekly_run.md](doc/01_weekly_run.md) | The cumulative weekly run: preload, overlap, which week a trade belongs to, how weeks are saved |
 | [doc/02_selection.md](doc/02_selection.md) | `enoshima select`: filters, score, neighbour smoothing, groups, and its settings |
 | [doc/03_walk_forward.md](doc/03_walk_forward.md) | `enoshima walk-forward`: choosing again every Y on X of history, and `--train` |
+| [doc/04_web.md](doc/04_web.md) | `enoshima web`: the results viewer, its env, dashboard links and API |
 
 ## Where the data comes from
 
@@ -143,6 +144,7 @@ described in [the overview](doc/00_overview.md#the-environment).
 | `enoshima select` | Recommend from the recorded weekly runs, per range and group |
 | `enoshima walk-forward` | Test the selection rule's window, history and reselection interval; `--train` chooses among them monthly against no switching |
 | `enoshima results` | Recorded runs for an environment, best first |
+| `enoshima web` | Every env's runs and trainings as a page, replaying nothing (the `web` extra) |
 
 To clear an environment's results, delete its `run_log/`, `best_result/` and `post_analysis/`.
 
