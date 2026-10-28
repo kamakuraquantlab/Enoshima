@@ -43,6 +43,8 @@ dependencies = [
     "kamakuraquantlab-qate-env>=0.1",
     "kamakuraquantlab-hase>=0.8",
     "numpy>=2.0",
+    "pandas>=2.0",
+    "pyarrow>=15.0",
     "influxdb-client>=1.49",
 ]
 

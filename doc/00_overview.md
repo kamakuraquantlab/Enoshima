@@ -107,7 +107,7 @@ silently change what a run does.
 | `selection` | how `select` filters, scores, smooths and groups | [02_selection.md](02_selection.md) |
 | `walk_forward` | the rules `walk-forward` tests, and `--train`'s settings | [03_walk_forward.md](03_walk_forward.md) |
 | `fee_rates` | what each traded market charges, by market id; a traded market without one refuses the run | below |
-| `influx` | record orders, PnL and bars to InfluxDB; absent means record nothing | below |
+| `influx` | additionally record orders, PnL and bars to InfluxDB; absent does not disable `Backtest_Bar` | below |
 | `chunk_days` | days loaded at once (2); `--chunk-days` overrides it | memory |
 | `max_concurrency` | parameter sets sharing one pass over the data (16); `--max-concurrency` overrides it | speed |
 | `strategy_log_level` | level of the strategy's and `qate.trading`'s loggers during a run (`WARNING`) | `"INFO"` to debug |
@@ -192,8 +192,18 @@ clear them, delete `run_log/`, `best_result/` and `post_analysis/`.
 
 ### InfluxDB, for looking at a run
 
-PnL lives in the run folder because the result is evaluated from it. Orders,
-PnL and the strategy's bars go to InfluxDB only when `enoshima.json` has an
+PnL lives in the run folder because the result is evaluated from it. Every run
+also writes completed BAR metrics to the data lake as Zstandard-compressed
+Parquet, preserving fields such as `sar:up`, `sar:s` and `sar:ns`:
+
+```text
+research/dataset=Backtest_Bar/strategy=<strategy>/exchange=<exchange>/
+  symbol=<symbol>/param_id=<param_id>/date=YYYY-MM-DD/data.parquet
+```
+
+The data-lake root is Hase's canonical root. Warmup and weekly overlap bars are
+not written. Orders, PnL and the strategy's bars also go to InfluxDB when
+`enoshima.json` has an
 `"influx"` entry (`token`, `write_url`, `read_url`, `org`, defaulting to a local
 server). A run without it still finishes with its result. Each execution writes
 its own bucket, `backtest_<param_set_id>_<batch_id>`. The param set id is the

@@ -56,8 +56,10 @@ from datetime import timedelta
 from logging import getLogger
 from pathlib import Path
 
+from hase import bronze
 from qate.exchange import FeeSchedule
 from qate.trading.param import ParamGrid
+from qate.trading.reporter import Reporter
 from qate.util.dt_range import DtRange
 from qate_env.env import Env
 
@@ -65,6 +67,7 @@ from . import fees, param_id, run_dir
 from . import weekly as weekly_mod
 from .backtest import Backtest
 from .data_source import DEFAULT_CHUNK_DAYS, DataSource, Stream, market_data_event_types
+from .datalake import DatalakeReporter
 from .influx import InfluxdbStore, InfluxdbWriter, InfluxReporter, bucket_name, weekly_bucket_name
 from .result import ResultReporter
 from .run_log import BacktestLog
@@ -346,9 +349,17 @@ class Runner:
 
     def _recording(
         self, run_log: BacktestLog, param_set_id: str, dt_range: DtRange, week: Week | None
-    ) -> tuple[InfluxdbWriter | None, list[InfluxReporter]]:
+    ) -> tuple[InfluxdbWriter | None, list[Reporter]]:
+        reporters: list[Reporter] = [
+            DatalakeReporter(
+                bronze.data_root(),
+                self.definition.strategy_name,
+                param_set_id,
+                dt_range,
+            )
+        ]
         if self.influx is None:
-            return None, []
+            return None, reporters
 
         if week is None:
             bucket = bucket_name(param_set_id, self.batch_id)
@@ -360,7 +371,8 @@ class Runner:
             writer = self.influx.create_writer(bucket, param_set_id=param_set_id, tags=tags)
             self.influx.delete_tagged(bucket, tags)
         run_log.influx_bucket = bucket
-        return writer, [InfluxReporter(writer, dt_range, by_open=week is not None)]
+        reporters.append(InfluxReporter(writer, dt_range, by_open=week is not None))
+        return writer, reporters
 
     def _run_batch(self, backtests: list[Backtest], data_source: DataSource) -> None:
         """Run a batch concurrently, and do not let one failure hang the rest.

@@ -6,11 +6,13 @@ each closed position, and keeps the closed positions themselves as
 figures a run folder's `summary.json` holds and `select` filters on -- and
 `trades` is what the folder's `trades.csv` and `by_*.json` are written from.
 
-PnL is the one kind of trading data a run keeps on disk, because it is what a
-result is evaluated from: with the trades in the folder, any grouping or window
--- `selection`'s walk-forward months among them -- is recomputed without a
-replay. Orders and the strategy's bars go to InfluxDB through
-`influx.InfluxReporter`, for looking at a run, and only when a run asks for it.
+PnL is kept in the run folder because it is what a result is evaluated from:
+with the trades there, any grouping or window -- `selection`'s walk-forward
+months among them -- is recomputed without a replay. Completed bars and their
+strategy-defined indicators are also written to the data lake's historical
+`Backtest_Bar` layout by `datalake.DatalakeReporter`. Orders and the complete
+chart stream go to InfluxDB through `influx.InfluxReporter`, for looking at a
+run, and only when a run asks for it.
 When InfluxDB recording is enabled, the evaluations write their own `EVAL`
 metrics directly through the run's writer. They are results, not strategy
 metrics, and do not re-enter the runtime's reporter dispatch.

@@ -163,7 +163,8 @@ def test_a_run_trades_and_writes_its_results(run_env):
     hours = run_dir.read_json(folder, "by_hour.json")
     assert len(hours) == 24 and hours["06"]["trades"] == result["pnl_cnt0"]   # the range is 06:00-06:59 JST
 
-    # Orders and bars go to InfluxDB or nowhere; PnL is the only trading data on disk.
+    # No duplicate whole metric stream is kept in the run folder. A strategy
+    # that emits BAR metrics writes those separately to the data lake.
     assert not (Path(env.work_dir) / "result").exists()
 
 

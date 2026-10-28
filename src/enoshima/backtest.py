@@ -14,6 +14,7 @@ Channel ──► Trader ──► Strategy ──► BacktestGateway
                  └──── BacktestRuntime ◄───┘
                           │ report_order / report_metrics / report_pnl
                           ├──► ResultReporter   evaluations, the run's result (always)
+                          ├──► DatalakeReporter completed BAR metrics (always)
                           └──► InfluxReporter   metrics, orders, PnL (if enoshima.json asks)
 ```
 

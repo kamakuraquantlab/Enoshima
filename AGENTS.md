@@ -88,21 +88,27 @@ but it is easy to break from here:
 - **A backtest reports through `qate`'s `Reporter` interface, like a live run.**
   `backtest.BacktestRuntime` is the synchronous counterpart of qate's `Runtime`.
   `ResultReporter` is always attached and is what a result is computed from;
+  `DatalakeReporter` is always attached and copies BAR metrics into the
+  historical research-layer `Backtest_Bar` Parquet layout;
   `InfluxReporter` is attached only when the env's `enoshima.json` has an
   `"influx"` entry. A run without InfluxDB must still finish with its result.
   `influxdb-client` is a plain dependency, not an extra: the import is not the
   optional part, the recording is. The token and URLs are `enoshima.json`'s,
   not a credential lookup -- the InfluxDB is ours, unlike the external services
   the credential files are for.
-- **PnL goes to the run folder; orders and bars go to InfluxDB.** A run's
+- **PnL goes to the run folder; bars also go to the data lake; the complete
+  chart stream goes to InfluxDB.** A run's
   closed trades are what its result is evaluated from, so `ResultReporter` keeps
   them and `run_dir` writes them as `trades.csv`, with `summary.json` and one
   `by_<grouping>.json` per `ledger.GROUPINGS` beside the provenance in
   `meta.json`. Any window or grouping is then recomputed without a replay.
-  InfluxDB is for looking at a run: orders, PnL and bars, as before. There was
-  a parquet copy of the whole metric stream under `result/` (`timeseries.py`),
-  removed because it duplicated InfluxDB; do not bring back orders or bars on
-  disk, and do not name a folder `result/` again.
+  `DatalakeReporter` writes only BAR metrics to the research-layer
+  `Backtest_Bar` Hive layout, independently of InfluxDB, so offline analysis
+  can consume the bars and their strategy-defined indicator fields. InfluxDB
+  is for looking at a run: orders, PnL and bars. There was a parquet copy of the
+  *whole* metric stream under `result/` (`timeseries.py`), removed because it
+  duplicated InfluxDB; do not restore that stream or name a folder `result/`
+  again.
 - **A run folder is written whole or not at all.** `run_dir.write` builds
   `run_log/<id>.tmp-<pid>/` and renames it into place, and `summary.json` is
   what "finished" means to the skip check. A folder that could exist without
