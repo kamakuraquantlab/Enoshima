@@ -41,7 +41,7 @@ def bar(ts: float, bar_ts: float, close: float) -> Metric:
 
 def test_bar_metrics_use_the_historical_backtest_bar_layout(tmp_path: Path):
     dt_range = DtRange.from_strings("20260102", "20260102")
-    reporter = DatalakeReporter(tmp_path, "orion.v601", "Q_0.002_0.02", dt_range)
+    reporter = DatalakeReporter(tmp_path, "example.strategy", "Q_0.002_0.02", dt_range)
 
     reporter.report_metrics(
         [
@@ -55,7 +55,7 @@ def test_bar_metrics_use_the_historical_backtest_bar_layout(tmp_path: Path):
 
     path = (
         tmp_path
-        / "research/dataset=Backtest_Bar/strategy=orion.v601/exchange=BINANCE"
+        / "research/dataset=Backtest_Bar/strategy=example.strategy/exchange=BINANCE"
         / "symbol=BTC_USDT/param_id=Q_0.002_0.02/date=2026-01-02/data.parquet"
     )
     assert path.is_file()

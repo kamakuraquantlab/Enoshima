@@ -24,7 +24,7 @@ BINANCE = Market(ExchangeName.BINANCE, Symbol.XRP_USDT)
 
 @dataclass
 class TwoVenueConfig:
-    """Trades on GMO, reads a reference price from Binance -- Orion's shape."""
+    """Trades on GMO, reads a reference price from Binance."""
 
     def get_exchanges(self):
         return [ExchangeName.GMO]

@@ -1,9 +1,9 @@
 """Persist a strategy's completed bars in the historical ``Backtest_Bar`` layout.
 
-Orion emits a ``BAR`` metric whose tags identify the market and whose fields
-contain both the bar and its indicators.  Himalaya used to copy that metric to
-the research layer of the data lake.  ``DatalakeReporter`` is the same sink for
-Enoshima's reporter-based runtime.
+A strategy may emit a ``BAR`` metric whose tags identify the market and whose
+fields contain both the bar and its indicators.  ``DatalakeReporter`` copies that
+metric to the research layer of the data lake, in the layout earlier tools
+wrote, so existing readers keep working.
 
 One file is written per strategy, market, parameter set and local calendar day::
 
@@ -81,8 +81,8 @@ class DatalakeReporter(Reporter):
 
     @staticmethod
     def _date(ts: float) -> str:
-        # Data-lake date partitions are local (JST on the data machine), as in
-        # Himalaya's datetime.fromtimestamp-based TimeSeriesStore.
+        # Data-lake date partitions are local calendar days in JST, the
+        # partitioning the existing files already use.
         return datetime.fromtimestamp(ts, JST).date().isoformat()
 
     def report_metrics(self, metrics: list[Metric]) -> None:
