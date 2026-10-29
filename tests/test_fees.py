@@ -12,9 +12,9 @@ import pytest
 from qate.core.model import ExchangeName, Market
 from qate.core.symbol import Symbol
 from qate.exchange import FeeSchedule, factory
-from test_run_end_to_end import FEES, MARKET, run_dirs, run_env  # noqa: F401 -- run_env is a fixture
+from test_run_end_to_end import FEES, MARKET, load, run_dirs, run_env  # noqa: F401 -- run_env is a fixture
 
-from enoshima import fees, run_dir
+from enoshima import fees
 from enoshima.runner import Runner
 from enoshima.settings import SETTINGS_FILE, load_settings
 
@@ -84,9 +84,9 @@ def test_a_charged_rate_reaches_the_trades_and_is_a_run_of_its_own(run_env):  # 
     Runner(env, dt_range, fee_rates={MARKET.id: FeeSchedule(maker=0.0, taker=0.001)}, chunk_days=1).run()
     [charged] = [p for p in run_dirs(env) if p != free]
 
-    assert all(t.fee == 0 for t in run_dir.read_trades(free))
-    assert all(t.fee > 0 for t in run_dir.read_trades(charged))
-    meta = run_dir.read_json(charged, run_dir.META)
+    assert all(t.fee == 0 for t in free.store.trades(free.name))
+    assert all(t.fee > 0 for t in charged.store.trades(charged.name))
+    meta = load(charged)
     assert meta["fee_rates"] == {MARKET.id: {"maker": 0.0, "taker": 0.001}}
 
 

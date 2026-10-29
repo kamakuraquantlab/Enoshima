@@ -1,10 +1,9 @@
-"""Trades, their groupings, and the run folder they are written to."""
+"""Trades and their groupings."""
 
 import pytest
 from qate.util.dt_range import DtRange
 
-from enoshima import run_dir
-from enoshima.ledger import GROUPINGS, Trade, aggregate, holding_bucket, streaks
+from enoshima.ledger import Trade, aggregate, holding_bucket, streaks
 
 # 2026-01-05 is a Monday; DtRange strings are JST.
 MONDAY_0900 = DtRange.from_strings("20260105_0900", "20260105_0900").start_ts
@@ -49,20 +48,3 @@ def test_streaks():
     got = streaks(trades)
     assert got["max_win_streak0"] == 2 and got["max_loss_streak0"] == 3
     assert got["max_win_streak10"] == 0 and got["max_loss_streak10"] == 6   # change - 2: all losses
-
-
-def test_a_folder_is_complete_only_once_written_and_force_replaces_it(tmp_path):
-    trades = [trade(MONDAY_0900, 1.0)]
-    # An interrupted write leaves a temporary folder that nothing counts.
-    (tmp_path / "run_log" / "abc.tmp-1").mkdir(parents=True)
-    (tmp_path / "run_log" / "abc.tmp-1" / run_dir.SUMMARY).write_text("{}")
-    assert list(run_dir.iter_complete(tmp_path)) == []
-
-    path = run_dir.write(tmp_path, "abc", {"id": "abc"}, {"pnl0": 1.0}, trades)
-    assert list(run_dir.iter_complete(tmp_path)) == [path]
-    assert {f"by_{name}.json" for name in GROUPINGS} <= {p.name for p in path.iterdir()}
-
-    run_dir.write(tmp_path, "abc", {"id": "abc"}, {"pnl0": 2.0}, [])
-    assert run_dir.read_json(path, run_dir.SUMMARY) == {"pnl0": 2.0}
-    assert (path / run_dir.TRADES).read_text().count("\n") == 1   # the header only
-    assert sorted(p.name for p in (tmp_path / "run_log").iterdir()) == ["abc", "abc.tmp-1"]

@@ -23,7 +23,7 @@ A **rule** is three values:
 | `history` (X) | how much past the choice is made on | `5d` |
 | `every` (Y) | how often the choice is made again; `never` chooses once and holds | `2d` |
 
-At each choice the rule takes the group's runs, cuts each run's `trades.csv` to
+At each choice the rule takes the group's runs, cuts each run's trades to
 the X hours before, and ranks them with `selection.rank`. That is the same
 filters, score and grid-neighbour smoothing that `select` uses
 ([02_selection.md](02_selection.md)), with the env's own `"selection"`
@@ -35,8 +35,8 @@ winner for the next Y hours. Chained together, those choices make the rule's
 has to clear: if choosing again on the recent past does not beat holding a
 set, the switching adds slippage and risk for nothing.
 
-Nothing is replayed. A window's figures come from the run folders already on
-disk, and a trade belongs to the JST hour it closed in, so any split on an
+Nothing is replayed. A window's figures come from the runs already in the
+data lake, and a trade belongs to the JST hour it closed in, so any split on an
 hour is exact.
 
 ## Settings (`enoshima.json`)
@@ -106,7 +106,8 @@ start, so expanding rules are collapsed to the longest history
 on the same hours. It has seen them, so it is a ceiling, not a rule.
 `--sum A+B` adds groups traded side by side, such as two schedules that split
 the day. The table goes to `env.log` and to
-`post_analysis/walk_forward_<stamp>.json` (and `.txt`).
+`post_analysis/walk_forward_<stamp>.json` (and `.txt`) in the env's analysis
+folder in the data lake, `research/enoshima/<env>/`.
 
 Trying many rules on the same test hours is itself a choice made in sample.
 Prefer the rule that holds up across groups and environments over the one with
@@ -145,7 +146,8 @@ pnl5.
 
 ## Output: `post_analysis/train/<train_id>/`
 
-The folder is written whole (`write_training`, `.tmp-<pid>` then renamed),
+In the env's analysis folder in the data lake, as the table is. The folder is
+written whole (`write_training`, `.tmp-<pid>` then renamed),
 with `summary.json` last. A viewer may read these files, so add to them rather
 than rename them.
 

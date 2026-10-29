@@ -16,7 +16,7 @@ against that.
 
 ## Which runs, in which groups
 
-`select` reads every finished, non-temporary run folder under `run_log/`. A run
+`select` reads every finished, non-temporary run of the env in the data lake. A run
 without `--weekly` is a quick look and is never a candidate.
 
 1. **By strategy, revision and range.** Runs of different variants, revisions
@@ -83,7 +83,7 @@ grid it was run on.
 
 ### 4. Walk-forward over months
 
-Each run folder has its PnL by JST month (`by_month.json`) and its trades.
+Each run has its PnL by JST month (its `by_month` grouping) and its trades.
 `select` makes its choice on the months before a test month and scores that
 choice on the following `test_months`. It then steps forward and repeats. The
 sum of the test months is what choosing this way would have earned out of
@@ -139,10 +139,12 @@ filters, score, neighbours and `group_by`.
 
 ## Output: `best_result/<batch_id>/`
 
+In the env's analysis folder in the data lake, `research/enoshima/<env>/`.
+
 | File | Holds |
 |---|---|
 | `selection.json` | per range and group: the ranking, the folds, the out-of-sample totals, the recommendation |
-| `<run_id>.json` | a copy of each recommended run's `meta.json` |
+| `<run_id>.json` | each recommended run's meta |
 
 A group where no set passes the filters has no copy, because nothing is
 recommended for it.

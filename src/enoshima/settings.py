@@ -2,12 +2,6 @@
 
 ```json
 {
-  "influx": {
-    "token": "",
-    "write_url": "http://localhost:8086",
-    "read_url": "http://localhost:8086",
-    "org": null
-  },
   "fee_rates": {
     "GMO:XRP_JPY": {"maker": 0.0, "taker": 0.0}
   },
@@ -46,12 +40,6 @@
 
 Every key is optional, and a missing file means the defaults.
 
-- `influx` turns on recording to InfluxDB. Absent or `null`, a run records
-  nothing and still has its result. `token`, `write_url` and `read_url` reach
-  the server, by default a local one with no token; `org` defaults to the only
-  one the token sees. The token lives here rather than among the credentials
-  because it is not one an outside service issued: the InfluxDB is ours, set up
-  for these runs, and the env says which one it charts to.
 - `fee_rates` is what each market charges a fill, as a fraction of notional
   (a negative maker rate is a rebate). Every market the strategy trades needs
   one, zero written out, or the run is refused before it starts: a backtest
@@ -78,14 +66,20 @@ Every key is optional, and a missing file means the defaults.
   overlap starts a different set of weeks. See `enoshima.weekly`.
 
 This is the environment's file rather than a set of flags because it describes
-the environment: where its runs are charted and how big its data is. An unknown
-key is refused rather than ignored, so a misspelt `influx` cannot quietly leave a
-run unrecorded.
+the environment: how its runs are costed, sized and judged. An unknown key is
+refused rather than ignored, so a misspelt `weekly` cannot quietly run with the
+defaults.
+
+`influx` is the one key that is accepted and ignored, with a warning: it turned
+on recording to InfluxDB, which a run no longer does -- everything it recorded
+is in the data lake (`enoshima.lake`). Refusing it would stop every env written
+before then from running at all.
 """
 
 import json
 import logging
 from dataclasses import dataclass, field, fields
+from logging import getLogger
 from pathlib import Path
 
 from qate.exchange import FeeSchedule
@@ -97,15 +91,11 @@ from .runner import MAX_CONCURRENCY
 from .selection import SelectionSettings
 from .weekly import WeeklySettings
 
+LOG = getLogger(__name__)
+
 SETTINGS_FILE = "enoshima.json"
-
-
-@dataclass
-class InfluxSettings:
-    token: str = ""
-    write_url: str = "http://localhost:8086"
-    read_url: str = "http://localhost:8086"
-    org: str | None = None
+# Keys of a file written for an earlier Enoshima: accepted, ignored, and warned about.
+RETIRED = {"influx": "a run records to the data lake, not InfluxDB; remove the entry"}
 
 
 @dataclass
@@ -113,7 +103,6 @@ class Settings:
     chunk_days: int = DEFAULT_CHUNK_DAYS
     max_concurrency: int = MAX_CONCURRENCY
     strategy_log_level: str = "WARNING"
-    influx: InfluxSettings | None = None
     fee_rates: dict[str, FeeSchedule] = field(default_factory=dict)
     selection: SelectionSettings = field(default_factory=SelectionSettings)
     walk_forward: WalkForwardSettings = field(default_factory=WalkForwardSettings)
@@ -137,14 +126,11 @@ def load_settings(work_dir: str | Path) -> Settings:
     data = json.loads(path.read_text())
     if not isinstance(data, dict):
         raise ValueError(f"{path} must hold a JSON object")
+    for key, why in RETIRED.items():
+        if key in data:
+            data.pop(key)
+            LOG.warning(f'"{key}" in {path} is ignored: {why}')
     _check_keys(data, Settings, str(path))
-
-    influx = data.pop("influx", None)
-    if influx is not None:
-        if not isinstance(influx, dict):
-            raise ValueError(f'"influx" in {path} must be an object, e.g. {{"token": "..."}}')
-        _check_keys(influx, InfluxSettings, f'"influx" in {path}')
-        influx = InfluxSettings(**influx)
 
     fee_rates = fees.parse(data.pop("fee_rates", {}), str(path))
 
@@ -160,4 +146,4 @@ def load_settings(work_dir: str | Path) -> Settings:
             _check_keys(section, cls, f'"{name}" in {path}')
             section = cls(**section)
         sections[name] = section
-    return Settings(**data, influx=influx, fee_rates=fee_rates, **sections)
+    return Settings(**data, fee_rates=fee_rates, **sections)

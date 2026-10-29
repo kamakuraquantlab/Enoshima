@@ -31,7 +31,7 @@ the longest `history` asked for. Beside the rules, `hindsight` is the set
 chosen on the whole range, scored on those same hours: it has seen them, so it
 is a ceiling, not a rule.
 
-A window's figures come from the run folder's `trades.csv`. A trade belongs to
+A window's figures come from the run's trades (`lake`'s `BacktestTrade`). A trade belongs to
 the hour it closed in, as it belongs to a day in `by_day.json`; the drawdown
 of a window, and of the out-of-sample curve across folds that changed set, is
 computed from the trades in order, so it is exact.
@@ -65,7 +65,8 @@ day's PnL is not independent of the day before's) and the training folds won
 with a sign test. Only that comparison is out of sample. Choosing among
 several training settings by their p-values is the same fit one level up.
 
-Each group's training is written to `post_analysis/train/<id>/` (`write_training`),
+Each group's training is written to `post_analysis/train/<id>/` in the env's
+analysis folder in the lake (`lake.Store.analysis_dir`, `write_training`),
 whole or not at all, to be charted.
 """
 
@@ -87,6 +88,7 @@ import numpy as np
 from qate.util.dt_range import DtRange
 
 from .. import best, selection
+from ..lake import Store
 from ..ledger import JST
 
 LOG = getLogger(__name__)
@@ -428,20 +430,20 @@ def hindsight(runs: list[dict], grid: list[dict], settings: selection.SelectionS
 # ------------------------------------------------------------------ the groups
 
 
-def _load(root: Path) -> list[dict]:
-    runs = best.load_runs(root, None)
+def _load(store: Store) -> list[dict]:
+    runs = best.load_runs(store, None)
     for r in runs:
         r["series"] = Series.of(r["result"].pop("trades"))
     return runs
 
 
-def _tasks(root: Path, settings: selection.SelectionSettings, rule_list: list[Rule],
+def _tasks(store: Store, settings: selection.SelectionSettings, rule_list: list[Rule],
            test_from: dt.datetime | None, earliest: bool = False) -> list[tuple]:
     """`(strategy, start_str, end_str, group, members, first, stop, test_from)` for every range and group.
 
     `test_from` defaults to where every rule can be tested, or with `earliest` where the first can."""
     tasks = []
-    for (strategy, start_str, end_str), groups in sorted(best.group(_load(root), settings.group_by).items(),
+    for (strategy, start_str, end_str), groups in sorted(best.group(_load(store), settings.group_by).items(),
                                                          key=lambda kv: tuple(str(k) for k in kv[0])):
         dt_range = DtRange.from_strings(start_str, end_str)
         first, stop = complete_hours(dt_range.start_ts, dt_range.end_ts)
@@ -462,9 +464,9 @@ def _map(one, tasks: list) -> list:
         return list(executor.map(one, tasks))
 
 
-def analyse(root: Path, rule_list: list[Rule], settings: selection.SelectionSettings,
+def analyse(store: Store, rule_list: list[Rule], settings: selection.SelectionSettings,
             test_from: dt.datetime | None = None) -> list[dict]:
-    """Every rule, and hindsight, for every range and group under `root`."""
+    """Every rule, and hindsight, for every range and group of `store`."""
 
     def one(task) -> dict:
         strategy, start_str, end_str, group, members, first, stop, tf = task
@@ -477,7 +479,7 @@ def analyse(root: Path, rule_list: list[Rule], settings: selection.SelectionSett
             "hindsight": public(hindsight(members, grid, settings, first, stop, tf)),
         }
 
-    return _map(one, _tasks(root, settings, rule_list, test_from))
+    return _map(one, _tasks(store, settings, rule_list, test_from))
 
 
 def _group_name(group: dict) -> str:
@@ -547,11 +549,11 @@ def _new_path(out_dir: Path, name: str, suffix: str = "") -> Path:
     return out_dir / f"{name}_{n}{suffix}"
 
 
-def run(root: Path, rule_list: list[Rule], settings: selection.SelectionSettings,
+def run(store: Store, rule_list: list[Rule], settings: selection.SelectionSettings,
         test_from: dt.datetime | None = None, sum_names: list[list[str]] | None = None) -> Path | None:
     """Analyse, log the table, and write `post_analysis/walk_forward_<stamp>.{json,txt}`; return the JSON's path."""
     rule_list = on_common_hours(rule_list)
-    groups = analyse(root, rule_list, settings, test_from)
+    groups = analyse(store, rule_list, settings, test_from)
     if not groups:
         return None
     summed = sums(groups, sum_names or [])
@@ -559,7 +561,7 @@ def run(root: Path, rule_list: list[Rule], settings: selection.SelectionSettings
     for line in lines:
         LOG.info(line)
 
-    out_dir = Path(root) / OUTPUT_DIR
+    out_dir = Path(store.analysis_dir) / OUTPUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     path = _new_path(out_dir, "walk_forward", ".json")
     path.write_text(json.dumps({"settings": asdict(settings), "rules": [asdict(r) for r in rule_list],
@@ -619,7 +621,7 @@ def compare(trained: Series, base: Series, start: dt.datetime, stop: dt.datetime
             block_days: int, resamples: int) -> dict:
     """Whether the trained curve beat the baseline over [start, stop), by day and by training fold."""
     edges = day_edges(start, stop)
-    rng = np.random.default_rng(0)  # the same answer for the same folders
+    rng = np.random.default_rng(0)  # the same answer for the same runs
     out = {"days": len(edges) - 1, "block_days": block_days, "resamples": resamples}
     for s in ("5", "10"):
         d = trained.sums(edges, s) - base.sums(edges, s)
@@ -812,7 +814,7 @@ TRAIN_FILES = ("meta.json", "folds.json", "switches.json", "runs.json", "curve.c
 CURVE_COLUMNS = ["ts", "series", "trades", *(f"pnl{s}" for s in SLIPPAGES)]
 
 
-def write_training(root: Path, train_id: str, training: dict) -> Path:
+def write_training(store: Store, train_id: str, training: dict) -> Path:
     """`post_analysis/train/<train_id>/`, built beside its final name and renamed into place.
 
         meta.json      what was trained: env, range, group, rules, baseline, settings
@@ -823,7 +825,7 @@ def write_training(root: Path, train_id: str, training: dict) -> Path:
                        (a rule's from its own first test hour)
         summary.json   the totals, the significance and the rule to trade now -- written last
     """
-    final = Path(root) / OUTPUT_DIR / TRAIN_DIR / train_id
+    final = Path(store.analysis_dir) / OUTPUT_DIR / TRAIN_DIR / train_id
     final.parent.mkdir(parents=True, exist_ok=True)
     tmp = final.with_name(f"{train_id}.tmp-{os.getpid()}")
     if tmp.exists():
@@ -864,9 +866,9 @@ def _p(p) -> str:
     return "n/a" if p is None else f"{p:.3f}"
 
 
-def run_train(root: Path, wf: WalkForwardSettings, settings: selection.SelectionSettings,
+def run_train(store: Store, wf: WalkForwardSettings, settings: selection.SelectionSettings,
               defaults: dict) -> list[Path]:
-    """Train every range and group under `root`, log each, and write each to `post_analysis/train/`."""
+    """Train every range and group of `store`, log each, and write each to `post_analysis/train/`."""
     rule_list = wf.rules()
     test_from = parse_time(wf.test_from) if wf.test_from else None
     created = time.time()
@@ -875,15 +877,15 @@ def run_train(root: Path, wf: WalkForwardSettings, settings: selection.Selection
         strategy, start_str, end_str, group, members, first, stop, inner_from = task
         training = train(members, group, settings, wf, rule_list, defaults, first, stop, inner_from)
         if training is not None:
-            training["meta"] = {"env": Path(root).name, "strategy": strategy, "start_str": start_str,
+            training["meta"] = {"env": store.env, "strategy": strategy, "start_str": start_str,
                                 "end_str": end_str, "group": group, "runs": len(members),
                                 "created_ts": created, **training["meta"],
                                 "settings": {"selection": asdict(settings), "walk_forward": asdict(wf)}}
         return training
 
-    trainings = [t for t in _map(one, _tasks(root, settings, rule_list, test_from, earliest=True))
+    trainings = [t for t in _map(one, _tasks(store, settings, rule_list, test_from, earliest=True))
                  if t is not None]
-    out_dir = Path(root) / OUTPUT_DIR / TRAIN_DIR
+    out_dir = Path(store.analysis_dir) / OUTPUT_DIR / TRAIN_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     base = _new_path(out_dir, "train").name
     paths = []
@@ -891,6 +893,6 @@ def run_train(root: Path, wf: WalkForwardSettings, settings: selection.Selection
         for line in train_table(training["meta"], training["summary"]):
             LOG.info(line)
         training["meta"]["train_id"] = f"{base}_{n}"
-        paths.append(write_training(root, f"{base}_{n}", training))
+        paths.append(write_training(store, f"{base}_{n}", training))
         LOG.info(f"Saved {paths[-1]}")
     return paths

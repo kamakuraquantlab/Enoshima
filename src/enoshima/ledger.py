@@ -1,9 +1,9 @@
 """A run's closed trades, and the same trades grouped by time and by kind.
 
 `ResultReporter` keeps one `Trade` per closed position inside the range, with
-the PnL change it made at each slippage rate. Everything else in a run folder
+the PnL change it made at each slippage rate. Everything else of a run's result
 that is not provenance is computed from that list: the whole-range summary is
-`Evaluation`'s, and every `by_*.json` is `aggregate` over one of `GROUPINGS`.
+`Evaluation`'s, and every grouping (`by_<name>`) is `aggregate` over one of `GROUPINGS`.
 
 ## A group's row
 

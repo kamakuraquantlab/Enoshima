@@ -1,9 +1,9 @@
-"""The string that names a run's parameter set: the start of its InfluxDB bucket, and its run log's tag.
+"""The string that names a run's parameter set, readably: recorded in its meta, for finding it by.
 
 Built here from `strategy_param_grid.json`, not by the strategy. It used to be each
 strategy's `get_param_set_id`, which made every strategy carry code that has
-nothing to do with trading, and made the bucket a run wrote to depend on which
-override a variant happened to inherit.
+nothing to do with trading, and made the name a run was recorded under depend on
+which override a variant happened to inherit.
 
 ## How it is built
 
@@ -20,16 +20,17 @@ stands for all of it, and within one environment only the parameters vary.
 Each value is written as itself, as a plain decimal: `0.00001`, never `1e-05`, and
 `10.0` as `10`. Grid specs once carried a `"factor"` to scale values into integers
 and keep the id free of dots; that made `200` mean 0.002 in one place and 0.2 in
-another, renamed every bucket when a factor changed, and fell silently to 1 when
+another, renamed every InfluxDB bucket when a factor changed, and fell silently to 1 when
 one was missing or misspelt. A bucket name may contain a dot, so it went.
 
 The grid gives only the order, so that the same values give the same id whether
 they came from the grid defaults or an expanded combination. Parameters the grid
 does not name follow, in the order the parameter set gives them. An environment
 with no grid gets that for every parameter. Widening a sweep does not rename the
-buckets of the combinations already run; reordering the grid does.
+ids of the combinations already run; reordering the grid does.
 
-The bucket adds the batch id to it; see `influx.bucket_name`.
+It is recorded in each run's meta and the lake's `BacktestRun`, for a reader to
+find a parameter set by; the run id, not this, is what partitions the files.
 """
 
 from decimal import Decimal

@@ -1,10 +1,10 @@
-"""What a run recorded about itself: its folder's `meta.json`.
+"""What a run recorded about itself: its `meta`, in the lake's `BacktestRun` and `BacktestPart`.
 
 A run log is the provenance of a number. It holds the environment, the library
 revision, the config, the exact parameters and the date range, so a figure in a
 notebook or an article can be traced back to the run that produced it and
-re-run. The numbers themselves are beside it in the run's folder; see
-`run_dir`.
+re-run. The numbers themselves are beside it, under the same run id in the
+lake; see `lake`.
 
 ## The id is deterministic, and that is what makes a run resumable
 
@@ -13,7 +13,7 @@ environment, the strategy and variant, the revision of the variant's source
 (`strategy_env.strategy_rev`), the parameter set, the non-zero fee rates of
 the markets it trades (`fees.identity`), and the date range.
 Two runs that would compute the same thing therefore have the same id -- the
-name of their folder -- so `Runner` can see that a result already exists and
+`run_id` partition of their files -- so `Runner` can see that a result already exists and
 skip it. An optimize sweep over
 two hundred parameter sets that dies at number ninety resumes at ninety rather
 than starting again.
@@ -22,8 +22,8 @@ It was a random UUID before, which meant the "a run log exists for this range"
 check could never once have fired — every fresh log had a new id and every
 combination was recomputed. `--force` is now the way to say recompute anyway.
 
-A weekly run's id (`weekly`) has no dates in it, and the preload and overlap instead: its
-folder holds every week computed for that environment, strategy and parameter
+A weekly run's id (`weekly`) has no dates in it, and the preload and overlap instead: it
+holds every week computed for that environment, strategy and parameter
 set, and a window is whichever of them it covers.
 
 Any other run is temporary (`is_temporary_run`): a quick look at some days,
@@ -53,7 +53,7 @@ def identity(env: str, strategy: str, strategy_rev: str, params: dict, fee_rates
     """
     data = {"env": env, "strategy": strategy, "strategy_rev": strategy_rev, "params": params}
     # Only when one is non-zero: a zero rate computes what a run made before
-    # rates were stated, and must keep that run's folder.
+    # rates were stated, and must keep that run's id.
     if charged := fees.identity(fee_rates):
         data["fee_rates"] = charged
     if weekly is None:
@@ -69,9 +69,9 @@ def run_id(identity: dict) -> str:
 
 
 def identity_from_meta(meta: dict, strategy_rev: str | None = None) -> dict:
-    """A recorded run's identity, from its `meta.json`, with its revision replaced if given.
+    """A recorded run's identity, from its meta, with its revision replaced if given.
 
-    With the meta's own revision it should hash back to the folder's name; a
+    With the meta's own revision it should hash back to the run's id; a
     caller relying on this checks that before trusting it.
     """
     weekly = None
@@ -115,7 +115,6 @@ class BacktestLog(RunLog):
         self.fee_rates = fee_rates or {}
         self.batch_id = batch_id
         self.param_set_id = None
-        self.influx_bucket = None
         self.result = None
         self.end_ts = None
         # Set for one week of a weekly run: the preload and overlap are in the id, the week is not.
@@ -126,9 +125,8 @@ class BacktestLog(RunLog):
         """A hash of what the run computes, so an identical run is recognisable.
 
         Deliberately excludes the batch id and the timestamps: those differ between two runs that would produce the same
-        numbers, and the point is to notice that they would. The batch id is in the
-        InfluxDB bucket instead, so a `--force` re-run replaces this folder and writes
-        a bucket of its own.
+        numbers, and the point is to notice that they would. A `--force` re-run
+        replaces the run's files in the lake.
         """
         weekly = None
         if self.week_key is not None:
@@ -149,7 +147,6 @@ class BacktestLog(RunLog):
                 "fee_rates": fees.to_json(self.fee_rates),
                 "start_str": self.dt_range.start_str,
                 "end_str": self.dt_range.end_str,
-                "influx_bucket": self.influx_bucket,
             }
         )
         if self.week_key is not None:
@@ -170,13 +167,13 @@ class BacktestLog(RunLog):
         return data
 
     def weekly_meta(self) -> dict:
-        """What every week of a weekly run shares, for its root `meta.json`: no range, no batch, no timings."""
+        """What every week of a weekly run shares, for its `BacktestRun` row: no range, no batch, no timings."""
         data = self.to_dict()
         for key in ("start_ts", "batch_id", "start_str", "end_str", "week", "partial", "end_ts", "execution_time"):
             data.pop(key, None)
         return data
 
     def set_result(self, result: dict) -> None:
-        """The run's summary, which `run_dir` writes beside this log rather than in it."""
+        """The run's summary, which `lake` writes beside this log rather than in it."""
         self.result = result
         self.end_ts = time.time()

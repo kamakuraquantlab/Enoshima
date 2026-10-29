@@ -7,12 +7,13 @@ enoshima web --setup                    # once: the viewer's own env, ENOSHIMA_A
 enoshima web                            # http://localhost:9768
 ```
 
-Every run folder and walk-forward training the other commands wrote, as one
-page: a table of all runs, a chart page per run, and the trainings. Like
-`select` and `walk-forward`, it replays nothing; it reads the folders on disk.
-It launches nothing either: there is no endpoint that runs a backtest, changes
-a parameter or writes a config. The one thing it changes is a run folder it is
-asked to delete. The module docstring (`enoshima.web`) is the reference.
+Every run and walk-forward training the other commands wrote to the data
+lake, as one page: a table of all runs, a chart page per run, and the
+trainings. Like `select` and `walk-forward`, it replays nothing; it reads the
+lake ([00_overview.md](00_overview.md#where-the-results-are)) at komachi's
+root, as every command does. It launches nothing either: there is no endpoint
+that runs a backtest, changes a parameter or writes a config. The one thing it
+changes is a run it is asked to delete. The module docstring (`enoshima.web`) is the reference.
 
 ## Its env, `ENOSHIMA_API`
 
@@ -22,37 +23,34 @@ in one folder. `--setup` writes:
 
 ```text
 ENOSHIMA_API/
-├── config.json              {"port": 9768, "results_dirs": ["."]}
+├── config.json              {"port": 9768}
 ├── grafana_dashboard.json   {"dashboards": []}
 └── env.log                  once it has run
 ```
 
-`results_dirs` are the folders under the root that envs are looked for in.
-An env is listed when it has a `run_log/`, so the viewer's own env never is.
-With envs kept in a subfolder as well, `~/env/backtest/NAME`, it is
-`[".", "backtest"]`. Each run carries its `source`, the env's path under the
-root, so two envs of one name in different folders stay apart. Both files are
-read once at start.
+An env is listed when the lake has a finished run of it, wherever its
+definition lives. A `results_dirs` left in `config.json` from when the viewer
+read env folders is ignored. Both files are read once at start.
 
 ## What it shows
 
-**The table** is every finished run, newest first: meta.json flattened into
-columns, and summary.json as `result.*`. Envs are tabs; a keyword search
+**The table** is every finished run, newest first: its meta flattened into
+columns, and its summary as `result.*`. Envs are tabs; a keyword search
 checks every field; clicking a batch id filters by it; headers sort on several
 columns; × hides a column, and the hidden ones and the sort are kept in the
 browser. `recommended in` lists the `select` batches whose `best_result/`
-chose the run. Enable Delete to tick runs and delete their folders, after
-confirming; their InfluxDB buckets stay.
+chose the run. Enable Delete to tick runs and delete their files in the lake,
+after confirming.
 
 **charts** on a row opens the run: equity at each slippage with its drawdown
 and the traded market's price, the distribution of trade PnL, holding time
-against PnL, every `by_<grouping>.json` as bars and a table, and a weekday ×
+against PnL, every grouping (`by_<grouping>.json`) as bars and a table, and a weekday ×
 hour heatmap. Time groups use each trade's open time in JST. A pnl0 / pnl5 /
 pnl10 switch applies to the whole page. The slider under the drawdown is the
 page's range: sliding it, scrolling on the equity chart or picking dates
 narrows every tile, chart and grouping to the trades closed in it, recomputed
-the way `summarize` computes the whole run's. The Summary panel stays
-summary.json's.
+the way `summarize` computes the whole run's. The Summary panel stays the
+run's summary.
 
 The price is the market's last recorded trade per step, read through hase, the
 step the finest that keeps a range to 5,000 points: four hours for a year, five
@@ -73,29 +71,31 @@ candidate's score at each retraining, and the parameter set held over time.
 
 ## Links to a dashboard
 
-A run recorded to InfluxDB can link to a dashboard that reads its bucket. The
-viewer names none: `grafana_dashboard.json` in its env lists them, and a
-strategy's dashboard and entry are kept with the strategy.
+A run can link to a dashboard of its own -- one reading what a loader put in
+InfluxDB from the lake, say. The viewer names none: `grafana_dashboard.json`
+in its env lists them, and a strategy's dashboard and entry are kept with the
+strategy.
 
 ```json
 {"dashboards": [{
   "match": {"trading.module_name": "example.strategy"},
   "url": "/grafana/d/example-backtest",
-  "query": {"var-bucket": "{influx_bucket}", "var-symbol": "{symbol}",
+  "query": {"var-run": "{id}", "var-symbol": "{symbol}",
             "from": "{start_ms}", "to": "{end_ms}"}
 }]}
 ```
 
-- `match`: keys of the flattened meta.json (`trading.module_name`,
+- `match`: keys of the flattened meta (`trading.module_name`,
   `config.market`, `params.x`) and the values they must equal.
-- `{key}` in `url` and `query`: a flattened meta.json value, or `exchange`,
+- `{key}` in `url` and `query`: a flattened meta value, or `exchange`,
   `symbol` and `base` from `config.market` (`COINCHECK:BTC_SPOT` gives
   `COINCHECK`, `BTC_SPOT`, `BTC`), or `start_ms` and `end_ms`, the run's range
   in epoch milliseconds (`start_str` and `end_str` read as JST).
 
 The first dashboard that matches, and has a value for every placeholder, gives
-the run its link. A run without a bucket has no `{influx_bucket}`, so it gets
-no link. With no dashboards there is no link column.
+the run its link. Runs written to the lake have no `influx_bucket`, so a
+dashboard asking for `{influx_bucket}` links only those imported from before
+the lake. With no dashboards there is no link column.
 
 ## The API
 
@@ -103,22 +103,23 @@ The page is `web/` (React), served from `web/dist`. Behind it:
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/envs` | env names with a `run_log/` |
-| `GET /api/results[?env=NAME]` | every finished run: meta.json, summary.json as `result`, `source`, `recommended_in`, `walk_forward`, `grafana_url` |
+| `GET /api/envs` | env names with a finished run in the lake |
+| `GET /api/results[?env=NAME]` | every finished run: its meta, its summary as `result`, `source` (the env), `recommended_in`, `walk_forward`, `grafana_url` |
 | `GET /api/runs/<env>/<run_id>?source=S` | a run's meta, summary, file list and `grafana_url` |
-| `GET /api/runs/<env>/<run_id>/files/<name>?source=S` | `meta.json`, `summary.json`, `trades.csv` or a `by_*.json`, nothing else |
+| `GET /api/runs/<env>/<run_id>/files/<name>?source=S` | `meta.json`, `summary.json`, `trades.csv`, a `by_*.json`, or the records as `orders.csv`, `pnl.csv`, `bars.csv`, `metrics.csv`; nothing else |
 | `GET /api/runs/<env>/<run_id>/walk-forward?source=S` | the run against every rule of its group's newest training |
-| `DELETE /api/results/<env>/<run_id>?source=S` | deletes the run folder |
+| `DELETE /api/results/<env>/<run_id>?source=S` | deletes the run's files, in every dataset |
 | `GET /api/trainings[?env=NAME]` | every finished `post_analysis/train/<id>/` |
 | `GET /api/trainings/<env>/<train_id>?source=S` | a training's meta, summary and file list |
 | `GET /api/trainings/<env>/<train_id>/files/<name>?source=S` | one of the files `--train` writes |
 | `GET /api/prices?market=EX:SYM&start=&end=` | the market's last trade price per step, epoch seconds in |
 
-A folder is finished once it has `summary.json`; a `.tmp-*` folder is still
-being written and is not listed. Envs are matched against the ones discovered,
-never a path from the request; names with a dot and symlinks are refused.
-Non-finite numbers come back as null. `source` is needed only when two envs
-share a name.
+A run is finished once it has its `BacktestRun` row; a training folder once it
+has `summary.json`, and a `.tmp-*` one is still being written and is not
+listed. Envs are matched against the ones discovered, never a path from the
+request; ids with a dot and symlinks are refused. Non-finite numbers come back
+as null. `source` is the env's name; the page sends it back, and it is not
+needed.
 
 ## As a service
 

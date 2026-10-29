@@ -6,19 +6,19 @@
   from `--split` to `--to`: a backtest extended by a later run.
 - **B** runs `--weekly` from `--from` to `--to` in one go.
 
-Then every run folder of A is compared with B's, point to point: every trade of
-every week and of the root, field by field; every figure of every
-`summary.json` and `by_*.json`; and every `meta.json` but for when and in
+Then every run of A is compared with B's, point to point: every trade of
+every week, field by field; every figure of every summary, the run's and each
+week's; every record file, byte for byte; and every meta but for when and in
 which batch a week ran. Each is reported where it differs, and the exit status
 is 0 only if nothing does. `tests/test_weekly.py` holds the same property on
 synthetic data; this is the same check against the strategy and the data that
 matter.
 
-The env is never run in place. Its definition -- every file but its results,
-its log and its lock -- is copied into two fresh environments under `--out`, A
-and B, and each writes there. InfluxDB is off: a weekly run's bucket is named
-by its run id, which a copy shares with the env it came from, and writing one
-week clears that week's points from the bucket.
+The env is never run in place. Its definition -- every file but its log and its
+lock -- is copied into two fresh environments under `--out`, A and B, and each
+writes its results to a lake of its own there, `A/lake` and `B/lake`: a copy
+has the env's name, so its run ids are the env's, and in the data lake it
+would write over the env's results.
 
 The data is komachi's, as for any run: `ROOT_PATH` in komachi's settings file.
 The strategy must be importable, as for `enoshima run`. `enoshima.json` is the
@@ -43,13 +43,14 @@ from qate.util.dt_range import DtRange
 from qate_env import sys_env
 from qate_env.env import Env
 
-from enoshima import run_dir
+from enoshima import lake
 from enoshima.cli import quiet_strategy_logs
+from enoshima.lake import Store
 from enoshima.ledger import Trade
 from enoshima.runner import Runner
 from enoshima.settings import load_settings
 
-# What a run leaves in its env, rather than what defines it.
+# What a run leaves in its env, rather than what defines it -- and the folders it once wrote results to.
 OUTPUTS = ("run_log", "best_result", "post_analysis", "env.log*", "*.lock", "lock")
 # What differs between two runs that computed the same numbers: when, and in which batch.
 RUN_FIELDS = {"batch_id", "start_ts", "end_ts", "execution_time"}
@@ -64,8 +65,8 @@ def copy_env(name: str, root: Path) -> Env:
     return Env(str(root), name)
 
 
-def run(env: Env, dt_range: DtRange, args) -> tuple[float, int]:
-    """One `enoshima run --weekly`, without InfluxDB. Its wall time, in seconds, and its batch id."""
+def run(env: Env, dt_range: DtRange, args, lake_root: Path) -> tuple[float, int]:
+    """One `enoshima run --weekly`, its results in `lake_root`. Its wall time, in seconds, and its batch id."""
     env.enter()
     try:
         settings = load_settings(env.work_dir)
@@ -75,8 +76,9 @@ def run(env: Env, dt_range: DtRange, args) -> tuple[float, int]:
             optimize=args.optimize,
             chunk_days=args.chunk_days or settings.chunk_days,
             max_concurrency=args.max_concurrency or settings.max_concurrency,
-            influx=None,
             weekly=settings.weekly,
+            fee_rates=settings.fee_rates,
+            lake_root=lake_root,
         )
         quiet_strategy_logs(runner.definition.module_name, settings.strategy_log_level)
         started = time.monotonic()
@@ -144,37 +146,41 @@ def compare_trades(report: Report, where: str, a: list[Trade], b: list[Trade]) -
                 )
 
 
-def compare_folder(report: Report, a: Path, b: Path) -> None:
-    files_a = {str(f.relative_to(a)) for f in a.rglob("*") if f.is_file()}
-    files_b = {str(f.relative_to(b)) for f in b.rglob("*") if f.is_file()}
-    for name in sorted(files_a ^ files_b):
-        report.differ(a.name, f"{name} only in {'A' if name in files_a else 'B'}")
-    for name in sorted(files_a & files_b):
-        where = f"{a.name}/{name}"
-        fa, fb = a / name, b / name
-        if fa.name == run_dir.TRADES:
-            compare_trades(report, where, run_dir.read_trades(fa.parent), run_dir.read_trades(fb.parent))
-            if fa.read_bytes() != fb.read_bytes():
-                report.differ(where, "the files are not byte-identical")
-        elif fa.suffix == ".json":
-            va, vb = run_dir.read_json(fa.parent, fa.name), run_dir.read_json(fb.parent, fb.name)
-            if fa.name == run_dir.META:
-                va = {k: v for k, v in va.items() if k not in RUN_FIELDS}
-                vb = {k: v for k, v in vb.items() if k not in RUN_FIELDS}
-            compare_values(report, where, va, vb)
-        elif fa.read_bytes() != fb.read_bytes():
-            report.differ(where, "the files differ")
+def compare_row(report: Report, where: str, a: dict, b: dict) -> None:
+    """Two runs' or parts' meta, but for when and in which batch, and their summaries."""
+    meta_a = {k: v for k, v in a["meta"].items() if k not in RUN_FIELDS}
+    meta_b = {k: v for k, v in b["meta"].items() if k not in RUN_FIELDS}
+    compare_values(report, f"{where} meta", meta_a, meta_b)
+    compare_values(report, f"{where} summary", a["summary"], b["summary"])
 
 
-def print_weeks(a: Path, b: Path, batches: tuple[int, ...]) -> None:
+def compare_run(report: Report, a: Store, b: Store, run_id: str) -> None:
+    if a.is_complete(run_id) != b.is_complete(run_id):
+        report.differ(run_id, f"finished only in {'A' if a.is_complete(run_id) else 'B'}")
+    elif a.is_complete(run_id):
+        compare_row(report, run_id, a.read_run(run_id), b.read_run(run_id))
+    parts_a, parts_b = set(a.parts(run_id)), set(b.parts(run_id))
+    for part in sorted(parts_a ^ parts_b):
+        report.differ(run_id, f"{part} only in {'A' if part in parts_a else 'B'}")
+    for part in sorted(parts_a & parts_b):
+        where = f"{run_id}/{part}"
+        compare_row(report, where, a.read_part(run_id, part), b.read_part(run_id, part))
+        compare_trades(report, where, a.read_part_trades(run_id, part), b.read_part_trades(run_id, part))
+        for dataset in lake.DATA:
+            fa, fb = a.path(dataset, run_id, part), b.path(dataset, run_id, part)
+            if fa.is_file() != fb.is_file():
+                report.differ(where, f"{dataset} only in {'A' if fa.is_file() else 'B'}")
+            elif fa.is_file() and fa.read_bytes() != fb.read_bytes():
+                report.differ(where, f"{dataset}: the files are not byte-identical")
+
+
+def print_weeks(a: Store, b: Store, run_id: str, batches: tuple[int, ...]) -> None:
     """Each week's trades and pnl in A and B, and which of A's runs computed it."""
     print(f"  {'week':<10} {'run':>3} {'trades':>7} {'pnl5 A':>14} {'pnl5 B':>14}  range")
-    weeks = a / run_dir.WEEKS_DIR
-    for week in sorted(p.name for p in weeks.iterdir()) if weeks.is_dir() else []:
-        sa = run_dir.read_json(weeks / week, run_dir.SUMMARY)
-        sb = run_dir.read_json(b / run_dir.WEEKS_DIR / week, run_dir.SUMMARY) \
-            if (b / run_dir.WEEKS_DIR / week / run_dir.SUMMARY).is_file() else {}
-        meta = run_dir.read_json(weeks / week, run_dir.META)
+    for week in a.parts(run_id):
+        found = a.read_part(run_id, week)
+        sa, meta = found["summary"], found["meta"]
+        sb = b.read_part(run_id, week)["summary"] if b.has_part(run_id, week) else {}
         which = batches.index(meta["batch_id"]) + 1 if meta["batch_id"] in batches else "?"
         part = " (partial)" if meta.get("partial") else ""
         print(f"  {week:<10} {which:>3} {sa['pnl_cnt0']:>7} {sa['pnl5']:>14.2f} {sb.get('pnl5', float('nan')):>14.2f}"
@@ -207,28 +213,26 @@ def main(argv=None) -> int:
     print(f"Copies of {args.env} in {out}")
 
     print(f"A: {first.start_str[:10]}..{first.end_str[:10]}, then {second.start_str[:10]}..{second.end_str[:10]}")
-    a1, batch1 = run(env_a, first, args)
-    a2, batch2 = run(env_a, second, args)
+    store_a, store_b = Store(out / "A" / "lake", args.env), Store(out / "B" / "lake", args.env)
+    a1, batch1 = run(env_a, first, args, store_a.root)
+    a2, batch2 = run(env_a, second, args, store_a.root)
     print(f"B: {whole.start_str[:10]}..{whole.end_str[:10]}")
-    b, _ = run(env_b, whole, args)
+    b, _ = run(env_b, whole, args, store_b.root)
     print(f"Wall time: A {a1:.0f}s + {a2:.0f}s = {a1 + a2:.0f}s, B {b:.0f}s")
 
-    root_a, root_b = Path(env_a.work_dir) / run_dir.RUN_LOG_DIR, Path(env_b.work_dir) / run_dir.RUN_LOG_DIR
-    ids_a = {p.name for p in root_a.iterdir()} if root_a.is_dir() else set()
-    ids_b = {p.name for p in root_b.iterdir()} if root_b.is_dir() else set()
+    ids_a, ids_b = set(store_a.all_run_ids()), set(store_b.all_run_ids())
     if not ids_a and not ids_b:
         print("Nothing ran: no week of the range has its data, and its overlap's, on disk")
         return 1
 
     report = Report()
     for run_id in sorted(ids_a ^ ids_b):
-        report.differ(run_id, f"run folder only in {'A' if run_id in ids_a else 'B'}")
+        report.differ(run_id, f"run only in {'A' if run_id in ids_a else 'B'}")
     for run_id in sorted(ids_a & ids_b):
-        folder_a, folder_b = root_a / run_id, root_b / run_id
-        meta = run_dir.read_json(folder_a, run_dir.META)
+        meta = store_a.read_part(run_id, store_a.parts(run_id)[0])["meta"]
         print(f"\n{run_id} {meta.get('param_set_id')}")
-        print_weeks(folder_a, folder_b, (batch1, batch2))
-        compare_folder(report, folder_a, folder_b)
+        print_weeks(store_a, store_b, run_id, (batch1, batch2))
+        compare_run(report, store_a, store_b, run_id)
 
     print(f"\n{report.compared} values compared, {report.differences} different")
     if report.differences:

@@ -3,18 +3,15 @@
 `ResultReporter` is the reporter every backtest has. It evaluates each fill and
 each closed position, and keeps the closed positions themselves as
 `ledger.Trade`s. Its `get_result` is the run's summary -- the whole-range
-figures a run folder's `summary.json` holds and `select` filters on -- and
-`trades` is what the folder's `trades.csv` and `by_*.json` are written from.
+figures a run's summary holds and `select` filters on -- and `trades` is what
+its `BacktestTrade` file and its groupings are written from (`lake`).
 
-PnL is kept in the run folder because it is what a result is evaluated from:
-with the trades there, any grouping or window -- `selection`'s walk-forward
-months among them -- is recomputed without a replay. Completed bars and their
-strategy-defined indicators are also written to the data lake's historical
-`Backtest_Bar` layout by `datalake.DatalakeReporter`. Orders and the complete
-chart stream go to InfluxDB through `influx.InfluxReporter`, for looking at a
-run, and only when a run asks for it.
-When InfluxDB recording is enabled, the evaluations write their own `EVAL`
-metrics directly through the run's writer. They are results, not strategy
+The trades are kept, in the lake's `BacktestTrade`, because they are what a
+result is evaluated from: with them any grouping or window -- `selection`'s
+walk-forward months among them -- is recomputed without a replay. Fills, PnL
+updates, bars and other metrics are kept beside them by
+`records.RecordReporter`, for looking at a run. The evaluations hand their own
+`EVAL` metrics to that reporter directly: they are results, not strategy
 metrics, and do not re-enter the runtime's reporter dispatch.
 
 ## Strict weekly runs
@@ -44,8 +41,8 @@ from qate.trading.reporter import Reporter
 from qate.util.dt_range import DtRange
 
 from .eval import SLIPPAGE_05, SLIPPAGE_10, Evaluation
-from .influx import InfluxdbWriter, convert_to_point
 from .ledger import Trade, streaks
+from .records import RecordReporter
 from .weekly import summarize
 
 # Below this, what is left of a position's open notional is rounding, not a position.
@@ -67,7 +64,7 @@ def in_range(ts: float, dt_range: DtRange) -> bool:
 class ResultReporter(Reporter):
     """Evaluates a backtest at each slippage rate."""
 
-    def __init__(self, dt_range: DtRange, writer: InfluxdbWriter | None = None, strict: bool = False):
+    def __init__(self, dt_range: DtRange, records: RecordReporter | None = None, strict: bool = False):
         super().__init__()
         self.dt_range = dt_range
         # The range as this reporter's own floats, compared on every event.
@@ -76,7 +73,7 @@ class ResultReporter(Reporter):
         # per event made `settled` 90% of a weekly sweep, and a day 10x slower.
         self._start_ts = dt_range.start_ts
         self._end_ts = dt_range.end_ts
-        self.writer = writer
+        self.records = records
         self.strict = strict
         # Open notional per (market, side), warmup included -- a strict run's: only
         # the positions opened in range. What the replay ends holding.
@@ -157,9 +154,9 @@ class ResultReporter(Reporter):
             )
         )
 
-        if self.writer is not None:
+        if self.records is not None:
             for metric in eval_metrics:
-                self.writer.add(convert_to_point(metric))
+                self.records.add_metric(metric)
 
     def settled(self, ts: float, pending_opens) -> bool:
         """Whether a strict run has nothing left to report at `ts`: past its range, none of its positions open.

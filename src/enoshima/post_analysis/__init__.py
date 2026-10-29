@@ -1,4 +1,4 @@
-"""Analyses of a finished sweep, computed from its run folders -- nothing is replayed.
+"""Analyses of a finished sweep, computed from its runs in the lake -- nothing is replayed.
 
 | Module | Asks |
 |---|---|

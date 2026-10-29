@@ -51,12 +51,13 @@ default). For 2026-W41, 10-05 to 10-11:
 
 A trade's PnL is recorded when its position closes, and is counted in the week
 the position *opened* in. Each trade is therefore counted by exactly one week.
-The orders a week counts, behind the slippage averages and in InfluxDB, are its
-own trades' legs, wherever they filled, so they also add up across weeks.
+The orders a week counts, behind the slippage averages and in its
+`BacktestOrder` file, are its own trades' legs, wherever they filled, so they
+also add up across weeks; its `BacktestPnl` updates are those trades' too.
 
 `by_week.json` groups by *close*, like every `by_*.json`. A trade opened on a
 Sunday and closed on the Monday is in the next week's row there, and in its own
-week's folder.
+week's part.
 
 ## As far as the data goes
 
@@ -83,47 +84,48 @@ It does not promise equality with one continuous replay. Each week starts cold:
 - a trade the overlap did not see closed is in no week.
 
 Make the preload longer than the strategy's memory, and the overlap longer than
-its holding time. Each week's `summary.json` has `open_at_end`, the positions
+its holding time. Each week's summary has `open_at_end`, the positions
 the week opened that were still held when its replay ended.
 
 ## How the result is saved
 
-One folder per environment, strategy revision, parameter set, preload and
-overlap. There are no dates in its id, so every weekly run of them adds to it:
+One run id per environment, strategy revision, parameter set, preload and
+overlap. There are no dates in it, so every weekly run of them adds to it, in
+the data lake ([00_overview.md](00_overview.md#where-the-results-are)):
 
 ```text
-run_log/<run_id>/
-├── meta.json, summary.json,      rebuilt from every week on disk: an ordinary
-│   trades.csv, by_*.json         run over the first Monday .. the last Sunday
-└── weeks/<YYYY-Www>/             what a run writes, one week at a time
-    ├── meta.json                 the week's provenance: batch, bucket, timings, partial
-    ├── summary.json              the week's figures, plus order counters and open_at_end
-    └── trades.csv
+research/dataset=BacktestRun/env=<env>/run_id=<id>/          rebuilt from every week on disk: an
+                                                             ordinary run over the first Monday ..
+                                                             the last Sunday
+research/dataset=BacktestPart/env=<env>/run_id=<id>/part=<YYYY-Www>/
+                                                             the week's provenance (batch, timings,
+                                                             partial) and figures, plus order
+                                                             counters and open_at_end
+research/dataset=BacktestTrade/.../part=<YYYY-Www>/          the week's trades, and its orders, PnL,
+research/dataset=BacktestOrder/..., BacktestPnl/, ...        bars and metrics beside them
 ```
 
-- **Each week is written whole**, into a temporary folder renamed into place.
-- **The root files are never the current run's result.** They are rebuilt
+- **Each week is written whole**: its data files first, each renamed into
+  place, and its `BacktestPart` row last. Written again (`--force`, or a
+  partial week the data now reaches further into), every file of the week is
+  replaced, so nothing of the earlier write remains.
+- **The run's row is never the current run's result.** It is rebuilt
   (`weekly.rebuild`) from all the weeks on disk, over the first week's start to
-  the last week's end (a partial week's own end). A weekly root therefore looks
-  like any other run folder, and `results`, `select` and `walk-forward` read it
+  the last week's end (a partial week's own end). A weekly run therefore looks
+  like any other run, and `results`, `select` and `walk-forward` read it
   unchanged.
-- **No gaps.** To keep the root's range true, a run also replays the weeks
+- **No gaps.** To keep the run's range true, a run also replays the weeks
   between those on disk and those asked for: with weeks 1–10 on disk and week
-  30 asked for, it replays 11–30. A root whose weeks have a gap (a week that
-  failed) has no `summary.json` until a run fills it, and an unfinished folder
+  30 asked for, it replays 11–30. A run whose weeks have a gap (a week that
+  failed) has no `BacktestRun` row until a run fills it, and an unfinished one
   is not read.
-- **A new strategy revision is a new folder**, so weeks of two versions of the
+- **A new strategy revision is a new run id**, so weeks of two versions of the
   code are never put together.
-- **InfluxDB**, if configured, gets one bucket for the run,
-  `backtest_<param_set_id>_w<run_id>`, with every point tagged `week=<YYYY-Www>`.
-  A week's points are deleted by that tag before the week is written again.
-  The delete goes by tag rather than by time because a Sunday open has its
-  close-aligned copy on the Monday.
 
-The root's `trades.csv` and `by_month.json` are what
+The run's trades and its by-month grouping are what
 [selection](02_selection.md) ranks and walks forward on, and
 [walk-forward](03_walk_forward.md) cuts its hourly windows from the same
-`trades.csv`. Neither replays anything.
+trades. Neither replays anything.
 
 ## Checking it
 

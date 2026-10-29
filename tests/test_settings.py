@@ -6,46 +6,44 @@ import pytest
 
 from enoshima.data_source import DEFAULT_CHUNK_DAYS
 from enoshima.runner import MAX_CONCURRENCY
-from enoshima.settings import SETTINGS_FILE, InfluxSettings, load_settings
+from enoshima.settings import SETTINGS_FILE, load_settings
 
 
 def write(tmp_path, data) -> None:
     (tmp_path / SETTINGS_FILE).write_text(json.dumps(data))
 
 
-def test_no_file_means_the_defaults_and_no_influx(tmp_path):
+def test_no_file_means_the_defaults(tmp_path):
     settings = load_settings(tmp_path)
     assert settings.chunk_days == DEFAULT_CHUNK_DAYS
     assert settings.max_concurrency == MAX_CONCURRENCY
-    assert settings.influx is None
 
 
-def test_the_file_sizes_a_run_and_turns_on_influx(tmp_path):
-    write(tmp_path, {"chunk_days": 1, "max_concurrency": 4, "influx": {"token": "t", "write_url": "http://db:8086"}})
+def test_the_file_sizes_a_run(tmp_path):
+    write(tmp_path, {"chunk_days": 1, "max_concurrency": 4})
     settings = load_settings(tmp_path)
     assert (settings.chunk_days, settings.max_concurrency) == (1, 4)
-    assert settings.influx == InfluxSettings(
-        token="t", write_url="http://db:8086", read_url="http://localhost:8086", org=None
-    )
 
 
-def test_an_empty_influx_object_is_on_with_defaults(tmp_path):
-    write(tmp_path, {"influx": {}})
-    influx = load_settings(tmp_path).influx
-    assert influx == InfluxSettings()
-    assert (influx.token, influx.write_url, influx.read_url) == ("", "http://localhost:8086", "http://localhost:8086")
+@pytest.mark.parametrize("influx", [{"token": "t", "write_url": "http://db:8086"}, {}, None])
+def test_an_influx_entry_from_before_the_lake_is_ignored_with_a_warning(tmp_path, influx, caplog):
+    """Every env written before results moved to the lake has one; refusing it would stop them all."""
+    write(tmp_path, {"chunk_days": 1, "influx": influx})
+    assert load_settings(tmp_path).chunk_days == 1
+    assert not hasattr(load_settings(tmp_path), "influx")
+    assert "influx" in caplog.text and "data lake" in caplog.text
 
 
-@pytest.mark.parametrize("data", [{"infux": {}}, {"influx": {"keys": "DEFAULT"}}, {"influx": True}])
+@pytest.mark.parametrize("data", [{"infux": {}}, {"weekly": {"preload": 1}}, {"chunk_day": 1}])
 def test_a_misspelling_is_refused_not_ignored(tmp_path, data):
-    """A misspelt "influx" must not quietly leave a run unrecorded."""
+    """A misspelt key must not quietly leave a run with the defaults."""
     write(tmp_path, data)
     with pytest.raises(ValueError):
         load_settings(tmp_path)
 
 
 def test_the_command_takes_no_location_or_recording_flags():
-    """Data, output, variant and InfluxDB come from komachi and the env, not flags."""
+    """Data, output, variant and recording come from komachi and the env, not flags."""
     from enoshima.cli import build_parser
 
     parser = build_parser()

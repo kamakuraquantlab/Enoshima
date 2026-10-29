@@ -13,7 +13,7 @@ const SORT_LS_KEY = 'enoshima_sort_keys'
 
 const PINNED_COLS = [
   'start_ts', 'batch_id', 'recommended_in',
-  'env_name', 'bucket_name', 'start_str', 'end_str',
+  'env_name', 'param_set_id', 'start_str', 'end_str',
   'result.pnl5', 'walk_forward.best_pnl5', 'walk_forward.best_rule', 'result.pnl_cnt0',
   'result.sharpe_ratio_annualized0', 'result.max_drawdown0',
   'execution_time', 'git_rev',

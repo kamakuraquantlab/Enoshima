@@ -16,7 +16,7 @@ overlap the next week's: the overlap day is the next week's own Monday, and
 each trade is counted by exactly one week. An open order made in the overlap
 is taken and never filled (`backtest.OverlapGateway`): filled, it could add to
 a position the week opened, and make it look opened in the overlap. The orders counted -- behind the
-slippage averages, and in InfluxDB -- are those trades' legs, wherever they
+slippage averages, and in the lake's `BacktestOrder` -- are those trades' legs, wherever they
 filled, so they too add up across weeks. The replay ends as soon as the
 overlap has closed the week's last position (`ResultReporter.settled`): what
 a week reports is what happened to the trades it opened, and nothing else.
@@ -32,7 +32,7 @@ The week is the ISO week because `ledger`'s `by_week.json` already is, and
 JST because bronze's day partitions are: a week is exactly seven files, and
 its replay nine with the defaults. `by_week.json` groups by close, like every
 `by_*.json`, so a trade opened on a Sunday and closed on the Monday is in the
-next week's row there and in its own week's folder.
+next week's row there and in its own week's part.
 
 ## What it does not promise
 
@@ -44,17 +44,18 @@ overlap did not see closed is in no week either. `open_at_end` in a week's
 summary counts those: the week's own positions still open when its replay
 ended. A strategy that holds for longer than the overlap needs a longer one.
 
-## The run folder is cumulative
+## The run is cumulative
 
-One folder per environment, strategy revision, parameter set and preload --
-no dates in its id -- and every weekly run of them adds to it:
+One run id per environment, strategy revision, parameter set, preload and
+overlap -- no dates in it -- and every weekly run of them adds to it, in the
+lake (`lake`):
 
-    run_log/<run_id>/meta.json, summary.json,   rebuilt from every week on disk (`rebuild`):
-                     trades.csv, by_*.json      an ordinary run over the weeks' range
-    run_log/<run_id>/weeks/<YYYY-Www>/          what a run writes, a week at a time:
-                     meta.json                  the week's provenance: batch, bucket, timings
-                     summary.json               `summarize`'s figures, plus the order counters
-                     trades.csv
+    BacktestRun   run_id=<id>                 rebuilt from every week on disk (`rebuild`):
+                                              an ordinary run over the weeks' range
+    BacktestPart  run_id=<id>/part=<YYYY-Www> what a run writes, a week at a time: the
+                                              week's provenance, batch and timings, and
+                                              `summarize`'s figures plus the order counters
+    BacktestTrade, BacktestOrder, ...         the week's trades and records, same partitions
 
 ## As much as there is data for
 
@@ -71,14 +72,14 @@ last is not clipped; it replays as empty, with the usual warning.
 
 The root is never the current run's result. It is the weeks', so its range is
 the first week's Monday to the last week's Sunday, and `select`,
-`walk-forward` and `results` read it like any other run folder. For that range
+`walk-forward` and `results` read it like any other run. For that range
 to be true the weeks must be contiguous: a run fills every gap between the
-weeks on disk and the weeks asked for (`span`), and a root whose weeks are not
-contiguous -- a week that failed -- is left without a `summary.json` until a
-later run fills the gap.
+weeks on disk and the weeks asked for (`span`), and a run whose weeks are not
+contiguous -- a week that failed -- is left without its `BacktestRun` row until
+a later run fills the gap.
 
 The id includes the strategy's revision, so a change to the strategy starts
-a new folder: weeks of two versions are never put together.
+a new run: weeks of two versions are never put together.
 """
 
 import datetime as dt
@@ -86,8 +87,8 @@ from dataclasses import dataclass
 
 from qate.util.dt_range import DtRange
 
-from . import run_dir
 from .eval import SLIPPAGE_05, SLIPPAGE_10, evaluate_strategy
+from .lake import WHOLE, Store
 from .ledger import JST, Trade, streaks
 
 DEFAULT_PRELOAD_DAYS = 1
@@ -215,15 +216,9 @@ def add_order_stats(total: dict, week: dict) -> None:
             total[f"{name}{s}"] = total.get(f"{name}{s}", 0) + week.get(f"{name}{s}", 0)
 
 
-def on_disk(root, run_id: str) -> list[Week]:
+def on_disk(store: Store, run_id: str) -> list[Week]:
     """The weeks this run has a finished result for, in order."""
-    base = run_dir.run_dir(root, run_id) / run_dir.WEEKS_DIR
-    if not base.is_dir():
-        return []
-    return sorted(
-        (Week.parse(p.name) for p in base.iterdir() if "." not in p.name and run_dir.is_complete(p)),
-        key=lambda w: w.monday,
-    )
+    return sorted((Week.parse(p) for p in store.parts(run_id) if p != WHOLE), key=lambda w: w.monday)
 
 
 def span(weeks: list[Week], done: list[Week]) -> list[Week]:
@@ -233,9 +228,9 @@ def span(weeks: list[Week], done: list[Week]) -> list[Week]:
     return [Week(first.monday + dt.timedelta(weeks=i)) for i in range((last.monday - first.monday).days // 7 + 1)]
 
 
-def recorded_range(root, run_id: str, week: Week) -> tuple[str, str]:
+def recorded_range(store: Store, run_id: str, week: Week) -> tuple[str, str]:
     """The range a week on disk was run over: the whole week, or the part that had data then."""
-    meta = run_dir.read_json(run_dir.week_dir(root, run_id, week.key), run_dir.META)
+    meta = store.read_part(run_id, week.key)["meta"]
     return meta["start_str"], meta["end_str"]
 
 
@@ -243,48 +238,47 @@ def is_contiguous(weeks: list[Week]) -> bool:
     return all((b.monday - a.monday).days == 7 for a, b in zip(weeks, weeks[1:]))
 
 
-def rebuild(root, run_id: str, meta: dict) -> bool:
-    """Rewrite the run's root files from every week on disk. False, and no root summary, if they have a gap.
+def rebuild(store: Store, run_id: str, meta: dict) -> bool:
+    """Rewrite the run's row from every week on disk. False, and no row, if they have a gap.
 
     `meta` is what the weeks share (`BacktestLog.weekly_meta`); the range is the weeks'.
     """
-    weeks = on_disk(root, run_id)
+    weeks = on_disk(store, run_id)
     if not weeks or not is_contiguous(weeks):
-        run_dir.remove_summary(root, run_id)
+        store.remove_run(run_id)
         return False
-    trades, summary = window(root, run_id, weeks)
-    first = run_dir.read_json(run_dir.week_dir(root, run_id, weeks[0].key), run_dir.META)
-    last = run_dir.read_json(run_dir.week_dir(root, run_id, weeks[-1].key), run_dir.META)
+    trades, summary = window(store, run_id, weeks)
+    first = store.read_part(run_id, weeks[0].key)["meta"]
+    last = store.read_part(run_id, weeks[-1].key)["meta"]
     meta = {
         **meta,
         "start_str": first["start_str"],   # a partial first or last week's own
         "end_str": last["end_str"],
         "weeks": len(weeks),
     }
-    run_dir.write_cumulative(root, run_id, meta, summary, trades)
+    store.write_run(run_id, meta, summary, trades)
     return True
 
 
-def missing(root, run_id: str, weeks: list[Week]) -> list[Week]:
+def missing(store: Store, run_id: str, weeks: list[Week]) -> list[Week]:
     """The weeks of `weeks` that this run has no finished result for."""
-    return [w for w in weeks if not run_dir.is_complete(run_dir.week_dir(root, run_id, w.key))]
+    return [w for w in weeks if not store.has_part(run_id, w.key)]
 
 
-def window(root, run_id: str, weeks: list[Week]) -> tuple[list[Trade], dict]:
-    """A window's trades and summary, from its weeks' folders. Replays nothing.
+def window(store: Store, run_id: str, weeks: list[Week]) -> tuple[list[Trade], dict]:
+    """A window's trades and summary, from its weeks' parts. Replays nothing.
 
     Every week must be there: a window short of one is not that window's result.
     The trades are put in close order, as one replay reports them: a week's last
     can close, in its overlap, after the next week's first.
     """
-    absent = missing(root, run_id, weeks)
+    absent = missing(store, run_id, weeks)
     if absent:
         raise ValueError(f"Run {run_id} has no result for {', '.join(w.key for w in absent)}")
     trades: list[Trade] = []
     order_stats: dict = {}
     for w in weeks:
-        path = run_dir.week_dir(root, run_id, w.key)
-        trades.extend(run_dir.read_trades(path))
-        add_order_stats(order_stats, run_dir.read_json(path, run_dir.SUMMARY))
+        trades.extend(store.read_part_trades(run_id, w.key))
+        add_order_stats(order_stats, store.read_part(run_id, w.key)["summary"])
     trades.sort(key=lambda t: t.close_ts)
     return trades, summarize(trades, order_stats)

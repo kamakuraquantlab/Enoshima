@@ -1,22 +1,23 @@
-"""The results viewer: `enoshima web`, a Flask API and a React page over what runs wrote.
+"""The results viewer: `enoshima web`, a Flask API and a React page over what runs wrote to the lake.
 
-It reads, and replays nothing. Every env under the configured folders that has
-a `run_log/` is listed; a run is a finished `run_log/<run_id>/` folder (one
-with `summary.json`, `run_dir` writes it last), a training a finished
-`post_analysis/train/<train_id>/`. Only the files those write are served. The
-one change it makes is deleting a run folder when asked; InfluxDB is left
-alone. The one other read is `/api/prices`, a market's recorded trades through
-hase, beside a run's equity.
+It reads, and replays nothing. Every env with a finished run in the data lake
+is listed (`lake`): a run is one with its `BacktestRun` row, a training a
+finished `post_analysis/train/<train_id>/` in the env's analysis folder there.
+A run is served as the files its folder once held -- `meta.json`,
+`summary.json`, `trades.csv` and `by_<grouping>.json`, the groupings computed
+from its trades -- and its records as `orders.csv`, `pnl.csv`, `bars.csv` and
+`metrics.csv`. The one change it makes is deleting a run's files when asked.
+The one other read is `/api/prices`, a market's recorded trades through hase,
+beside a run's equity.
 
-It runs in its own env, `ENOSHIMA_API` under qate-env's root, created by
-`enoshima web --setup`:
+The lake is komachi's root, as for every other command. The viewer runs in its
+own env, `ENOSHIMA_API` under qate-env's root, created by `enoshima web --setup`:
 
-    config.json              port, and results_dirs: the folders under the env
-                             root that envs are looked for in, "." by default
+    config.json              port
     grafana_dashboard.json   optional links from a run to a dashboard of its own
 
 A dashboard matches a run when every key of its `match` equals that key of the
-run's flattened meta.json (`trading.module_name`, `config.market`, ...). The
+run's flattened meta (`trading.module_name`, `config.market`, ...). The
 first that matches and has a value for every `{key}` in its url and query
 gives the run its link; see `_grafana_url`. The viewer names no strategy and no
 dashboard: those are the env's.
@@ -25,11 +26,12 @@ The page is `web/` in a checkout, built to `web/dist` with
 `npm run build --prefix web`; this module serves it from there.
 """
 
+import csv
+import io
 import json
 import math
 import re
-import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from logging import getLogger
@@ -37,15 +39,16 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import numpy as np
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 from hase import bronze, store
 from hase.bronze import DataType
 from qate.core.model import Market
 from qate_env.env import Env
 from qate_env.env_name import EnvName
 
-from enoshima import run_dir
+from enoshima import lake
 from enoshima.best import BEST_RESULT_DIR, SELECTION_FILE
+from enoshima.lake import Store
 from enoshima.ledger import GROUPINGS
 from enoshima.post_analysis import walk_forward
 
@@ -60,22 +63,20 @@ WEB_DIR = Path(__file__).resolve().parents[2] / "web" / "dist"
 @dataclass
 class Config:
     port: int = 9768
-    results_dirs: list[str] = field(default_factory=lambda: ["."])
 
 
 app = Flask(__name__)
-# Set by `serve` from the env; the tests set them directly.
-ENV_ROOT = Path(".")
-RESULTS_DIRS = ["."]
+# Set by `serve`; the tests set them directly.
+LAKE_ROOT = Path(".")
 GRAFANA_DASHBOARDS = []
 
 
-def _env_dirs_with_logs():
-    for root in dict.fromkeys((ENV_ROOT / name).resolve() for name in RESULTS_DIRS):
-        if root.is_dir():
-            for directory in sorted(root.iterdir()):
-                if directory.is_dir() and (directory / run_dir.RUN_LOG_DIR).is_dir():
-                    yield directory
+def _envs():
+    return lake.envs(LAKE_ROOT)
+
+
+def _store(env):
+    return Store(LAKE_ROOT, env)
 
 
 def _json_safe(value):
@@ -88,16 +89,19 @@ def _json_safe(value):
     return value
 
 
-# The files a run folder holds; nothing else in it is served.
-RUN_FILES = {run_dir.META, run_dir.SUMMARY, run_dir.TRADES} | {run_dir.grouping_file(name) for name in GROUPINGS}
+# What a run is served as: its meta and summary, its trades and their groupings
+# as the folder files they once were, and its records as CSV.
+JSON_FILES = {"meta.json", "summary.json"} | {f"by_{name}.json" for name in GROUPINGS}
+RECORD_FILES = {"orders.csv": lake.ORDER, "pnl.csv": lake.PNL, "bars.csv": lake.BAR, "metrics.csv": lake.METRIC}
+RUN_FILES = JSON_FILES | {"trades.csv"} | set(RECORD_FILES)
 # What `enoshima walk-forward --train` writes per group, under post_analysis/train/<id>/.
 TRAIN_FILES = set(walk_forward.TRAIN_FILES)
 TRAIN_DIR = Path(walk_forward.OUTPUT_DIR) / walk_forward.TRAIN_DIR
 
 
-def _is_run_dir(path):
-    # A finished run: summary.json is written last, and a whole folder renamed
-    # into place, so a .tmp-* folder is a run still being written.
+def _is_finished_dir(path):
+    # A finished training: summary.json is written last, and a whole folder renamed
+    # into place, so a .tmp-* folder is one still being written.
     return (
         path.is_dir()
         and not path.is_symlink()
@@ -107,10 +111,10 @@ def _is_run_dir(path):
     )
 
 
-def _recommendations(directory):
+def _recommendations(store):
     """run_id -> the batch ids whose best_result recommended it."""
     out = {}
-    best = directory / BEST_RESULT_DIR
+    best = store.analysis_dir / BEST_RESULT_DIR
     if best.is_dir():
         for batch in best.iterdir():
             if batch.is_dir():
@@ -120,18 +124,18 @@ def _recommendations(directory):
     return {run_id: sorted(batches) for run_id, batches in out.items()}
 
 
-def _run_trainings(directory):
+def _run_trainings(store):
     """run_id -> (train_id, runs.json) of the newest training whose group held that run.
 
     A training's runs.json compares each walk-forward rule with each of its
     group's runs held, so it is that run's page; an older one is superseded.
     """
     out, created = {}, {}
-    base = directory / TRAIN_DIR
+    base = store.analysis_dir / TRAIN_DIR
     if not base.is_dir():
         return out
     for path in base.iterdir():
-        if not _is_run_dir(path) or not (path / "runs.json").is_file():
+        if not _is_finished_dir(path) or not (path / "runs.json").is_file():
             continue
         try:
             when = json.loads((path / "meta.json").read_text()).get("created_ts") or 0
@@ -216,78 +220,110 @@ def _walk_forward_columns(train_id, against):
 
 
 def _iter_run_logs(env_filter=None):
-    for directory in _env_dirs_with_logs():
-        if env_filter and directory.name != env_filter:
+    for env in _envs():
+        if env_filter and env != env_filter:
             continue
-        recommended = _recommendations(directory)
-        trainings = _run_trainings(directory)
-        for path in sorted((directory / run_dir.RUN_LOG_DIR).iterdir()):
-            if not _is_run_dir(path):
-                continue
+        store = _store(env)
+        recommended = _recommendations(store)
+        trainings = _run_trainings(store)
+        for run_id in store.run_ids():
             try:
-                data = json.loads((path / "meta.json").read_text())
-                summary = json.loads((path / "summary.json").read_text())
+                run = store.read_run(run_id)
+                data, summary = run["meta"], run["summary"]
                 if not isinstance(data, dict) or not isinstance(summary, dict):
                     continue
                 data["result"] = summary
-                data["run_id"] = path.name
-                data["env_name"] = directory.name
-                data["source"] = str(directory.relative_to(ENV_ROOT))
-                data["bucket_name"] = data.get("influx_bucket")
+                data["run_id"] = run_id
+                data["env_name"] = env
+                data["source"] = env  # the page names a run by source and id; the env is its last segment
                 data["grafana_url"] = _grafana_url(data)
-                data["recommended_in"] = ",".join(recommended.get(path.name, [])) or None
-                if path.name in trainings:
-                    data["walk_forward"] = _walk_forward_columns(*trainings[path.name])
+                data["recommended_in"] = ",".join(recommended.get(run_id, [])) or None
+                if run_id in trainings:
+                    data["walk_forward"] = _walk_forward_columns(*trainings[run_id])
                 yield _json_safe(data)
             except (ValueError, OSError):
-                LOG.warning(f"Cannot read run folder: {path}")
+                LOG.warning(f"Cannot read run {run_id} of {env}")
 
 
-def _find(env, item_id, folder):
-    """A finished folder under `<env>/<folder>/` for a request, or an error response.
+def _valid_id(item_id):
+    return bool(item_id) and Path(item_id).name == item_id and "." not in item_id
 
-    Matches discovered environments rather than accepting client-supplied paths.
-    """
-    source = request.args.get("source")
-    directories = [
-        directory
-        for directory in _env_dirs_with_logs()
-        if directory.name == env
-        and (source is None or str(directory.relative_to(ENV_ROOT)) == source)
-    ]
-    if len(directories) != 1:
-        return None, (jsonify(error="Environment not found or ambiguous; specify source"), 404)
-    if Path(item_id).name != item_id or "." in item_id or not item_id:
+
+def _find_run(env, run_id):
+    """A finished run for a request, as its store, or an error response."""
+    if env not in _envs():
+        return None, (jsonify(error="Environment not found"), 404)
+    if not _valid_id(run_id):
         return None, (jsonify(error="Invalid id"), 400)
-    base = (directories[0] / folder).resolve()
-    path = base / item_id
+    store = _store(env)
+    if not store.is_complete(run_id):
+        return None, (jsonify(error="Not found"), 404)
+    return store, None
+
+
+def _find_training(env, train_id):
+    """A finished training folder for a request, or an error response."""
+    if env not in _envs():
+        return None, (jsonify(error="Environment not found"), 404)
+    if not _valid_id(train_id):
+        return None, (jsonify(error="Invalid id"), 400)
+    base = (_store(env).analysis_dir / TRAIN_DIR).resolve()
+    path = base / train_id
     if path.is_symlink() or not path.resolve().is_relative_to(base):
         return None, (jsonify(error="Invalid path"), 400)
-    if not _is_run_dir(path):
+    if not _is_finished_dir(path):
         return None, (jsonify(error="Not found"), 404)
     return path, None
 
 
-def _find_run(env, run_id):
-    return _find(env, run_id, run_dir.RUN_LOG_DIR)
+def _run_files(store, run_id):
+    """The files a run has: every JSON and its trades, and each record dataset with rows."""
+    counts = {}
+    for part in store.parts(run_id):
+        for dataset, n in store.read_part(run_id, part)["counts"].items():
+            counts[dataset] = counts.get(dataset, 0) + n
+    return sorted(JSON_FILES | {"trades.csv"} | {f for f, d in RECORD_FILES.items() if counts.get(d)})
 
 
-def _detail(path, id_name, allowed, links=False):
-    """A folder's meta and summary, and which of its `allowed` files it has."""
+def _csv(table):
+    out = io.StringIO()
+    if table is not None:
+        writer = csv.writer(out)
+        writer.writerow(table.column_names)
+        for row in zip(*(column.to_pylist() for column in table.columns)):
+            writer.writerow(["" if v is None else v for v in row])
+    return Response(out.getvalue(), mimetype="text/csv")
+
+
+def _run_file(store, run_id, file_name):
+    if file_name not in RUN_FILES:
+        return jsonify(error="Not a served file"), 400
+    try:
+        if file_name == "meta.json" or file_name == "summary.json":
+            return jsonify(_json_safe(store.read_run(run_id)[file_name[:-5]]))
+        if file_name in RECORD_FILES:
+            return _csv(store.records(RECORD_FILES[file_name], run_id))
+        if file_name == "trades.csv":
+            return _csv(lake.trades_table(store.trades(run_id)))
+        return jsonify(_json_safe(store.grouping(run_id, file_name[3:-5])))
+    except (ValueError, OSError) as e:
+        LOG.warning(f"Cannot read {file_name} of run {run_id}: {e}")
+        return jsonify(error="Could not read run"), 400
+
+
+def _training_detail(path):
+    """A training folder's meta and summary, and which of its files it has."""
     try:
         meta = json.loads((path / "meta.json").read_text())
         summary = json.loads((path / "summary.json").read_text())
     except (ValueError, OSError):
         return jsonify(error="Could not read folder"), 400
-    files = sorted(p.name for p in path.iterdir() if p.name in allowed)
-    out = {id_name: path.name, "meta": meta, "summary": summary, "files": files}
-    if links:
-        out["grafana_url"] = _grafana_url(meta) if isinstance(meta, dict) else None
-    return jsonify(_json_safe(out))
+    files = sorted(p.name for p in path.iterdir() if p.name in TRAIN_FILES)
+    return jsonify(_json_safe({"train_id": path.name, "meta": meta, "summary": summary, "files": files}))
 
 
-def _file(path, file_name, allowed):
-    if file_name not in allowed:
+def _training_file(path, file_name):
+    if file_name not in TRAIN_FILES:
         return jsonify(error="Not a served file"), 400
     target = path / file_name
     if target.is_symlink() or not target.is_file():
@@ -301,14 +337,14 @@ def _file(path, file_name, allowed):
 
 
 def _iter_trainings(env_filter=None):
-    for directory in _env_dirs_with_logs():
-        if env_filter and directory.name != env_filter:
+    for env in _envs():
+        if env_filter and env != env_filter:
             continue
-        base = directory / TRAIN_DIR
+        base = _store(env).analysis_dir / TRAIN_DIR
         if not base.is_dir():
             continue
         for path in sorted(base.iterdir()):
-            if not _is_run_dir(path):
+            if not _is_finished_dir(path):
                 continue
             try:
                 data = json.loads((path / "meta.json").read_text())
@@ -317,8 +353,8 @@ def _iter_trainings(env_filter=None):
                     continue
                 data["result"] = summary
                 data["train_id"] = path.name
-                data["env_name"] = directory.name
-                data["source"] = str(directory.relative_to(ENV_ROOT))
+                data["env_name"] = env
+                data["source"] = env  # the page names a run by source and id; the env is its last segment
                 yield _json_safe(data)
             except (ValueError, OSError):
                 LOG.warning(f"Cannot read training folder: {path}")
@@ -326,7 +362,7 @@ def _iter_trainings(env_filter=None):
 
 @app.get("/api/envs")
 def api_envs():
-    return jsonify(sorted({directory.name for directory in _env_dirs_with_logs()}))
+    return jsonify(_envs())
 
 
 @app.get("/api/results")
@@ -342,29 +378,38 @@ def api_results():
 
 @app.get("/api/runs/<env>/<run_id>")
 def api_run(env, run_id):
-    """A run folder's meta and summary, and which other files it has."""
-    path, error = _find_run(env, run_id)
-    return error or _detail(path, "run_id", RUN_FILES, links=True)
+    """A run's meta and summary, and which files it can be served as."""
+    store, error = _find_run(env, run_id)
+    if error:
+        return error
+    try:
+        run = store.read_run(run_id)
+        files = _run_files(store, run_id)
+    except (ValueError, OSError):
+        return jsonify(error="Could not read run"), 400
+    meta = run["meta"]
+    return jsonify(_json_safe({"run_id": run_id, "meta": meta, "summary": run["summary"], "files": files,
+                               "grafana_url": _grafana_url(meta) if isinstance(meta, dict) else None}))
 
 
 @app.get("/api/runs/<env>/<run_id>/files/<file_name>")
 def api_run_file(env, run_id, file_name):
-    path, error = _find_run(env, run_id)
-    return error or _file(path, file_name, RUN_FILES)
+    store, error = _find_run(env, run_id)
+    return error or _run_file(store, run_id, file_name)
 
 
 @app.get("/api/runs/<env>/<run_id>/walk-forward")
 def api_run_walk_forward(env, run_id):
     """The walk-forward rules against this run held: the newest training of its group, cut to this run."""
-    path, error = _find_run(env, run_id)
+    store, error = _find_run(env, run_id)
     if error:
         return error
-    found = _run_trainings(path.parent.parent).get(run_id)
+    found = _run_trainings(store).get(run_id)
     if found is None:
         return jsonify(error="No walk-forward training includes this run"), 404
     train_id, against = found
     try:
-        meta = json.loads((path.parent.parent / TRAIN_DIR / train_id / "meta.json").read_text())
+        meta = json.loads((store.analysis_dir / TRAIN_DIR / train_id / "meta.json").read_text())
     except (ValueError, OSError):
         return jsonify(error="Could not read training"), 400
     held = against["runs"][run_id]
@@ -385,25 +430,25 @@ def api_trainings():
 
 @app.get("/api/trainings/<env>/<train_id>")
 def api_training(env, train_id):
-    path, error = _find(env, train_id, TRAIN_DIR)
-    return error or _detail(path, "train_id", TRAIN_FILES)
+    path, error = _find_training(env, train_id)
+    return error or _training_detail(path)
 
 
 @app.get("/api/trainings/<env>/<train_id>/files/<file_name>")
 def api_training_file(env, train_id, file_name):
-    path, error = _find(env, train_id, TRAIN_DIR)
-    return error or _file(path, file_name, TRAIN_FILES)
+    path, error = _find_training(env, train_id)
+    return error or _training_file(path, file_name)
 
 
 @app.delete("/api/results/<env>/<run_id>")
 def delete_result(env, run_id):
-    path, error = _find_run(env, run_id)
+    store, error = _find_run(env, run_id)
     if error:
         return error
     try:
-        shutil.rmtree(path)
+        store.delete_run(run_id)
     except OSError:
-        return jsonify(error="Could not delete run folder"), 400
+        return jsonify(error="Could not delete run"), 400
     return "", 204
 
 
@@ -491,13 +536,9 @@ def static_files(path):
 
 def serve(env: Env) -> None:
     """Serve the viewer with `env`'s configuration until stopped."""
-    global ENV_ROOT, RESULTS_DIRS, GRAFANA_DASHBOARDS
+    global LAKE_ROOT, GRAFANA_DASHBOARDS
     config = env.load_object(CONFIG_FILE, Config) or Config()
-    ENV_ROOT = Path(env.root_dir).expanduser().absolute()
-    for name in config.results_dirs:
-        if not (ENV_ROOT / name).resolve().is_relative_to(ENV_ROOT.resolve()):
-            raise ValueError(f"{CONFIG_FILE}: results_dirs must be under {ENV_ROOT}, not {name}")
-    RESULTS_DIRS = config.results_dirs
+    LAKE_ROOT = lake.lake_root()
     GRAFANA_DASHBOARDS = _dashboards(env.load_object(GRAFANA_FILE))
-    LOG.info(f"Serving {ENV_ROOT} {RESULTS_DIRS} on port {config.port}, {len(GRAFANA_DASHBOARDS)} dashboard(s)")
+    LOG.info(f"Serving {LAKE_ROOT} on port {config.port}, {len(GRAFANA_DASHBOARDS)} dashboard(s)")
     app.run(host="0.0.0.0", port=config.port, debug=False)

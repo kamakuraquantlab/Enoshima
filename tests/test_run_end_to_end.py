@@ -1,9 +1,8 @@
-"""A real run, from parquet on disk to a run folder on disk.
+"""A real run, from bronze parquet in a data lake to its results in the same lake.
 
 Writes a synthetic bronze tree, copies the example environment into a temporary
 env root, and drives `Runner` exactly as `enoshima run` does. If this passes, the
-documented quick start works. InfluxDB is stood in for by a store that keeps its
-points in memory: what is tested is what a run reports, not the client library.
+documented quick start works.
 
 The prices are a sine wave, so the fast and slow averages cross repeatedly and
 the strategy actually opens and closes positions. A backtest that trades nothing
@@ -12,11 +11,11 @@ easy: the first version of this file generated books that all fell before the
 reported range began, so every one of them was warmup and nothing was recorded.
 """
 
-import csv
 import json
 import math
 import shutil
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -32,8 +31,10 @@ from qate.util.dt_range import DtRange
 from qate_env.env import Env
 from qate_env.env_name import EnvName
 
-from enoshima import best, run_dir
+from enoshima import best, lake
+from enoshima.lake import Store
 from enoshima.ledger import GROUPINGS
+from enoshima.records import TAGS_KEY
 from enoshima.runner import WARMUP_HOURS, Runner
 from enoshima.selection import SelectionSettings
 from enoshima.weekly import WeeklySettings
@@ -88,14 +89,28 @@ def write_books(root: Path, start_ts: float) -> None:
     pq.write_table(pa.Table.from_pandas(pd.DataFrame(rows, columns=columns), preserve_index=False), path)
 
 
-def run_dirs(env) -> list[Path]:
-    """Every finished run folder in the env."""
-    return list(run_dir.iter_complete(Path(env.work_dir)))
+def store_of(env) -> Store:
+    return Store.of(str(env.name))
 
 
-def load(path: Path) -> dict:
-    """A run folder as one dict: its meta.json, with summary.json as `result`."""
-    return {**run_dir.read_json(path, run_dir.META), "result": run_dir.read_json(path, run_dir.SUMMARY)}
+@dataclass(frozen=True)
+class RunRef:
+    """A finished run in the lake, named as its folder once was."""
+
+    store: Store
+    name: str
+
+
+def run_dirs(env) -> list[RunRef]:
+    """Every finished run of the env, in the lake."""
+    store = store_of(env)
+    return [RunRef(store, run_id) for run_id in store.run_ids()]
+
+
+def load(ref: RunRef) -> dict:
+    """A run as one dict: its meta, with its summary as `result`."""
+    run = ref.store.read_run(ref.name)
+    return {**run["meta"], "result": run["summary"]}
 
 
 @pytest.fixture
@@ -139,117 +154,84 @@ def test_a_run_trades_and_writes_its_results(run_env):
         assert f"sharpe_ratio_annualized{suffix}" in result
     assert result["pnl_cnt0"] >= 1, "the strategy closed no position; the test data is not forcing a trade"
 
-    # The folder holds every closed trade, and each grouping adds up to the summary.
-    folder = run_logs[0]
-    assert folder.name == log["id"]
-    assert "result" not in run_dir.read_json(folder, run_dir.META), "meta.json is the input, not the result"
-    with open(folder / run_dir.TRADES) as f:
-        trades = list(csv.DictReader(f))
+    # The lake holds every closed trade, and each grouping adds up to the summary.
+    ref = run_logs[0]
+    store = ref.store
+    assert ref.name == log["id"]
+    assert "result" not in store.read_run(ref.name)["meta"], "the meta is the input, not the result"
+    assert store.parts(ref.name) == [lake.WHOLE]
+    trades = store.trades(ref.name)
     assert len(trades) == result["pnl_cnt0"]
-    assert sum(float(t["pnl_change5"]) for t in trades) == pytest.approx(result["pnl5"])
-    assert {t["side"] for t in trades} <= {"long", "short"}
+    assert sum(t.pnl_change5 for t in trades) == pytest.approx(result["pnl5"])
+    assert {t.side for t in trades} <= {"long", "short"}
     # Each close records its fill's price, which is what a results viewer charts.
-    assert all(float(t["close_price"]) > 0 for t in trades)
+    assert all(t.close_price > 0 for t in trades)
+    groupings = {name: store.grouping(ref.name, name) for name in GROUPINGS}
     for name in GROUPINGS:
-        rows = run_dir.read_json(folder, run_dir.grouping_file(name))
+        rows = groupings[name]
         assert sum(r["trades"] for r in rows.values()) == result["pnl_cnt0"], name
         assert sum(r["pnl10"] for r in rows.values()) == pytest.approx(result["pnl10"]), name
 
     # The trades fall in one JST month and day, so those groupings' drawdown is the run's.
-    month = run_dir.read_json(folder, "by_month.json")
+    month = groupings["month"]
     assert list(month) == ["2026-01"]
     assert month["2026-01"]["dd5"] == pytest.approx(result["max_drawdown5"])
-    assert list(run_dir.read_json(folder, "by_day.json")) == ["2026-01-02"]
-    hours = run_dir.read_json(folder, "by_hour.json")
+    assert list(groupings["day"]) == ["2026-01-02"]
+    hours = groupings["hour"]
     assert len(hours) == 24 and hours["06"]["trades"] == result["pnl_cnt0"]   # the range is 06:00-06:59 JST
 
-    # No duplicate whole metric stream is kept in the run folder. A strategy
-    # that emits BAR metrics writes those separately to the data lake.
-    assert not (Path(env.work_dir) / "result").exists()
+    # Nothing is written to the environment directory: results are the lake's.
+    assert sorted(p.name for p in Path(env.work_dir).iterdir() if p.name not in ("env.log", ".lock")) == sorted(
+        p.name for p in (EXAMPLE_ROOT / "env" / ENV_NAME).iterdir())
 
 
-class MemoryWriter:
-    """An `InfluxdbWriter` that keeps its points."""
-
-    def __init__(self, bucket: str):
-        self.bucket = bucket
-        self.points = []
-        self.closed = False
-
-    def add(self, point) -> None:
-        self.points.append(point)
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class MemoryStore:
-    """An `InfluxdbStore` with no server behind it."""
-
-    def __init__(self):
-        self.writers: list[MemoryWriter] = []
-
-    def create_writer(
-        self, bucket_name: str, param_set_id: str | None = None, **_
-    ) -> MemoryWriter:
-        writer = MemoryWriter(bucket_name)
-        self.writers.append(writer)
-        return writer
-
-
-def test_a_run_without_influx_still_has_its_result(run_env):
-    """InfluxDB is optional: the result is computed from the reporters every run has."""
+def test_a_run_records_orders_pnl_and_evaluations_in_the_lake(run_env, data_root):
     env, dt_range = run_env
     Runner(env, dt_range, fee_rates=FEES, chunk_days=1).run()
 
-    log = load(run_dirs(env)[0])
-    assert log["result"]["pnl_cnt0"] >= 1
-    assert log["influx_bucket"] is None
-
-
-def test_influx_records_orders_pnl_and_evaluations(run_env):
-    env, dt_range = run_env
-    store = MemoryStore()
-    runner = Runner(env, dt_range, fee_rates=FEES, chunk_days=1, influx=store)
-    runner.run()
-
-    log = load(run_dirs(env)[0])
-    [writer] = store.writers
-    assert writer.closed
-    # The env, then the grid defaults in declaration order, then the batch.
+    [ref] = run_dirs(env)
+    log = load(ref)
+    # The env, then the grid defaults in declaration order.
     assert log["param_set_id"] == f"{ENV_NAME}_20_120"
-    assert writer.bucket == log["influx_bucket"] == f"backtest_{ENV_NAME}_20_120_{runner.batch_id}"
+    assert "influx_bucket" not in log
 
-    by_measurement = {}
-    for point in writer.points:
-        by_measurement.setdefault(point._name, []).append(point)
-    assert {"ORDER", "PNL", "EVAL"} <= set(by_measurement)
-    # Skipped on purpose: they are per-snapshot and already in the bronze layer.
-    assert "MARKET_PRICE" not in by_measurement
-    assert "TRADE" not in by_measurement
+    # Under the lake's research layer, partitioned by env, run id and part.
+    orders = ref.store.path(lake.ORDER, ref.name, lake.WHOLE)
+    assert orders == (data_root / "research" / "dataset=BacktestOrder" / f"env={ENV_NAME}" / f"run_id={ref.name}"
+                      / "part=all" / "data.parquet")
+    assert orders.is_file()
 
-    # Every closed position twice, aligned to its close and to its entry, and one
-    # EVAL per slippage rate.
     closes = log["result"]["pnl_cnt0"]
-    aligns = [p._tags.get("time_align") for p in by_measurement["PNL"]]
-    assert aligns.count("close") == aligns.count("open") == closes
-    assert len(by_measurement["EVAL"]) == 3 * closes
+    pnl = ref.store.records(lake.PNL, ref.name).to_pylist()
+    assert sum(1 for r in pnl if r["SETTLE_TYPE"] == "CLOSE") == closes
+    assert {r["EXCHANGE_NAME"] for r in pnl} == {"COINCHECK"}, "tags are written by name"
+    assert all(r["open_ts"] is not None for r in pnl if r["SETTLE_TYPE"] == "CLOSE")
+    # The file says which columns were tags.
+    tags = pq.ParquetFile(ref.store.path(lake.PNL, ref.name, lake.WHOLE)).schema_arrow.metadata[TAGS_KEY]
+    assert json.loads(tags) == ["EXCHANGE_NAME", "SETTLE_TYPE", "SIDE", "SYMBOL"]
+    metrics = ref.store.records(lake.METRIC, ref.name).to_pylist()
+    # One EVAL per close and slippage rate; the per-event measurements are bronze's, never recorded.
+    assert sum(1 for m in metrics if m["measurement"] == "EVAL") == 3 * closes
+    assert not {"MARKET_PRICE", "TRADE"} & {m["measurement"] for m in metrics}
 
-    # Nothing from the warmup period -- except the open-aligned copy of a position
-    # opened during warmup and closed inside the range, which is a real trade.
-    start_ms = int(dt_range.start_ts * 1000)
-    early = [p for p in writer.points if p._time < start_ms]
-    assert all(p._name == "PNL" and p._tags.get("time_align") == "open" for p in early)
+    # Nothing from the warmup period, except a close in range of a position opened in warmup.
+    order_rows = ref.store.records(lake.ORDER, ref.name).to_pylist()
+    assert {"EXEC_PRICE", "SIDE", "SETTLE_TYPE"} <= set(order_rows[0])
+    assert all(r["ts"] >= dt_range.start_ts for r in order_rows + pnl)
 
 
-def test_a_skipped_parameter_set_opens_no_bucket(run_env):
-    """A resumed sweep must not touch the database for results it already has."""
+def test_the_run_row_is_a_queryable_view_of_meta_and_summary(run_env, data_root):
     env, dt_range = run_env
     Runner(env, dt_range, fee_rates=FEES, chunk_days=1).run()
+    [ref] = run_dirs(env)
 
-    store = MemoryStore()
-    Runner(env, dt_range, fee_rates=FEES, chunk_days=1, influx=store).run()
-    assert store.writers == []
+    [path] = (data_root / "research" / "dataset=BacktestRun").rglob("data.parquet")
+    row = pq.ParquetFile(path).read().to_pylist()[0]
+    assert row["strategy"] == "example.strategy.v1" and row["param_set_id"] == f"{ENV_NAME}_20_120"
+    assert row["strategy_rev"] == load(ref)["strategy_rev"]
+    assert json.loads(row["params"]) == {"fast_period": 20, "slow_period": 120}
+    assert row["pnl5"] == pytest.approx(load(ref)["result"]["pnl5"])
+    assert "env" in row and "run_id" not in row, "the partitions are the path's, not the file's"
 
 
 def test_a_second_identical_run_is_skipped(run_env):
@@ -266,21 +248,18 @@ def test_a_second_identical_run_is_skipped(run_env):
     assert load(log_path)["start_ts"] == first["start_ts"]
 
 
-def test_a_forced_rerun_writes_a_bucket_of_its_own_and_replaces_the_folder(run_env):
-    """Re-running must not write on top of the earlier run's points; the folder is the run's id, so it is replaced."""
+def test_a_forced_rerun_replaces_the_runs_files(run_env):
+    """The files are the run's id, so a re-run replaces them rather than adding a second copy."""
     env, dt_range = run_env
-    first = Runner(env, dt_range, fee_rates=FEES, chunk_days=1, influx=MemoryStore())
-    first.run()
+    Runner(env, dt_range, fee_rates=FEES, chunk_days=1).run()
+    [ref] = run_dirs(env)
+    orders = ref.store.records(lake.ORDER, ref.name).num_rows
 
-    store = MemoryStore()
-    second = Runner(env, dt_range, fee_rates=FEES, chunk_days=1, influx=store, force=True)
+    second = Runner(env, dt_range, fee_rates=FEES, chunk_days=1, force=True)
     second.run()
-
-    [writer] = store.writers
-    assert second.batch_id != first.batch_id
-    assert writer.bucket == f"backtest_{ENV_NAME}_20_120_{second.batch_id}"
-    [path] = run_dirs(env)
-    assert load(path)["influx_bucket"] == writer.bucket
+    assert run_dirs(env) == [ref]
+    assert load(ref)["batch_id"] == second.batch_id
+    assert ref.store.records(lake.ORDER, ref.name).num_rows == orders
 
 
 def test_force_reruns_a_completed_parameter_set(run_env):
@@ -303,11 +282,11 @@ def weekly_sweep(env, dt_range, **kwargs) -> Runner:
 
 def test_a_run_does_not_choose_and_select_chooses_from_weekly_runs_only(run_env):
     env, dt_range = run_env
-    root = Path(env.work_dir)
+    root = store_of(env)
 
     # A sweep without --weekly is a quick look: its results, and no recommendation.
     Runner(env, dt_range, optimize="grid", fee_rates=FEES, chunk_days=1).run()
-    assert not (root / "best_result").exists(), "a run writes results; it does not choose"
+    assert not (root.analysis_dir / "best_result").exists(), "a run writes results; it does not choose"
     assert all(load(p)["is_temporary_run"] for p in run_dirs(env))
     assert best.recommend(root, 1, SelectionSettings()) == []
 
@@ -325,8 +304,8 @@ def test_a_run_does_not_choose_and_select_chooses_from_weekly_runs_only(run_env)
     assert (group["start_str"], group["end_str"]) == ("2026-01-02 00:00:00", "2026-01-02 23:59:59")
     assert group["method"] == "whole range"   # a day holds no complete month
 
-    # best_result/<batch_id>/ holds the selection, and each recommended run's meta.json.
-    best_dir = root / "best_result" / str(runner.batch_id)
+    # best_result/<batch_id>/ holds the selection, and each recommended run's meta.
+    best_dir = root.analysis_dir / "best_result" / str(runner.batch_id)
     selection_file = json.loads((best_dir / "selection.json").read_text())
     assert selection_file["groups"][0]["ranking"][0]["params"] == group["ranking"][0]["params"]
     copies = sorted(p.name for p in best_dir.iterdir() if p.name != "selection.json")
@@ -335,13 +314,13 @@ def test_a_run_does_not_choose_and_select_chooses_from_weekly_runs_only(run_env)
     else:
         run_id = group["recommended_run_id"]
         assert copies == [f"{run_id}.json"]
-        assert load(run_dir.run_dir(env.work_dir, run_id))["params"] == group["recommended"]
-        assert (best_dir / copies[0]).read_text() == (run_dir.run_dir(env.work_dir, run_id) / run_dir.META).read_text()
+        assert load(RunRef(root, run_id))["params"] == group["recommended"]
+        assert json.loads((best_dir / copies[0]).read_text()) == root.read_run(run_id)["meta"]
 
     # With every safeguard off, selection is the plain pnl5 ranking it replaced.
     plain = SelectionSettings(score="pnl5", positive_pnl10=False, neighbors=False, train_months=0)
     [plain_group] = best.recommend(root, runner.batch_id + 1, plain)
-    chosen = load(run_dir.run_dir(env.work_dir, plain_group["recommended_run_id"]))
+    chosen = load(RunRef(root, plain_group["recommended_run_id"]))
     assert chosen["result"]["pnl5"] == max(load(p)["result"]["pnl5"] for p in weekly_folders)
 
 
@@ -352,7 +331,8 @@ def test_a_sweep_in_several_batches_gets_the_same_results_as_one(run_env, tmp_pa
     Runner(env, dt_range, optimize="grid", fee_rates=FEES, chunk_days=1, max_concurrency=6).run()
     one_batch = {p.name: load(p)["result"] for p in run_dirs(env)}
 
-    shutil.rmtree(Path(env.work_dir) / "run_log")
+    for ref in run_dirs(env):
+        ref.store.delete_run(ref.name)
     Runner(env, dt_range, optimize="grid", fee_rates=FEES, chunk_days=1, max_concurrency=4).run()
     two_batches = {p.name: load(p)["result"] for p in run_dirs(env)}
 
@@ -396,7 +376,7 @@ def test_a_backtest_that_raises_fails_without_stopping_the_others(run_env, monke
 def test_a_resumed_sweep_ranks_the_combinations_it_skipped(run_env):
     """The best of a resumed sweep must include results it did not just compute."""
     env, dt_range = run_env
-    root = Path(env.work_dir)
+    root = store_of(env)
 
     # A first sweep of everything, then a second that skips all of it.
     first = weekly_sweep(env, dt_range)
@@ -488,7 +468,7 @@ def test_each_backtest_gets_its_own_skip_set():
     from qate.trading.strategy import Strategy
 
     from enoshima.backtest import BacktestRuntime
-    from enoshima.influx import UNRECORDED_MEASUREMENTS
+    from enoshima.records import UNRECORDED_MEASUREMENTS
 
     a, b = Strategy(), Strategy()
     BacktestRuntime(a, [ExchangeName.GMO], ReplayQueue([]))

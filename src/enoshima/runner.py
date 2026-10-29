@@ -36,11 +36,17 @@ over the week, its preload and its overlap for every parameter set that needs
 it, in batches as above. A week already written is skipped unless the data now
 reaches further into it than when it ran; the weeks between those on disk and
 those asked for are filled in, so each parameter set's weeks stay contiguous.
-After each week the run's root files are rebuilt from all of its weeks
+After each week the run's `BacktestRun` row is rebuilt from all of its weeks
 (`weekly.rebuild`). See `weekly`.
 
 Any other run is temporary: a quick look at some days, with its own summary,
 and not a candidate for `enoshima select`.
+
+## Where a run writes
+
+Into the data lake, `lake.Store`: each finished backtest's part -- the week,
+or the whole range of a temporary run -- with its trades and its records,
+then the run's row. Nothing goes to the environment directory but `env.log`.
 
 ## Choosing is not part of a run
 
@@ -56,19 +62,16 @@ from datetime import timedelta
 from logging import getLogger
 from pathlib import Path
 
-from hase import bronze
 from qate.exchange import FeeSchedule
 from qate.trading.param import ParamGrid
-from qate.trading.reporter import Reporter
 from qate.util.dt_range import DtRange
 from qate_env.env import Env
 
-from . import fees, param_id, run_dir
+from . import fees, lake, param_id
 from . import weekly as weekly_mod
 from .backtest import Backtest
 from .data_source import DEFAULT_CHUNK_DAYS, DataSource, Stream, market_data_event_types
-from .datalake import DatalakeReporter
-from .influx import InfluxdbStore, InfluxdbWriter, InfluxReporter, bucket_name, weekly_bucket_name
+from .records import RecordReporter
 from .result import ResultReporter
 from .run_log import BacktestLog
 from .strategy_env import get_strategy_class, load_strategy_env, strategy_commit, strategy_rev
@@ -104,17 +107,19 @@ class Runner:
         chunk_days: int = DEFAULT_CHUNK_DAYS,
         max_concurrency: int = MAX_CONCURRENCY,
         force: bool = False,
-        influx: InfluxdbStore | None = None,
         weekly: WeeklySettings | None = None,
         fee_rates: dict[str, FeeSchedule] | None = None,
+        lake_root: Path | None = None,
     ):
-        """`influx` is an `influx.InfluxdbStore`, or None to record no metric stream.
-
-        `fee_rates` is `enoshima.json`'s, by market id. Every market the strategy
+        """`fee_rates` is `enoshima.json`'s, by market id. Every market the strategy
         trades must have one, or this raises before anything is replayed; see `fees`.
 
         `weekly`, given, makes this a strict weekly run: `dt_range` is widened
         to the weeks that cover it, and `weeks` lists them.
+
+        `lake_root` is where results are written, the data lake by default. It
+        is not the command's to choose; a tool comparing two runs of one env
+        gives each its own, so that neither writes over the env's results.
         """
         self.env = env
         self.weekly = weekly
@@ -126,9 +131,8 @@ class Runner:
         self.chunk_days = chunk_days
         self.max_concurrency = max_concurrency
         self.force = force
-        self.output_root = Path(env.work_dir)
-        self.influx = influx
-        self.batch_id = self._next_batch_id(self.output_root)
+        self.store = lake.Store(lake_root or lake.lake_root(), str(env.name))
+        self.batch_id = self._next_batch_id(self.store.analysis_dir)
         # The parameter sets whose backtest raised. A run with any is a failed
         # run, whatever else it computed: `enoshima run` exits non-zero.
         self.failed: list[dict] = []
@@ -144,12 +148,12 @@ class Runner:
         fees.register(self.fee_rates)
 
     @staticmethod
-    def _next_batch_id(output_root: Path) -> int:
+    def _next_batch_id(analysis_dir: Path) -> int:
         """A unix timestamp, advanced until it names a batch that does not exist.
 
-        The id groups one sweep's runs together, names its `best_result` folder and
-        ends each of its InfluxDB buckets, so two sweeps sharing an id would overwrite
-        each other's choice and write into each other's buckets. A bare
+        The id groups one sweep's runs together and names its `best_result`
+        folder, so two sweeps sharing an id would overwrite each other's
+        choice. A bare
         `int(time.time())` collides whenever two runs start inside the same
         second, which is ordinary when they are launched from a script.
 
@@ -158,7 +162,7 @@ class Runner:
         common case of two runs started one after the other.
         """
         global _last_batch_id
-        best_root = output_root / "best_result"
+        best_root = Path(analysis_dir) / "best_result"
         batch_id = max(int(time.time()), _last_batch_id + 1)
         while (best_root / str(batch_id)).exists():
             batch_id += 1
@@ -235,13 +239,13 @@ class Runner:
         last -= self.weekly.overlap
         for params in combos:
             run_id = self._run_log(params, self.weeks[0]).get_id()
-            done = weekly_mod.on_disk(self.output_root, run_id)
+            done = weekly_mod.on_disk(self.store, run_id)
             for week in weekly_mod.span(self.weeks, done):
                 dt_range = week.clip(first, last)
                 if dt_range is None:
                     continue
                 if week in done and not (self.force and week in self.weeks):
-                    start, end = weekly_mod.recorded_range(self.output_root, run_id, week)
+                    start, end = weekly_mod.recorded_range(self.store, run_id, week)
                     if dt_range.start_str >= start and dt_range.end_str <= end:
                         continue
                     grown.add(week.key)
@@ -332,47 +336,22 @@ class Runner:
         run_log.param_set_id = param_set_id
 
         # A weekly run's weeks were chosen by `_weeks_to_run`, which knows a partial week from a finished one.
-        if not week and not self.force and run_dir.is_complete(run_dir.run_dir(self.output_root, run_log.get_id())):
+        if not week and not self.force and self.store.is_complete(run_log.get_id()):
             LOG.info(f"Skipping {param_set_id}: a result for this range already exists (--force to redo)")
             return None
 
-        writer, reporters = self._recording(run_log, param_set_id, dt_range, week)
-        result = ResultReporter(dt_range, writer, strict=week is not None)
-        return Backtest(
+        records = RecordReporter(dt_range, by_open=week is not None)
+        result = ResultReporter(dt_range, records, strict=week is not None)
+        backtest = Backtest(
             strategy,
             self.config.get_exchanges(),
             data_source.create_channel(),
             result,
             run_log,
-            reporters,
+            [records],
         )
-
-    def _recording(
-        self, run_log: BacktestLog, param_set_id: str, dt_range: DtRange, week: Week | None
-    ) -> tuple[InfluxdbWriter | None, list[Reporter]]:
-        reporters: list[Reporter] = [
-            DatalakeReporter(
-                bronze.data_root(),
-                self.definition.strategy_name,
-                param_set_id,
-                dt_range,
-            )
-        ]
-        if self.influx is None:
-            return None, reporters
-
-        if week is None:
-            bucket = bucket_name(param_set_id, self.batch_id)
-            writer = self.influx.create_writer(bucket, param_set_id=param_set_id)
-        else:
-            # The run's one bucket, with this week's earlier points cleared; see `influx`.
-            bucket = weekly_bucket_name(param_set_id, run_log.get_id())
-            tags = {"week": week.key}
-            writer = self.influx.create_writer(bucket, param_set_id=param_set_id, tags=tags)
-            self.influx.delete_tagged(bucket, tags)
-        run_log.influx_bucket = bucket
-        reporters.append(InfluxReporter(writer, dt_range, by_open=week is not None))
-        return writer, reporters
+        backtest.records = records
+        return backtest
 
     def _run_batch(self, backtests: list[Backtest], data_source: DataSource) -> None:
         """Run a batch concurrently, and do not let one failure hang the rest.
@@ -406,14 +385,13 @@ class Runner:
 
     def _save(self, backtest: Backtest) -> None:
         log = backtest.run_log
+        path = self.store.write_part(log.get_id(), log.week_key or lake.WHOLE, log.to_dict(), log.result,
+                                     backtest.result.trades, backtest.records.tables())
         if log.week_key is None:
-            path = run_dir.write(self.output_root, log.get_id(), log.to_dict(), log.result, backtest.result.trades)
+            self.store.write_run(log.get_id(), log.to_dict(), log.result, backtest.result.trades)
         else:
-            path = run_dir.write_week(
-                self.output_root, log.get_id(), log.week_key, log.to_dict(), log.result, backtest.result.trades
-            )
-            # Every week, not once at the end: a run stopped part-way leaves a root that matches its weeks.
-            weekly_mod.rebuild(self.output_root, log.get_id(), log.weekly_meta())
+            # Every week, not once at the end: a run stopped part-way leaves a row that matches its weeks.
+            weekly_mod.rebuild(self.store, log.get_id(), log.weekly_meta())
         LOG.info(f"Saved {path}")
 
     def _log_result(self, run_log: BacktestLog, result: dict | None = None, label: str | None = None) -> None:
@@ -434,12 +412,11 @@ class Runner:
         for params in combos:
             run_log = self._run_log(params, self.weeks[0])
             run_log.param_set_id = param_id.param_set_id(str(self.env.name), params, self.definition.params)
-            if self.influx is not None:
-                run_log.influx_bucket = weekly_bucket_name(run_log.param_set_id, run_log.get_id())
-            folder = run_dir.run_dir(self.output_root, run_log.get_id())
-            if not weekly_mod.rebuild(self.output_root, run_log.get_id(), run_log.weekly_meta()):
-                LOG.warning(f"{folder.name}: its weeks have a gap, so it has no summary until a run fills it")
+            run_id = run_log.get_id()
+            if not weekly_mod.rebuild(self.store, run_id, run_log.weekly_meta()):
+                LOG.warning(f"{run_id}: its weeks have a gap, so it has no summary until a run fills it")
                 continue
-            meta = run_dir.read_json(folder, run_dir.META)
+            run = self.store.read_run(run_id)
+            meta = run["meta"]
             label = f"{meta['start_str'][:10]}..{meta['end_str'][:10]} ({meta['weeks']} weeks)"
-            self._log_result(run_log, run_dir.read_json(folder, run_dir.SUMMARY), label)
+            self._log_result(run_log, run["summary"], label)

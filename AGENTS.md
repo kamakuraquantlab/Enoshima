@@ -6,16 +6,17 @@ first; this page holds what will cost you if you miss it.
 ## What this repository is, and is not
 
 It is the CLI backtest engine: replay recorded bronze data through a strategy and
-a simulated exchange, and write the results to disk.
+a simulated exchange, and write the results back to the data lake the bronze
+came from.
 
 It also serves what it wrote: `enoshima web` (`enoshima.web`, the page in
-`web/`, the `web` extra) shows every run folder and training as a page.
+`web/`, the `web` extra) shows every run and training in the lake as a page.
 
 It is **not** the seller's backtest operations tooling. The queue that launches
 runs from a web page and any production strategy's Grafana dashboard stayed
 private, because they spawn subprocesses, name a strategy, and exist to operate
 one particular machine. The results viewer came here once it did none of that:
-it reads run folders, names no strategy or dashboard (an env's
+it reads the lake, names no strategy or dashboard (an env's
 `grafana_dashboard.json` does), and launches nothing. Keep it that way: **no
 endpoint that runs, queues or configures a backtest**, and no strategy, env or
 dashboard name in `web.py` or `web/`.
@@ -52,6 +53,12 @@ This was `qate.data.bronze` once, which globbed the tree itself, and then
 root. Each was a second copy of an answer that belongs elsewhere.
 `komachi.bronze`'s docstring is the argument.
 
+Results go the other way, and are Enoshima's own: `lake` writes them as
+Parquet under the root hase reports (`hase.bronze.data_root()`), in the
+`research/` layer, with pyarrow, which hase needs anyway. The layout of a
+result dataset is Enoshima's to decide, because nothing else writes it; where
+the lake *is* stays komachi's answer.
+
 A consequence worth protecting: `qate` now installs no networking library at all,
 because dropping the data reader dropped its komachi dependency and with it the
 transitive `httpx`. Do not put a data dependency back into `qate` to make
@@ -83,36 +90,43 @@ but it is easy to break from here:
   until `is_ready`, and `result.in_range` then drops everything before
   the range start. A test that counts events or metrics must account for both.
   The one intended exception: a position opened during warmup and closed inside
-  the range *is* reported, and its open-aligned PnL copy carries the earlier
-  timestamp.
+  the range *is* reported, and its PnL update's `open_ts` is the earlier time.
 - **A backtest reports through `qate`'s `Reporter` interface, like a live run.**
   `backtest.BacktestRuntime` is the synchronous counterpart of qate's `Runtime`.
-  `ResultReporter` is always attached and is what a result is computed from;
-  `DatalakeReporter` is always attached and copies BAR metrics into the
-  historical research-layer `Backtest_Bar` Parquet layout;
-  `InfluxReporter` is attached only when the env's `enoshima.json` has an
-  `"influx"` entry. A run without InfluxDB must still finish with its result.
-  `influxdb-client` is a plain dependency, not an extra: the import is not the
-  optional part, the recording is. The token and URLs are `enoshima.json`'s,
-  not a credential lookup -- the InfluxDB is ours, unlike the external services
-  the credential files are for.
-- **PnL goes to the run folder; bars also go to the data lake; the complete
-  chart stream goes to InfluxDB.** A run's
-  closed trades are what its result is evaluated from, so `ResultReporter` keeps
-  them and `run_dir` writes them as `trades.csv`, with `summary.json` and one
-  `by_<grouping>.json` per `ledger.GROUPINGS` beside the provenance in
-  `meta.json`. Any window or grouping is then recomputed without a replay.
-  `DatalakeReporter` writes only BAR metrics to the research-layer
-  `Backtest_Bar` Hive layout, independently of InfluxDB, so offline analysis
-  can consume the bars and their strategy-defined indicator fields. InfluxDB
-  is for looking at a run: orders, PnL and bars. There was a parquet copy of the
-  *whole* metric stream under `result/` (`timeseries.py`), removed because it
-  duplicated InfluxDB; do not restore that stream or name a folder `result/`
-  again.
-- **A run folder is written whole or not at all.** `run_dir.write` builds
-  `run_log/<id>.tmp-<pid>/` and renames it into place, and `summary.json` is
-  what "finished" means to the skip check. A folder that could exist without
-  its trades would be skipped by a resumed sweep forever.
+  Two reporters are always attached: `ResultReporter`, which evaluates and
+  keeps the closed trades a result is computed from, and `records.RecordReporter`,
+  which keeps the fills, PnL updates, bars and other metrics, column by column.
+  Neither writes while the replay runs: `Runner._save` hands a finished
+  backtest's trades and records to `lake.Store.write_part`, so a run that fails
+  writes nothing.
+- **Every result is in the data lake, and none in the env.** `research/`
+  holds one dataset per kind -- `BacktestRun`, `BacktestPart`, `BacktestTrade`,
+  `BacktestOrder`, `BacktestPnl`, `BacktestBar`, `BacktestMetric` -- each
+  partitioned `env=<env>/run_id=<id>/` (and `part=<part>/` but the run's row),
+  and `research/enoshima/<env>/` holds what `select` and `walk-forward` write.
+  The env directory holds definitions and `env.log`. Any window or grouping is
+  recomputed from `BacktestTrade` without a replay; `BacktestRun` keeps each
+  `ledger.GROUPINGS` of a run's trades as `by_<name>` because `select` reads
+  every run's months. The names are not `Backtest_Bar` and `Backtest_Pnl`: those
+  are earlier tools' datasets in the same layer, partitioned by strategy and
+  market, and two layouts must not share a dataset directory. There was once a
+  parquet copy of the *whole* metric stream under `result/` (`timeseries.py`);
+  do not name a folder `result/` again.
+- **A part is written whole or not at all.** A part is a week of a weekly run,
+  `all` of a temporary one. `Store.write_part` removes the part's row and the
+  run's, writes each data file under a temporary name and renames it, removes
+  any file of an earlier write it has no rows for, and writes the part's
+  `BacktestPart` row last; the run's `BacktestRun` row follows, and it is what
+  "finished" means to the skip check, `select` and the viewer. A part's row
+  records each file's row count, and a reader refuses a part whose files do not
+  match it: a lake's housekeeping may delete old `data.parquet` files outside
+  bronze, and a part missing its trades must not read as a part that traded
+  nothing.
+- **Runs in the lake are found by env name.** Two env roots holding an env of
+  one name share its results, as their run ids already were the same. A tool
+  that runs a copy of an env (`tools/weekly_consistency.py`) passes `Runner`
+  a `lake_root` of its own, or it writes over the env's results; the command
+  never takes one.
 - **Enoshima does not configure logging.** Every command enters its env, and
   `qate_env.Env` attaches the `env.log` handler. Each module takes
   `LOG = getLogger(__name__)` and logs; nothing calls `print`, `basicConfig` or
@@ -120,15 +134,18 @@ but it is easy to break from here:
   `enoshima run` sets the strategy's package and `qate.trading` to
   `enoshima.json`'s `strategy_log_level`, `WARNING` by default, because a live
   run's INFO line per fill became 600 MB of `env.log` in one sweep.
-- **There is no msgpack log.** That is the live system's intermediate format --
-  written in real time, uploaded, then loaded into InfluxDB -- because a trading
-  process must never wait on a database. A backtest can, so it writes InfluxDB
-  directly. Do not reintroduce a local metric file "to be safe".
+- **A backtest writes no database.** It wrote InfluxDB directly once, as a
+  dashboard's source; its records are now in the lake, and a loader from the
+  lake into InfluxDB is a separate tool's job. `influxdb-client` is not a
+  dependency, and `enoshima.json`'s `"influx"` is accepted and ignored with a
+  warning, so the envs written before stay runnable. There is no msgpack log
+  either: that is the live system's intermediate format, because a trading
+  process must never wait on a disk or a database.
 - **A reporter that raises fails the backtest**, unlike in qate's `Runtime`. A
   backtest's reporters are its output.
-- **A reporter is a sink, not an event source.** `ResultReporter` writes its
-  derived `EVAL` results directly to the run's optional Influx writer. Do not
-  route them back through the runtime as strategy metrics.
+- **A reporter is a sink, not an event source.** `ResultReporter` hands its
+  derived `EVAL` results directly to the run's `RecordReporter`. Do not route
+  them back through the runtime as strategy metrics.
 - **The shared buffer is the only concurrency, and it can deadlock.** Every
   `Channel` blocks in `request_load_more` until all of them have arrived, so a
   backtest thread that dies without draining its channel strands the rest.
@@ -169,13 +186,13 @@ but it is easy to break from here:
   it runs as far as the data goes, and a partial week is run again by the
   next weekly run whose data reaches further into it -- `_weeks_to_run`
   decides this, not the skip check a temporary run uses. Its run id has no dates and has the
-  preload and overlap, so every weekly run of a parameter set adds to one folder: weeks
-  go to `weeks/<YYYY-Www>/`, each written whole, and the root files are
-  rebuilt from all of them (`weekly.rebuild`) -- never the current run's
+  preload and overlap, so every weekly run of a parameter set adds to one run id: weeks
+  are its parts, `part=<YYYY-Www>`, each written whole, and its `BacktestRun`
+  row is rebuilt from all of them (`weekly.rebuild`) -- never the current run's
   result -- over the first Monday to the last Sunday. That is what lets
   `select` and `walk-forward` read it unchanged, and why a run fills the gap
-  between the weeks on disk and the weeks asked for, and a root with a gap
-  has no `summary.json`. A week is byte-identical whichever run computed it,
+  between the weeks on disk and the weeks asked for, and a run with a gap
+  has no row. A week is byte-identical whichever run computed it,
   and `tests/test_weekly.py` holds it: do not let state cross from one
   week's replay into the next, and do not compute a week's or a window's
   figures any way other than `summarize` -- which is also why a strict run
@@ -183,66 +200,70 @@ but it is easy to break from here:
   overlap (`OverlapGateway`: an add-on would move the position's `open_ts`
   into the next week), and stops replaying once the overlap has closed the
   week's last position. Equality with a continuous replay is not
-  promised; `open_at_end` shows where it can fail. Its InfluxDB bucket is one
-  per run, and a week's points are deleted by their `week` tag before it is
-  rewritten -- by tag, not time, because a Sunday open has its close-aligned
-  copy on the Monday.
+  promised; `open_at_end` shows where it can fail. A week's records -- its
+  orders and PnL updates -- are its own trades' too, so they partition across
+  weeks as the trades do, and a week written again replaces every file of it.
 - **Every run id includes the strategy's revision** (`strategy_env.strategy_rev`):
   a hash of the variant's own source -- its module and every module of its
   package it imports, followed through the import statements, with each
   package's `__init__.py` -- spelt `src.<12 hex>`. A change to what the variant
-  runs must be a new folder, or a weekly run would stitch weeks of two versions
+  runs must be a new run id, or a weekly run would stitch weeks of two versions
   together; `best.group` ranks one revision at a time. A change that does not
   reach the variant -- a new `vNNN.py` beside it, a test, a note -- must not
   be: it was the checkout's commit once, and every experiment committed moved
-  every older variant's results to a new folder. The commit is still recorded,
-  as `meta.json`'s `strategy_commit` (`+dirty.<hash>` when uncommitted), and is
+  every older variant's results to a new run id. The commit is still recorded,
+  as the meta's `strategy_commit` (`+dirty.<hash>` when uncommitted), and is
   provenance only. A module imported by a string is not followed; a strategy
   that does that must name it in an import statement too.
-  `meta.json`'s `git_rev` is `qate_env`'s own and says nothing about the strategy.
-- **Folders from the commit-revision days are migrated, not replayed**
-  (`revisions`). `enoshima migrate-revisions` gives a folder recorded at a
+  The meta's `git_rev` is `qate_env`'s own and says nothing about the strategy.
+- **Runs from the commit-revision days are migrated, not replayed**
+  (`revisions`). `enoshima migrate-revisions` gives a run recorded at a
   clean commit the source revision of its variant at that commit, read with
-  `git show`, and renames it to the id that gives; one recorded `+dirty` names
+  `git show`, and moves it to the id that gives; one recorded `+dirty` names
   no source anyone can read back and is left alone. `enoshima merge` joins
-  two weekly folders of one run split across revisions, only when both name
+  two weekly runs of one parameter set split across revisions, only when both name
   the same source or `--unverified` says so -- recorded in the copied weeks and
-  the root -- and never when a week both hold differs. The merged-from folder
-  is renamed `<id>.merged`, which `run_dir.iter_complete` skips: nothing is
-  deleted. Both are dry runs without `--apply`.
+  the run's row -- and never when a week both hold differs. The merged-from run
+  loses its row and moves to `run_id=<id>.merged`, which `lake.Store` does not
+  list: nothing is deleted. Both are dry runs without `--apply`.
+- **Results from before the lake are imported, not replayed** (`legacy`).
+  `enoshima import-run-log` turns an env's `run_log/` folders into parts and
+  rows under their own run ids, and copies `best_result/` and `post_analysis/`
+  into the env's analysis folder; a dry run without `--apply`, and it removes
+  nothing.
 - **A backtest's fee rates are `enoshima.json`'s `fee_rates`** (`fees`). qate
   reads a rate off the market's `ExchangeAdapter`, which only a venue package
   registers, and a backtest installs none -- so every fill was once costed at
   zero, with a warning per tracker as the only sign. `fees.register` gives qate
   fee-only adapters; a traded market without a rate refuses the run. Non-zero
   rates are in the run id, zero ones are not, so stating a zero kept every
-  earlier folder. Do not fill the gap by depending on a venue package.
+  earlier run. Do not fill the gap by depending on a venue package.
 - **Extra slippage is charged at the close, on both legs** (`Evaluation`),
   the open leg on `open_cost`, as qate defers the open's fee. Charged at the
   open, a position opened in warmup lost that leg's cost.
 - **A parameter set's id is Enoshima's, built from `strategy_param_grid.json`** (`param_id`):
   the env name, then the values as plain decimals in grid order. There are no
   scaling factors: they made ids unreadable without the grid, and a missing one
-  changed every bucket name. Nothing about the config is in it: an env's
-  market and strategy are fixed, so its name stands for them. It starts the InfluxDB
-  bucket, so the same values must keep giving the same id. It was each strategy's
+  changed every InfluxDB bucket name, which it once started. Nothing about the
+  config is in it: an env's market and strategy are fixed, so its name stands
+  for them. It is a column of `BacktestRun`, for finding a parameter set by, so
+  the same values must keep giving the same id. It was each strategy's
   `get_param_set_id` once; do not put it back on `Strategy`.
-- **A bucket is `backtest_<param_set_id>_<batch_id>`: every execution writes its
-  own.** A `--force` re-run used to write into the bucket of the run it repeated,
-  leaving the old run's points beside the new. There is no `--temporary` any more;
-  it was the opt-in for what is now always true. The batch id goes in the bucket,
-  never in the run's id, which must stay deterministic for a sweep to resume.
+- **A re-run replaces; it never adds.** The lake's files are the run's id, so a
+  `--force` re-run, or a week run again, replaces what was there. The batch id
+  is recorded in each part's meta and names `best_result/<batch_id>/`, never
+  the run's id, which must stay deterministic for a sweep to resume.
 - **A run does not choose.** `enoshima run` writes results and summaries;
   `select` and `walk-forward` run only when asked. Only weekly runs are
   candidates: any other run is temporary (`is_temporary_run`), a quick look at
   some days, with the range and revision in its id.
-- **A recommendation is per range and per group, from every run folder**, not
+- **A recommendation is per range and per group, from every run in the lake**, not
   per batch (`best.recommend`). Runs are grouped by strategy and range, then by
   `group_by` -- the categorical parameters by default -- and each group is
   ranked alone. A resumed sweep must be able to pick a best from results it did
   not just compute, and a categorical value is a different way of trading, to
   be compared on its own merits rather than outranked on a box size's figures.
-  `enoshima select` reruns it from disk. `enoshima walk-forward`
+  `enoshima select` reruns it from the lake. `enoshima walk-forward`
   (`post_analysis.walk_forward`) tests the rule's own window, history and
   reselection interval to the hour, every rule on the same test hours; it reuses
   `selection.rank` and must not grow a second way of choosing. Its rules are
@@ -253,7 +274,7 @@ but it is easy to break from here:
   of sample. There each rule starts when its own history allows, and a
   retraining ranks only the rules that traded its whole window; do not align
   them on the longest history, which held a 3d rule back by two months. Its
-  folders under `post_analysis/train/` are written whole, `summary.json` last,
+  folders under the env's analysis folder's `post_analysis/train/` are written whole, `summary.json` last,
   and a results viewer may read them -- add to their files rather than rename.
 - **A single run uses the defaults in `strategy_param_grid.json`.** An optimize
   sweep expands the values in that same file, so there is one source of parameter
@@ -264,15 +285,16 @@ but it is easy to break from here:
 - **The command takes no locations.** Data is komachi's: hase asks
   `komachi.data_root()`, which reads `ROOT_PATH` from komachi's settings file and
   nothing else -- no flag, no environment variable, no override passed down from
-  here. Komachi is the only source of truth for the root. Output is the env dir, the variant is
-  `strategy_param_grid.json`'s, and recording and sizing are `enoshima.json`'s
-  (`enoshima.settings`). Do not add `--data-root`, `--output-root`, `--variant` or
+  here. Komachi is the only source of truth for the root. Output goes back to that
+  same lake, the variant is `strategy_param_grid.json`'s, and fees and sizing are
+  `enoshima.json`'s (`enoshima.settings`). Do not add `--data-root`, `--output-root`, `--variant` or
   `--influx` back: each was a second answer to a question a file already answers.
   `--chunk-days` and `--max-concurrency` stay as per-run overrides.
-- **A run writes into its environment and takes its lock**, so never point one at
+- **A run takes its environment's lock and logs there**, so never point one at
   an environment a live process is running from; copy the definition instead.
-- **`enoshima.json` refuses unknown keys.** A misspelt `"influx"` silently
-  ignored would leave a run unrecorded with nothing to say so.
+- **`enoshima.json` refuses unknown keys.** A misspelt `"weekly"` silently
+  ignored would run with the defaults with nothing to say so. `"influx"`, a
+  key that was, is the one ignored, with a warning (`settings.RETIRED`).
 - **The strategy's `Config` class is resolved from the strategy module**, by
   `qate_env.trading_env.resolve_config_class`. There is no `desc.json` and no index of
   any kind; the map that used to be one went stale whenever code moved. Do not
@@ -289,26 +311,27 @@ but it is easy to break from here:
   by default), scores each set by its mean percentile on pnl5, pnl10, dd5 and
   `top_share5` (how much of its winnings its best 5% of trades made), smooths
   each figure over its grid neighbours, and walk-forward tests the choice on JST
-  months from each run's `by_month.json` and `trades.csv`. The window expands:
+  months from each run's `by_month` grouping and its trades. The window expands:
   each choice uses every month before it, and the set recommended is chosen on
   the whole range. On three trend-following sweeps a rolling six months chose on noise,
   and the pnl5-only score kept choosing the deepest drawdowns; both remain as
   settings (`"window": "rolling"`, `"score": "pnl5"`), not as defaults. The out-of-sample total is the honest figure; an in-sample
-  best is not one. `selection` works only from run folders: it must never need
+  best is not one. `selection` works only from recorded runs: it must never need
   a replay. `best_result/<batch_id>/` holds `selection.json` and, for each
-  group where a set passed the filters, a copy of its `meta.json` as `<run_id>.json`.
+  group where a set passed the filters, its meta as `<run_id>.json`.
 - **Never delete a user's results.** There is no `clean` command: a user who
-  wants them gone deletes `run_log/`, `best_result/` and `post_analysis/`. An
-  earlier version pruned run logs older than seven days automatically, on every
-  run.
+  wants them gone deletes the env's folders in the lake. An earlier version
+  pruned run logs older than seven days automatically, on every run.
 - **The viewer reads only what the commands write.** `web.py` serves a run
-  folder's `meta.json`, `summary.json`, `trades.csv` and `by_*.json` and a
-  training's `TRAIN_FILES`, named from `run_dir`, `ledger` and `walk_forward`,
-  so a new file is served once it is added there and not before. Whatever the
-  page shows is computed in the browser from those files or read from them;
-  a figure the page needs that no file has belongs in the command that writes
-  the folder, not in a second computation here. It deletes a run folder when
-  asked and changes nothing else. Flask is the `web` extra so that the engine
+  as the files its folder once held -- `meta.json`, `summary.json`,
+  `trades.csv` and `by_*.json`, read from the run's rows and trades -- its
+  records as `orders.csv`, `pnl.csv`, `bars.csv` and `metrics.csv`, and a
+  training's `TRAIN_FILES`, named from `lake`, `ledger` and `walk_forward`, so
+  a new dataset is served once it is added there and not before. Whatever the
+  page shows is computed in the browser from those or read from them; a figure
+  the page needs that the lake does not hold belongs in the command that writes
+  it, not in a second computation here. It deletes a run's files when asked and
+  changes nothing else. Flask is the `web` extra so that the engine
   installs no web server: `cli.cmd_web` imports `enoshima.web` only when run.
 - **A strategy is imported by module name, and is the user's to make importable**
   -- installed, or on `PYTHONPATH`. Enoshima does not add the launch directory to
@@ -325,7 +348,8 @@ but it is easy to break from here:
 | A way of reading recorded data, or converting it to qate objects | `hase` |
 | Where a file lives, or whether a day is complete | `komachi` |
 | Replay scheduling, batching, evaluation, the CLI | here |
-| The viewer's pages and the API that serves run folders | here, `web.py` and `web/` |
+| The viewer's pages and the API that serves runs from the lake | here, `web.py` and `web/` |
+| A result dataset's layout in the lake | here, `lake.py` |
 | A strategy's dashboard, or its link from the viewer | the strategy's repository, and the `ENOSHIMA_API` env |
 
 The example strategy is documentation. Keep it the most ordinary thing that works

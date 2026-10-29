@@ -16,12 +16,14 @@ import pyarrow.parquet as pq
 import pytest
 from hase.bronze import DataType
 from hase.layout import data_path
+from komachi import settings as komachi_settings
 from qate.util.dt_range import DtRange
 from qate_env.env import Env
-from test_run_end_to_end import ENV_NAME, EXAMPLE_ROOT, FEES, MARKET, MemoryStore
+from test_run_end_to_end import ENV_NAME, EXAMPLE_ROOT, FEES, MARKET, RunRef
 
-from enoshima import run_dir, weekly
+from enoshima import lake, weekly
 from enoshima.eval import SLIPPAGE_05, SLIPPAGE_10
+from enoshima.lake import Store
 from enoshima.ledger import JST
 from enoshima.runner import Runner
 from enoshima.weekly import Week, WeeklySettings
@@ -64,16 +66,36 @@ def write_days(root: Path) -> None:
         day += dt.timedelta(days=1)
 
 
+# Each env's own data lake, by env root: two envs of one name compared here
+# must not write into one lake. Their bronze is one tree, linked into each.
+LAKES: dict[str, Path] = {}
+
+
+def use(env: Env) -> Store:
+    """Point komachi -- and so every run -- at `env`'s lake, and return its store."""
+    root = LAKES[env.root_dir]
+    # conftest's temporary settings file; never the user's, which a `monkeypatch.undo()` would restore.
+    assert Path(komachi_settings.ENV_FILE).is_relative_to(root.parent.parent), komachi_settings.ENV_FILE
+    komachi_settings.ENV_FILE.write_text(f"ROOT_PATH={root}\n")
+    return Store(root, str(ENV_NAME))
+
+
 @pytest.fixture
 def make_env(tmp_path, data_root, monkeypatch):
-    """A function that copies the example environment to a fresh env root; the data is shared."""
+    """A function that copies the example environment to a fresh env root and lake; the data is shared."""
     write_days(data_root)
     monkeypatch.chdir(tmp_path)
 
     def make(name: str) -> Env:
         env_root = tmp_path / name
         shutil.copytree(EXAMPLE_ROOT / "env", env_root)
-        return Env(str(env_root), ENV_NAME)
+        env = Env(str(env_root), ENV_NAME)
+        lake_root = tmp_path / "lakes" / name
+        lake_root.mkdir(parents=True)
+        (lake_root / "bronze").symlink_to(data_root / "bronze")
+        LAKES[env.root_dir] = lake_root
+        use(env)
+        return env
 
     return make
 
@@ -83,15 +105,30 @@ def weeks_range(first: Week, last: Week) -> DtRange:
 
 
 def run(env: Env, dt_range: DtRange, **kwargs) -> Runner:
+    use(env)
     runner = Runner(env, dt_range, fee_rates=FEES, chunk_days=2, weekly=WeeklySettings(), **kwargs)
     runner.run()
     assert not runner.failed
     return runner
 
 
-def the_run(env: Env) -> Path:
-    [path] = (Path(env.work_dir) / run_dir.RUN_LOG_DIR).iterdir()
-    return path
+def the_run(env: Env) -> RunRef:
+    store = use(env)
+    [run_id] = store.all_run_ids()
+    return RunRef(store, run_id)
+
+
+def meta(ref: RunRef, week: Week | None = None) -> dict:
+    """The run's meta, or one week's."""
+    return ref.store.read_run(ref.name)["meta"] if week is None else ref.store.read_part(ref.name, week.key)["meta"]
+
+
+def summary(ref: RunRef, week: Week | None = None) -> dict:
+    return ref.store.read_run(ref.name)["summary"] if week is None else ref.store.read_part(ref.name, week.key)["summary"]
+
+
+def week_trades(ref: RunRef, week: Week):
+    return ref.store.read_part_trades(ref.name, week.key)
 
 
 # ---------------------------------------------------------------- the calendar
@@ -138,11 +175,11 @@ def test_a_range_is_widened_to_its_weeks(make_env):
     assert (runner.dt_range.start_str, runner.dt_range.end_str) == ("2026-01-05 00:00:00", "2026-01-11 23:59:59")
 
     folder = the_run(env)
-    assert sorted(p.name for p in (folder / run_dir.WEEKS_DIR).iterdir()) == ["2026-W02"]
-    meta = run_dir.read_json(folder, run_dir.META)
-    assert (meta["mode"], meta["preload_days"], meta["overlap_days"], meta["weeks"]) == ("weekly", 1, 1, 1)
-    assert "batch_id" not in meta and "week" not in meta, "the root holds what every week shares"
-    week_meta = run_dir.read_json(run_dir.week_dir(env.work_dir, folder.name, "2026-W02"), run_dir.META)
+    assert folder.store.parts(folder.name) == ["2026-W02"]
+    root = meta(folder)
+    assert (root["mode"], root["preload_days"], root["overlap_days"], root["weeks"]) == ("weekly", 1, 1, 1)
+    assert "batch_id" not in root and "week" not in root, "the run's row holds what every week shares"
+    week_meta = meta(folder, W02)
     assert (week_meta["week"], week_meta["start_str"]) == ("2026-W02", "2026-01-05 00:00:00")
     assert week_meta["batch_id"] == runner.batch_id
 
@@ -154,18 +191,18 @@ def test_the_root_is_rebuilt_from_every_week_on_disk(make_env):
     run(env, weeks_range(W04, W04))
     folder = the_run(env)
 
-    meta = run_dir.read_json(folder, run_dir.META)
-    assert (meta["start_str"], meta["end_str"], meta["weeks"]) == ("2026-01-05 00:00:00", "2026-01-25 23:59:59", 3)
-    trades, summary = weekly.window(env.work_dir, folder.name, [W02, W03, W04])
-    assert run_dir.read_json(folder, run_dir.SUMMARY) == json_round_trip(summary)
-    assert run_dir.read_trades(folder) == trades
-    assert sum(r["trades"] for r in run_dir.read_json(folder, "by_week.json").values()) == len(trades)
-    # An ordinary run folder to everything that reads them.
-    assert list(run_dir.iter_complete(Path(env.work_dir))) == [folder]
+    root = meta(folder)
+    assert (root["start_str"], root["end_str"], root["weeks"]) == ("2026-01-05 00:00:00", "2026-01-25 23:59:59", 3)
+    trades, window = weekly.window(folder.store, folder.name, [W02, W03, W04])
+    assert summary(folder) == json_round_trip(window)
+    assert folder.store.trades(folder.name) == trades
+    assert sum(r["trades"] for r in folder.store.grouping(folder.name, "week").values()) == len(trades)
+    # An ordinary run to everything that reads them.
+    assert folder.store.run_ids() == [folder.name]
 
     # Asking again for an earlier week alone runs nothing and keeps the whole range.
     run(env, weeks_range(W02, W02))
-    assert run_dir.read_json(folder, run_dir.META)["end_str"] == "2026-01-25 23:59:59"
+    assert meta(folder)["end_str"] == "2026-01-25 23:59:59"
 
 
 def json_round_trip(data):
@@ -181,25 +218,34 @@ def test_a_gap_between_the_weeks_on_disk_and_those_asked_for_is_filled(make_env)
     run(env, weeks_range(W02, W02))
     runner = run(env, weeks_range(W04, W04))
     folder = the_run(env)
-    assert [w.key for w in weekly.on_disk(env.work_dir, folder.name)] == ["2026-W02", "2026-W03", "2026-W04"]
-    w03 = run_dir.read_json(run_dir.week_dir(env.work_dir, folder.name, W03.key), run_dir.META)
-    assert w03["batch_id"] == runner.batch_id
-    assert run_dir.read_json(folder, run_dir.META)["weeks"] == 3
+    assert [w.key for w in weekly.on_disk(folder.store, folder.name)] == ["2026-W02", "2026-W03", "2026-W04"]
+    assert meta(folder, W03)["batch_id"] == runner.batch_id
+    assert meta(folder)["weeks"] == 3
 
 
 def test_a_root_whose_weeks_have_a_gap_is_not_complete_until_filled(make_env):
     env = make_env("env")
     run(env, weeks_range(W02, W04))
     folder = the_run(env)
-    shutil.rmtree(run_dir.week_dir(env.work_dir, folder.name, W03.key))   # as if W03 had failed
+    folder.store.path(lake.PART, folder.name, W03.key).unlink()   # as if W03 had failed
 
-    assert not weekly.rebuild(env.work_dir, folder.name, run_dir.read_json(folder, run_dir.META))
-    assert not run_dir.is_complete(folder), "a summary over W02..W04 would claim a week it does not have"
-    assert list(run_dir.iter_complete(Path(env.work_dir))) == []
+    assert not weekly.rebuild(folder.store, folder.name, meta(folder))
+    assert not folder.store.is_complete(folder.name), "a summary over W02..W04 would claim a week it does not have"
+    assert folder.store.run_ids() == []
 
     run(env, weeks_range(W04, W04))
-    assert run_dir.is_complete(folder)
-    assert run_dir.read_json(folder, run_dir.META)["weeks"] == 3
+    assert folder.store.is_complete(folder.name)
+    assert meta(folder)["weeks"] == 3
+
+
+def test_a_week_whose_files_went_missing_is_refused_not_read_as_empty(make_env):
+    """A file removed from under a finished week would otherwise read as a week that traded nothing."""
+    env = make_env("env")
+    run(env, weeks_range(W02, W03))
+    folder = the_run(env)
+    folder.store.path(lake.TRADE, folder.name, W03.key).unlink()
+    with pytest.raises(lake.IncompletePart, match="2026-W03"):
+        weekly.window(folder.store, folder.name, [W02, W03])
 
 
 def test_a_weekly_sweep_is_selected_from_like_any_run(make_env):
@@ -210,7 +256,7 @@ def test_a_weekly_sweep_is_selected_from_like_any_run(make_env):
     runner = Runner(env, weeks_range(W02, W03), optimize="grid", fee_rates=FEES, chunk_days=2, weekly=WeeklySettings())
     runner.run()
     assert not runner.failed
-    [group] = best.recommend(Path(env.work_dir), runner.batch_id, SelectionSettings())
+    [group] = best.recommend(use(env), runner.batch_id, SelectionSettings())
     assert group["runs"] == 6
     assert (group["start_str"], group["end_str"]) == ("2026-01-05 00:00:00", "2026-01-18 23:59:59")
 
@@ -220,14 +266,14 @@ def test_the_run_id_has_no_dates_but_has_the_preload_and_overlap(make_env):
     run(env, weeks_range(W02, W02))
     first = the_run(env).name
     run(env, weeks_range(W03, W03))
-    assert the_run(env).name == first, "a later week goes in the same folder"
+    assert the_run(env).name == first, "a later week goes in the same run"
 
     Runner(env, weeks_range(W02, W02), fee_rates=FEES, chunk_days=2, weekly=WeeklySettings(preload_days=0)).run()
     Runner(env, weeks_range(W02, W02), fee_rates=FEES, chunk_days=2, weekly=WeeklySettings(overlap_days=0)).run()
-    assert len(list((Path(env.work_dir) / run_dir.RUN_LOG_DIR).iterdir())) == 3
+    assert len(use(env).all_run_ids()) == 3
 
 
-def test_a_new_strategy_revision_is_a_new_folder(make_env, monkeypatch):
+def test_a_new_strategy_revision_is_a_new_run(make_env, monkeypatch):
     """Weeks of two versions of the strategy are never put together."""
     import enoshima.runner
 
@@ -237,10 +283,10 @@ def test_a_new_strategy_revision_is_a_new_folder(make_env, monkeypatch):
     monkeypatch.setattr(enoshima.runner, "strategy_rev", lambda module, variant: "bbbbbbbbbbbb")
     run(env, weeks_range(W03, W03))
 
-    folders = sorted((Path(env.work_dir) / run_dir.RUN_LOG_DIR).iterdir())
+    store = use(env)
+    folders = [RunRef(store, r) for r in store.all_run_ids()]
     assert len(folders) == 2
-    revs = {run_dir.read_json(f, run_dir.META)["strategy_rev"]: [w.key for w in weekly.on_disk(env.work_dir, f.name)]
-            for f in folders}
+    revs = {meta(f)["strategy_rev"]: [w.key for w in weekly.on_disk(store, f.name)] for f in folders}
     assert revs == {"aaaaaaaaaaaa": ["2026-W02"], "bbbbbbbbbbbb": ["2026-W03"]}
 
 
@@ -251,7 +297,7 @@ RUN_FIELDS = {"batch_id", "start_ts", "end_ts", "execution_time"}
 def test_an_extended_window_replays_only_its_new_week_and_equals_one_run(make_env):
     """The requirement: weeks 2-3, then week 4 alone, gives byte for byte what 2-4 at once gives.
 
-    Every file of the folder, the root's included -- what `select` and
+    Every file of the run in the lake, its row's included -- what `select` and
     `walk-forward` read -- but for when each week ran and in which batch.
     """
     stepwise = make_env("stepwise")
@@ -263,29 +309,39 @@ def test_an_extended_window_replays_only_its_new_week_and_equals_one_run(make_en
 
     a, b = the_run(stepwise), the_run(at_once)
     assert a.name == b.name
-    files = sorted(str(f.relative_to(a)) for f in a.rglob("*") if f.is_file())
-    assert files == sorted(str(f.relative_to(b)) for f in b.rglob("*") if f.is_file())
-    assert {"trades.csv", "summary.json", "by_week.json", "weeks/2026-W04/trades.csv"} <= set(files)
-    for name in files:
-        if Path(name).name == run_dir.META:
-            meta_a, meta_b = (run_dir.read_json((x / name).parent, run_dir.META) for x in (a, b))
-            assert {k: v for k, v in meta_a.items() if k not in RUN_FIELDS} == \
-                   {k: v for k, v in meta_b.items() if k not in RUN_FIELDS}, name
-        else:
-            assert (a / name).read_bytes() == (b / name).read_bytes(), name
+
+    def files(ref):
+        return {dataset: sorted(str(f.relative_to(ref.store.run_dir(dataset, ref.name)))
+                                for f in ref.store.run_dir(dataset, ref.name).rglob("*") if f.is_file())
+                for dataset in lake.DATASETS}
+
+    assert files(a) == files(b)
+    assert files(a)[lake.TRADE] == [f"part={w.key}/data.parquet" for w in (W02, W03, W04)]
+    assert files(a)[lake.ORDER] == files(a)[lake.TRADE]
+
+    def same_row(x, y, name):
+        assert {k: v for k, v in x["meta"].items() if k not in RUN_FIELDS} == \
+               {k: v for k, v in y["meta"].items() if k not in RUN_FIELDS}, name
+        assert x["summary"] == y["summary"], name
+
+    same_row(a.store.read_run(a.name), b.store.read_run(b.name), "the run")
+    for week in (W02, W03, W04):
+        same_row(a.store.read_part(a.name, week.key), b.store.read_part(b.name, week.key), week.key)
+        for dataset in lake.DATA:
+            pa_, pb = a.store.path(dataset, a.name, week.key), b.store.path(dataset, b.name, week.key)
+            if pa_.is_file():   # the example strategy emits no bars
+                assert pa_.read_bytes() == pb.read_bytes(), (dataset, week.key)
 
     # The second run computed W04 only; the first two weeks are the first run's.
     for week in (W02, W03, W04):
-        batch = run_dir.read_json(run_dir.week_dir(stepwise.work_dir, a.name, week.key), run_dir.META)["batch_id"]
-        assert batch == (second.batch_id if week == W04 else first.batch_id)
+        assert meta(a, week)["batch_id"] == (second.batch_id if week == W04 else first.batch_id)
 
-    trades, summary = weekly.window(stepwise.work_dir, a.name, [W02, W03, W04])
-    assert summary["pnl_cnt0"] >= 9, "the strategy must trade in every week for this to test anything"
-    weeks = [run_dir.read_json(run_dir.week_dir(stepwise.work_dir, a.name, w.key), run_dir.SUMMARY)
-             for w in (W02, W03, W04)]
+    trades, window = weekly.window(a.store, a.name, [W02, W03, W04])
+    assert window["pnl_cnt0"] >= 9, "the strategy must trade in every week for this to test anything"
+    weeks = [summary(a, w) for w in (W02, W03, W04)]
     assert all(w["pnl_cnt0"] > 0 for w in weeks)
-    assert summary["pnl_cnt0"] == sum(w["pnl_cnt0"] for w in weeks) == len(trades)
-    assert summary["pnl5"] == pytest.approx(sum(w["pnl5"] for w in weeks))
+    assert window["pnl_cnt0"] == sum(w["pnl_cnt0"] for w in weeks) == len(trades)
+    assert window["pnl5"] == pytest.approx(sum(w["pnl5"] for w in weeks))
     assert all("open_at_end" in w for w in weeks)
 
 
@@ -295,12 +351,11 @@ def test_a_trade_is_the_week_it_opened_in(make_env):
     run(env, weeks_range(W02, W04))
     folder = the_run(env)
     for week in (W02, W03, W04):
-        trades = run_dir.read_trades(run_dir.week_dir(env.work_dir, folder.name, week.key))
+        trades = week_trades(folder, week)
         assert all(week.dt_range.start_ts <= t.open_ts <= week.dt_range.end_ts for t in trades), week.key
-    w02 = run_dir.read_trades(run_dir.week_dir(env.work_dir, folder.name, W02.key))
+    w02 = week_trades(folder, W02)
     assert any(t.close_ts >= W03.start.timestamp() for t in w02), "no trade closes in W02's overlap"
-    w04 = run_dir.read_json(run_dir.week_dir(env.work_dir, folder.name, W04.key), run_dir.SUMMARY)
-    assert w04["open_at_end"] == 0, "the overlap closes everything the week opened"
+    assert summary(folder, W04)["open_at_end"] == 0, "the overlap closes everything the week opened"
 
 
 def test_a_window_equals_one_continuous_replay_when_the_preload_holds_the_state(make_env):
@@ -313,14 +368,15 @@ def test_a_window_equals_one_continuous_replay_when_the_preload_holds_the_state(
     """
     env = make_env("weekly")
     run(env, weeks_range(W02, W04))
-    stitched, summary = weekly.window(env.work_dir, the_run(env).name, [W02, W03, W04])
+    stitched, summary = weekly.window(use(env), the_run(env).name, [W02, W03, W04])
 
     # One replay over the same days, its trades taken as the weeks take theirs: by open.
     continuous_env = make_env("continuous")
     Runner(continuous_env, DtRange(W02.start, W04.dt_range.end_dt + dt.timedelta(days=1)), fee_rates=FEES, chunk_days=2).run()
-    [path] = run_dir.iter_complete(Path(continuous_env.work_dir))
+    store = use(continuous_env)
+    [run_id] = store.run_ids()
     span = weeks_range(W02, W04)
-    continuous = [t for t in run_dir.read_trades(path) if span.start_ts <= t.open_ts <= span.end_ts]
+    continuous = [t for t in store.trades(run_id) if span.start_ts <= t.open_ts <= span.end_ts]
 
     assert any(t.open_ts < W03.start.timestamp() <= t.close_ts for t in stitched), "no trade crosses a Monday"
     assert [(t.close_ts, t.open_ts) for t in stitched] == [(t.close_ts, t.open_ts) for t in continuous]
@@ -332,24 +388,23 @@ def test_a_window_equals_one_continuous_replay_when_the_preload_holds_the_state(
 def test_a_window_of_one_week_is_that_weeks_summary(make_env):
     env = make_env("env")
     run(env, weeks_range(W02, W02))
-    path = run_dir.week_dir(env.work_dir, the_run(env).name, W02.key)
-    stored = run_dir.read_json(path, run_dir.SUMMARY)
-    _, summary = weekly.window(env.work_dir, the_run(env).name, [W02])
-    assert summary == {k: v for k, v in stored.items() if not k.startswith("order_") and k != "open_at_end"}
+    stored = summary(the_run(env), W02)
+    _, window = weekly.window(use(env), the_run(env).name, [W02])
+    assert json_round_trip(window) == {k: v for k, v in stored.items() if not k.startswith("order_") and k != "open_at_end"}
 
 
 def test_a_window_with_a_week_missing_is_refused(make_env):
     env = make_env("env")
     run(env, weeks_range(W02, W02))
     with pytest.raises(ValueError, match="2026-W03"):
-        weekly.window(env.work_dir, the_run(env).name, [W02, W03])
+        weekly.window(use(env), the_run(env).name, [W02, W03])
 
 
 def test_a_trade_carries_both_legs_extra_slippage(make_env):
     """Charged at the close, so a position opened in the preload costs what any other does."""
     env = make_env("env")
     run(env, weeks_range(W02, W03))
-    trades, _ = weekly.window(env.work_dir, the_run(env).name, [W02, W03])
+    trades, _ = weekly.window(use(env), the_run(env).name, [W02, W03])
     boundary = [t for t in trades if t.open_ts < W03.start.timestamp() <= t.close_ts]
     for t in trades:
         legs = t.open_cost + t.notional
@@ -383,66 +438,37 @@ def test_a_skipped_week_is_not_rerun_and_force_reruns_it(make_env):
     env = make_env("env")
     first = run(env, weeks_range(W02, W02))
     run(env, weeks_range(W02, W02))
-    path = run_dir.week_dir(env.work_dir, the_run(env).name, W02.key)
-    assert run_dir.read_json(path, run_dir.META)["batch_id"] == first.batch_id
+    assert meta(the_run(env), W02)["batch_id"] == first.batch_id
 
     forced = run(env, weeks_range(W02, W02), force=True)
-    assert run_dir.read_json(path, run_dir.META)["batch_id"] == forced.batch_id
+    assert meta(the_run(env), W02)["batch_id"] == forced.batch_id
 
 
-# ---------------------------------------------------------------- InfluxDB
+# ---------------------------------------------------------------- records
 
 
-class DeletingStore(MemoryStore):
-    """A `MemoryStore` that records the deletes asked of it, and applies them."""
-
-    def __init__(self):
-        super().__init__()
-        self.deletes: list[tuple[str, dict]] = []
-
-    def create_writer(self, bucket_name: str, param_set_id: str | None = None, tags: dict | None = None, **_):
-        writer = super().create_writer(bucket_name, param_set_id)
-        writer.tags = dict(tags or {})
-        return writer
-
-    def delete_tagged(self, bucket_name: str, tags: dict) -> None:
-        self.deletes.append((bucket_name, tags))
-
-
-def test_a_weekly_run_has_one_bucket_and_clears_a_week_before_writing_it(make_env):
+def test_a_weeks_records_are_its_own_and_a_rerun_replaces_them(make_env):
+    """The overlap day is the next week's: recorded by both, its records would be in the lake twice."""
     env = make_env("env")
-    store = DeletingStore()
-    run(env, weeks_range(W02, W03), influx=store)
-    run_id = the_run(env).name
-
-    bucket = f"backtest_{ENV_NAME}_20_120_w{run_id}"
-    assert [w.bucket for w in store.writers] == [bucket, bucket]
-    assert [w.tags for w in store.writers] == [{"week": "2026-W02"}, {"week": "2026-W03"}]
-    assert store.deletes == [(bucket, {"week": "2026-W02"}), (bucket, {"week": "2026-W03"})]
-    for week in (W02, W03):
-        assert run_dir.read_json(run_dir.week_dir(env.work_dir, run_id, week.key), run_dir.META)["influx_bucket"] == bucket
-
-    # A week already on disk opens nothing; a forced one is cleared and written again.
-    again = DeletingStore()
-    run(env, weeks_range(W02, W03), influx=again)
-    assert again.writers == [] and again.deletes == []
-    forced = DeletingStore()
-    run(env, weeks_range(W03, W03), influx=forced, force=True)
-    assert forced.deletes == [(bucket, {"week": "2026-W03"})]
-
-
-def test_a_week_writes_nothing_of_its_preload_or_overlap_but_its_own_closes(make_env):
-    """The overlap day is the next week's: written by both, it would be in the bucket twice."""
-    env = make_env("env")
-    store = DeletingStore()
-    run(env, weeks_range(W02, W02), influx=store)
-    [writer] = store.writers
+    run(env, weeks_range(W02, W03))
+    folder = the_run(env)
+    store = folder.store
     week = W02.dt_range
-    outside = [p for p in writer.points if not week.start_ts * 1000 <= p._time <= week.end_ts * 1000]
-    assert outside, "no trade closes in the overlap, so this tests nothing"
-    for point in outside:
-        assert point._time > week.end_ts * 1000
-        assert point._name in ("EVAL", "ORDER") or (point._name == "PNL" and point._tags["time_align"] == "close")
+    pnl = store.records(lake.PNL, folder.name).to_pylist()
+    w02 = [r for r in pnl if r["part"] == W02.key]
+    # A week's PnL updates are its own positions': opened in the week, wherever they closed.
+    for r in w02:
+        opened = r["ts"] if r["SETTLE_TYPE"] == "OPEN" else r["open_ts"]
+        assert week.start_ts <= opened <= week.end_ts
+    assert any(r["ts"] > week.end_ts for r in w02), "no trade closes in the overlap, so this tests nothing"
+    closes = sum(1 for r in w02 if r["SETTLE_TYPE"] == "CLOSE")
+    assert closes == summary(folder, W02)["pnl_cnt0"]
+    orders = store.records(lake.ORDER, folder.name).to_pylist()
+    assert sum(1 for r in orders if r["part"] == W02.key) == summary(folder, W02)["order_cnt0"]
+
+    rows = store.records(lake.PNL, folder.name).num_rows
+    run(env, weeks_range(W03, W03), force=True)
+    assert store.records(lake.PNL, folder.name).num_rows == rows
 
 
 def test_a_week_stops_as_soon_as_its_last_position_is_closed(make_env, monkeypatch):
@@ -461,7 +487,7 @@ def test_a_week_stops_as_soon_as_its_last_position_is_closed(make_env, monkeypat
     monkeypatch.setattr(ResultReporter, "settled", settled)
     env = make_env("env")
     run(env, weeks_range(W02, W02))
-    trades = run_dir.read_trades(run_dir.week_dir(env.work_dir, the_run(env).name, W02.key))
+    trades = week_trades(the_run(env), W02)
 
     [ts] = stopped
     assert max(t.close_ts for t in trades) <= ts < W03.start.timestamp() + 86400
@@ -510,23 +536,8 @@ def test_a_weeks_orders_are_its_trades_legs(make_env):
     run(env, weeks_range(W02, W04))
     folder = the_run(env)
     for week in (W02, W03, W04):
-        summary = run_dir.read_json(run_dir.week_dir(env.work_dir, folder.name, week.key), run_dir.SUMMARY)
-        assert summary["order_cnt0"] == 2 * summary["pnl_cnt0"], week.key
-
-
-def test_the_writer_tags_every_point():
-    from influxdb_client import Point
-
-    from enoshima.influx import InfluxdbWriter
-
-    writer = InfluxdbWriter.__new__(InfluxdbWriter)
-    writer.tags = {"week": "2026-W02", "param_set_id": "X"}
-    writer._spread_timestamps = lambda points: None
-    written = []
-    writer.bucket_name = "b"
-    writer.w = type("W", (), {"write": lambda self, bucket, record, write_precision: written.extend(record)})()
-    writer.write([Point("PNL").field("v", 1.0)])
-    assert written[0]._tags == {"week": "2026-W02", "param_set_id": "X"}
+        figures = summary(folder, week)
+        assert figures["order_cnt0"] == 2 * figures["pnl_cnt0"], week.key
 
 
 # ---------------------------------------------------------------- as far as the data goes
@@ -543,8 +554,8 @@ def test_a_week_the_data_does_not_reach_is_not_run(make_env):
     env = make_env("env")
     run(env, weeks_range(W02, Week.parse("2026-W06")))
     folder = the_run(env)
-    assert [w.key for w in weekly.on_disk(env.work_dir, folder.name)] == ["2026-W02", "2026-W03", "2026-W04"]
-    assert run_dir.read_json(folder, run_dir.META)["end_str"] == "2026-01-25 23:59:59"
+    assert [w.key for w in weekly.on_disk(folder.store, folder.name)] == ["2026-W02", "2026-W03", "2026-W04"]
+    assert meta(folder)["end_str"] == "2026-01-25 23:59:59"
 
 
 def test_a_last_week_is_run_as_far_as_the_data_goes_and_grows_when_it_arrives(make_env, data_root):
@@ -554,27 +565,26 @@ def test_a_last_week_is_run_as_far_as_the_data_goes_and_grows_when_it_arrives(ma
     folder = the_run(env)
 
     # Wednesday is Tuesday's overlap: W04 has the trades opened Monday and Tuesday.
-    w04 = run_dir.read_json(run_dir.week_dir(env.work_dir, folder.name, W04.key), run_dir.META)
+    w04 = meta(folder, W04)
     assert (w04["start_str"], w04["end_str"], w04["partial"]) == ("2026-01-19 00:00:00", "2026-01-20 23:59:59", True)
-    meta = run_dir.read_json(folder, run_dir.META)
-    assert (meta["start_str"], meta["end_str"]) == ("2026-01-05 00:00:00", "2026-01-20 23:59:59")
-    assert all(t.open_ts <= w04_end("2026-01-20") for t in run_dir.read_trades(folder))
-    assert all(t.close_ts <= w04_end("2026-01-21") for t in run_dir.read_trades(folder))
+    root = meta(folder)
+    assert (root["start_str"], root["end_str"]) == ("2026-01-05 00:00:00", "2026-01-20 23:59:59")
+    assert all(t.open_ts <= w04_end("2026-01-20") for t in folder.store.trades(folder.name))
+    assert all(t.close_ts <= w04_end("2026-01-21") for t in folder.store.trades(folder.name))
 
     write_days(data_root)   # the rest of the week, and its overlap, arrive
     second = run(env, weeks_range(W04, W04))   # no --force
-    w04 = run_dir.read_json(run_dir.week_dir(env.work_dir, folder.name, W04.key), run_dir.META)
+    w04 = meta(folder, W04)
     assert (w04["end_str"], w04["partial"], w04["batch_id"]) == ("2026-01-25 23:59:59", False, second.batch_id)
-    w03 = run_dir.read_json(run_dir.week_dir(env.work_dir, folder.name, W03.key), run_dir.META)
-    assert w03["batch_id"] == first.batch_id, "a finished week is not run again"
-    assert run_dir.read_json(folder, run_dir.META)["end_str"] == "2026-01-25 23:59:59"
+    assert meta(folder, W03)["batch_id"] == first.batch_id, "a finished week is not run again"
+    assert meta(folder)["end_str"] == "2026-01-25 23:59:59"
 
     # And it is then the same week a run with all the data from the start computes.
     whole = make_env("whole")
     run(whole, weeks_range(W04, W04))
-    a = run_dir.week_dir(env.work_dir, folder.name, W04.key)
-    b = run_dir.week_dir(whole.work_dir, the_run(whole).name, W04.key)
-    assert (a / run_dir.TRADES).read_bytes() == (b / run_dir.TRADES).read_bytes()
+    a = folder.store.path(lake.TRADE, folder.name, W04.key)
+    b = the_run(whole).store.path(lake.TRADE, the_run(whole).name, W04.key)
+    assert a.read_bytes() == b.read_bytes()
 
 
 def w04_end(day: str) -> float:
@@ -586,9 +596,9 @@ def test_a_first_week_starts_where_the_data_does(make_env, data_root):
     remove_days(data_root, FIRST_DAY, dt.date(2026, 1, 6))   # the data starts on Wednesday 01-07
     run(env, weeks_range(W02, W03))
     folder = the_run(env)
-    w02 = run_dir.read_json(run_dir.week_dir(env.work_dir, folder.name, W02.key), run_dir.META)
+    w02 = meta(folder, W02)
     assert (w02["start_str"], w02["partial"]) == ("2026-01-07 00:00:00", True)
-    assert run_dir.read_json(folder, run_dir.META)["start_str"] == "2026-01-07 00:00:00"
+    assert meta(folder)["start_str"] == "2026-01-07 00:00:00"
 
 
 def test_no_data_at_all_runs_nothing(make_env, data_root, caplog):
@@ -596,5 +606,5 @@ def test_no_data_at_all_runs_nothing(make_env, data_root, caplog):
     remove_days(data_root, FIRST_DAY, LAST_DAY)
     with caplog.at_level("WARNING"):
         run(env, weeks_range(W02, W03))
-    assert not (Path(env.work_dir) / run_dir.RUN_LOG_DIR).exists()
+    assert use(env).all_run_ids() == []
     assert any("nothing to run" in r.message for r in caplog.records)

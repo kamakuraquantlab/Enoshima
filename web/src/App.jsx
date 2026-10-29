@@ -16,8 +16,8 @@ function hashList() {
 }
 const hashEnv = () => hashList().env
 
-// #/run/<source>/<run_id>: source is the env's folder under the results root,
-// e.g. backtest/NAME, and its last component is the env name.
+// #/run/<source>/<run_id>: source is the env name (once the env's folder,
+// e.g. backtest/NAME, whose last component is the env name: such a link still works).
 // #/wf/<source>/<run_id> is the same run against its group's walk-forward rules.
 function hashRun(kind = 'run') {
   try {
@@ -103,7 +103,7 @@ export default function App() {
     return next
   })
   async function removeSelected() {
-    if (!toDelete.length || !window.confirm(`Delete ${toDelete.length} run folder(s)? Each run's meta, summary, trades and groupings are removed; InfluxDB data remains.`)) return
+    if (!toDelete.length || !window.confirm(`Delete ${toDelete.length} run(s)? Each run's files in the data lake are removed: its meta, summary, trades and records.`)) return
     setDeleting(true); setError('')
     try { for (const row of toDelete) await deleteResult(row) }
     catch (e) { setError(e.message) }

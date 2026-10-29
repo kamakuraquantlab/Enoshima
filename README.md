@@ -145,13 +145,17 @@ described in [the overview](doc/00_overview.md#the-environment).
 | `enoshima walk-forward` | Test the selection rule's window, history and reselection interval; `--train` chooses among them monthly against no switching |
 | `enoshima results` | Recorded runs for an environment, best first |
 | `enoshima web` | Every env's runs and trainings as a page, replaying nothing (the `web` extra) |
+| `enoshima import-run-log` | Bring an env's results from before the lake into it |
 
-To clear an environment's results, delete its `run_log/`, `best_result/` and `post_analysis/`.
+Results go back to the data lake the data came from, under `research/`, one
+dataset per kind -- runs, trades, orders, PnL updates, bars, metrics -- by env
+and run id ([the overview](doc/00_overview.md#where-the-results-are)). Results
+written into an env before then are brought over with `enoshima import-run-log`.
 
 Flags on `run`: `--optimize grid`, `--chunk-days` (memory),
 `--max-concurrency` (parameter sets per data pass), `--force` (re-run a parameter
 set that already has a result). The variant is `strategy_param_grid.json`'s, the data is
-komachi's, and the output is the environment directory.
+komachi's, and the output goes back to komachi's data lake.
 
 ## Memory, and how a sweep is cheap
 
@@ -178,7 +182,7 @@ refuses to start on anything else:
 
 ```bash
 pyenv virtualenv 3.14.0t enoshima-314t
-pip install --only-binary=:all: 'pandas>=3.0' numpy pyarrow dacite influxdb-client httpx matplotlib
+pip install --only-binary=:all: 'pandas>=3.0' numpy pyarrow dacite httpx matplotlib
 pip install --no-deps -e . -e ../qate -e ../qate-env -e ../Hase -e ../Komachi -e <your strategy>
 ./run.sh run --env MY_ENV --from 2026-06-01 --to 2026-06-30 --optimize grid
 ```

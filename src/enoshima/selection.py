@@ -2,7 +2,7 @@
 
 Ranking every result on one number over the whole range picks the set that fit
 that range best, which is not the same as the set most likely to keep working.
-Three things here push back against that, all computed from the run folders
+Three things here push back against that, all computed from the recorded runs
 a sweep has already written -- nothing is replayed again.
 
 ## Filters
@@ -50,7 +50,7 @@ parameters (`"nofilter"`, `"us_off"`) have no order, so they have no neighbours.
 
 ## Walk-forward
 
-With each run folder's `by_month.json` (see `ledger`), the sweep is replayed
+With each run's `by_month` grouping (see `ledger`), the sweep is replayed
 in time without being replayed in fact: choose the best set on the months
 before a test, score that choice on the `test_months` that follow, step
 forward by `test_months`, repeat. The sum of the test months is what the
@@ -274,8 +274,8 @@ def walk_forward(runs: list[dict], months: list[str], grid: list[dict] | None,
                  settings: SelectionSettings) -> dict:
     """Choose on the months before, test on the next `test_months`, step, repeat.
 
-    `runs` are run logs whose results carry `periods`, a run folder's
-    `by_month.json`, and optionally `trade_pnl5`, its trades' pnl5 changes by
+    `runs` are run logs whose results carry `periods`, a run's `by_month`
+    grouping, and optionally `trade_pnl5`, its trades' pnl5 changes by
     month. Returns the folds, the
     out-of-sample totals, and the set chosen on the most recent window.
     """

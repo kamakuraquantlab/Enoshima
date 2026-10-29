@@ -108,5 +108,5 @@ def identity(rates: dict[str, FeeSchedule]) -> dict:
 
 
 def to_json(rates: dict[str, FeeSchedule]) -> dict:
-    """The rates as `meta.json` records them, zero ones included."""
+    """The rates as a run's meta records them, zero ones included."""
     return {market_id: {"maker": rate.maker, "taker": rate.taker} for market_id, rate in sorted(rates.items())}

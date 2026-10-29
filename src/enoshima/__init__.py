@@ -1,7 +1,7 @@
 """Enoshima — backtesting over recorded market data.
 
 Replays the Kamakura Quant Lab bronze layer through a strategy and a simulated
-exchange, evaluates what happened, and optionally records it in InfluxDB.
+exchange, evaluates what happened, and writes it back to the data lake.
 
 | Module | Holds |
 |---|---|
@@ -11,15 +11,16 @@ exchange, evaluates what happened, and optionally records it in InfluxDB.
 | `backtest` | `BacktestRuntime`: one strategy, one replay, reported to its reporters |
 | `result` | `ResultReporter`: the evaluations, the closed trades, and a run's summary |
 | `ledger` | A closed trade, and the trades grouped by month, weekday, hour, holding time... |
-| `run_dir` | A run's folder: meta, summary, trades and groupings, written whole or not at all |
+| `lake` | Where results live: the lake's `research/` datasets, by env and run id, each part written whole |
+| `records` | `RecordReporter`: fills, PnL updates, bars and metrics, kept for the lake |
 | `eval` | Turning fills and PnL into Sharpe, drawdown, win rate |
-| `run_log` | A run's provenance (`meta.json`), and why its id is deterministic |
+| `run_log` | A run's provenance (its meta), and why its id is deterministic |
 | `selection` | How a set is chosen from a group: filters, score, grid neighbours, walk-forward |
 | `best` | Which groups get a recommendation: every range, split by categorical parameter |
 | `post_analysis` | Analyses of finished runs: the selection rule's window, history and interval, tested |
-| `influx` | `InfluxReporter`: the optional metric stream, written to InfluxDB as it runs |
+| `legacy` | Importing the run folders of an env written before results moved to the lake |
 | `cli` | The `enoshima` command |
-| `settings` | `enoshima.json`: InfluxDB recording and run sizing, per environment |
+| `settings` | `enoshima.json`: fees, run sizing, selection and weekly settings, per environment |
 
 Market data comes from `hase.bronze`, already as qate's `Trade` and `OrderBook`;
 hase in turn asks `komachi` which file holds a market-day. Enoshima reads no

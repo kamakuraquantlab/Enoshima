@@ -69,13 +69,14 @@ UTC epochs.
 
 Every command takes `--env NAME`. That names one directory under `~/env` (or
 `QATE_ENV_ROOT`), and its files are the run's whole configuration. The command
-takes no locations: the data is komachi's and the output is the env dir.
+takes no locations: the data is komachi's, and the results go back to the same
+data lake.
 
 | File | Holds |
 |---|---|
 | `strategy_config.json` | The strategy's `Config`: market and order size. The live runner reads the same file |
 | `strategy_param_grid.json` | Strategy module and variant, each parameter's `default_value`, and the `values` a sweep tries |
-| `enoshima.json` | How this env is backtested: weekly preload and overlap, selection and walk-forward rules, InfluxDB, memory. Optional |
+| `enoshima.json` | How this env is backtested: fees, weekly preload and overlap, selection and walk-forward rules, memory. Optional |
 
 ```json
 {
@@ -92,9 +93,10 @@ combination in `values`. The strategy is imported by module name, so it must be
 installed or on `PYTHONPATH`. Its `Config` class is
 `<module>.config.Config`, and there is no index file.
 
-A run writes into its environment and takes the environment's lock. Never point
-a run at an environment a live process is running from; copy it instead. Every
-command logs to `env.log` there and prints nothing.
+A run takes the environment's lock and logs there. Never point a run at an
+environment a live process is running from; copy it instead. Every command logs
+to `env.log` there and prints nothing. Its results go to the data lake, not to
+the environment directory: see [Where the results are](#where-the-results-are).
 
 ### `enoshima.json`
 
@@ -107,7 +109,6 @@ silently change what a run does.
 | `selection` | how `select` filters, scores, smooths and groups | [02_selection.md](02_selection.md) |
 | `walk_forward` | the rules `walk-forward` tests, and `--train`'s settings | [03_walk_forward.md](03_walk_forward.md) |
 | `fee_rates` | what each traded market charges, by market id; a traded market without one refuses the run | below |
-| `influx` | additionally record orders, PnL and bars to InfluxDB; absent does not disable `Backtest_Bar` | below |
 | `chunk_days` | days loaded at once (2); `--chunk-days` overrides it | memory |
 | `max_concurrency` | parameter sets sharing one pass over the data (16); `--max-concurrency` overrides it | speed |
 | `strategy_log_level` | level of the strategy's and `qate.trading`'s loggers during a run (`WARNING`) | `"INFO"` to debug |
@@ -164,57 +165,76 @@ at the close, on both legs.
 
 ## Where the results are
 
+In the data lake, beside the bronze the run replayed: komachi's root, under
+the `research/` layer. Nothing but `env.log` goes to the environment directory.
+
 ```text
-NAME/
-├── env.log                    everything a command logged
-├── run_log/<id>/              one per revision, parameter set and range (weekly: preload and overlap)
-│   ├── meta.json              what was run: env, config, params, range, revision, bucket
-│   ├── summary.json           the whole-range result at each slippage; "finished" means this exists
-│   ├── trades.csv             every closed position, with its PnL at each slippage
-│   │                          and its closing fill's price
-│   ├── by_<grouping>.json     the trades by month, week, day, weekday, monthday, hour,
-│   │                          weekday_hour, holding, side
-│   └── weeks/<YYYY-Www>/      weekly only: each week's meta, summary and trades
-├── best_result/<batch_id>/    `select`'s recommendations (02)
-└── post_analysis/             `walk-forward`'s table and `--train` folders (03)
+<lake>/research/
+├── dataset=BacktestRun/env=<env>/run_id=<id>/            one row: the run's meta, summary and groupings;
+│                                                         "finished" means this exists
+├── dataset=BacktestPart/env=<env>/run_id=<id>/part=<p>/  one row per part: its meta and summary
+├── dataset=BacktestTrade/...  same partitions            every closed position, with its PnL at each
+│                                                         slippage and its closing fill's price
+├── dataset=BacktestOrder/...                             every fill
+├── dataset=BacktestPnl/...                               every PnL update, open and close, with open_ts
+├── dataset=BacktestBar/...                               the strategy's completed bars and indicators
+├── dataset=BacktestMetric/...                            any other metric it reports, and EVAL
+└── enoshima/<env>/
+    ├── best_result/<batch_id>/                           `select`'s recommendations (02)
+    └── post_analysis/                                    `walk-forward`'s table and `--train` folders (03)
 ```
 
-A run folder is written whole or not at all: it is built in a temporary folder
-and renamed into place. Any window or grouping can be recomputed from
-`trades.csv` without a replay, which is what `select` and `walk-forward` do.
-A grouping row has `trades` and, per slippage N, `winsN`, `pnlN`, `peakN`,
-`troughN` and `ddN` (worst drawdown).
+`run_id` is the deterministic hash of the env, the strategy and variant, the
+revision of the variant's source, the parameters, the non-zero fee rates and
+the range (weekly: the preload and overlap instead), so every file of every
+dataset is attributable to exactly what computed it, and a re-run replaces
+rather than adds. `BacktestRun` holds what the hash was made of --
+`strategy`, `strategy_rev`, `param_set_id`, `params`, ... -- as columns, and
+every summary figure as a column too, so the lake answers a question across
+runs directly:
+
+```sql
+SELECT run_id, param_set_id, pnl5, max_drawdown5
+FROM read_parquet('<lake>/research/dataset=BacktestRun/**/*.parquet',
+                  hive_partitioning = true, hive_types_autocast = false, union_by_name = true)
+WHERE env = 'EXAMPLE_BACKTEST' ORDER BY pnl5 DESC
+```
+
+(`hive_types_autocast = false`: a run id of sixteen digits is still a string.)
+
+`part` is what a run writes at once: an ISO week of a weekly run
+([01_weekly_run.md](01_weekly_run.md)), `all` for a temporary run. A part is
+written whole, its data files first and its `BacktestPart` row last, and the
+run's row is rebuilt from its parts after; a reader refuses a part one of
+whose files has gone. Any window or grouping can be recomputed from the trades
+without a replay, which is what `select` and `walk-forward` do. A grouping row
+has `trades` and, per slippage N, `winsN`, `pnlN`, `peakN`, `troughN` and `ddN`
+(worst drawdown). Nothing from the warmup is recorded, and a weekly part's
+orders and PnL are those of the positions it opened (01).
 
 `enoshima results --env NAME` lists the recorded runs, best first, in `env.log`;
 `enoshima web` shows every env's as a page ([04_web.md](04_web.md)). No command
-deletes results, and the viewer deletes only a run folder it is asked to. To
-clear them, delete `run_log/`, `best_result/` and `post_analysis/`.
+deletes results, and the viewer deletes only a run it is asked to. To clear an
+env's, delete its `env=<env>` folder in each dataset and its `enoshima/<env>/`.
 
-### InfluxDB, for looking at a run
+A run is written to the lake only after it has finished: a run that fails
+writes nothing. InfluxDB is not written; a loader from the lake into InfluxDB
+for dashboards is a separate tool.
 
-PnL lives in the run folder because the result is evaluated from it. Every run
-also writes completed BAR metrics to the data lake as Zstandard-compressed
-Parquet, preserving fields such as `sar:up`, `sar:s` and `sar:ns`:
+### Results from before the lake
 
-```text
-research/dataset=Backtest_Bar/strategy=<strategy>/exchange=<exchange>/
-  symbol=<symbol>/param_id=<param_id>/date=YYYY-MM-DD/data.parquet
-```
-
-The data-lake root is Hase's canonical root. Warmup and weekly overlap bars are
-not written. Orders, PnL and the strategy's bars also go to InfluxDB when
-`enoshima.json` has an
-`"influx"` entry (`token`, `write_url`, `read_url`, `org`, defaulting to a local
-server). A run without it still finishes with its result. Each execution writes
-its own bucket, `backtest_<param_set_id>_<batch_id>`. The param set id is the
-env name and then the parameter values in grid order, e.g.
-`EXAMPLE_BACKTEST_20_120`. A weekly run has one bucket for all its executions,
-`backtest_<param_set_id>_w<run_id>`, with every point tagged by week. Enoshima
-never expires a bucket.
+Results used to be written into the environment, as `run_log/`, `best_result/`
+and `post_analysis/`. `enoshima import-run-log --env NAME` reports what it
+would bring into the lake, and `--apply` does it: each run folder's weeks (or
+its root, for a temporary run) become parts with their meta, summary and
+trades, keeping their run ids, so a weekly run carries on from them. Their
+orders and PnL updates were only in InfluxDB, so imported parts have none.
+Nothing in the environment is removed; delete the folders once the import
+looks right. `enoshima.json`'s old `"influx"` entry is ignored, with a warning.
 
 ## Choosing a parameter set
 
-A run does not choose. `enoshima select` reads every weekly run folder and
+A run does not choose. `enoshima select` reads every weekly run and
 recommends a parameter set per range and per group. It filters and scores on
 several figures, smooths over grid neighbours, and tests its choice month by
 month out of sample ([02_selection.md](02_selection.md)).

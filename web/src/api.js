@@ -7,7 +7,7 @@ async function fail(response, fallback) {
 
 export async function fetchResults(signal) {
   const response = await fetch(`${BASE}api/results`, { signal })
-  if (!response.ok) throw new Error('Could not load results. Check the API and results directory.')
+  if (!response.ok) throw new Error('Could not load results. Check the API and the data lake.')
   return response.json()
 }
 

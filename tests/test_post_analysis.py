@@ -8,7 +8,8 @@ import numpy as np
 import pytest
 from qate.util.dt_range import DtRange
 
-from enoshima import run_dir, selection
+from enoshima import selection
+from enoshima.lake import WHOLE, Store
 from enoshima.ledger import JST, Trade, aggregate
 from enoshima.post_analysis import walk_forward as wf
 from enoshima.selection import SelectionSettings
@@ -154,21 +155,23 @@ def test_a_fold_where_nothing_passes_sits_out():
     assert got["out_of_sample"]["sat_out"] == 1
 
 
-def write_run(root, run_id, params, changes, start="2026-01-01", end="2026-01-21"):
+def write_run(store, run_id, params, changes, start="2026-01-01", end="2026-01-21"):
     r = DtRange.from_strings(start, end)
     trades = [trade(day, c, hour=1 + i) for day, cs in sorted(changes.items()) for i, c in enumerate(cs)]
     meta = {"params": params, "strategy": "s.v1", "start_str": r.start_str, "end_str": r.end_str}
     total = sum(c for cs in changes.values() for c in cs)
-    run_dir.write(root, run_id, meta, {"pnl0": total, "pnl5": total, "pnl10": total, "pnl_cnt5": len(trades),
-                                       "max_drawdown5": 0.0}, trades)
+    summary = {"pnl0": total, "pnl5": total, "pnl10": total, "pnl_cnt5": len(trades), "max_drawdown5": 0.0}
+    store.write_part(run_id, WHOLE, meta, summary, trades)
+    store.write_run(run_id, meta, summary, trades)
 
 
 def test_the_command_writes_every_group_and_rule_and_the_sums(tmp_path):
+    store = Store(tmp_path, "E")
     for mode, box, pnl in [("a", 1, 1.0), ("a", 2, 2.0), ("b", 1, 3.0), ("b", 2, -1.0)]:
-        write_run(tmp_path, f"{mode}{box}", {"mode": mode, "box": box}, {d: [pnl] for d in days("2026-01-01", 21)})
+        write_run(store, f"{mode}{box}", {"mode": mode, "box": box}, {d: [pnl] for d in days("2026-01-01", 21)})
 
     rule_list = wf.rules(["expanding"], {"1w": ["1w", "never"]})
-    path = wf.run(tmp_path, rule_list, SelectionSettings(neighbors=False), sum_names=[["a", "b"]])
+    path = wf.run(store, rule_list, SelectionSettings(neighbors=False), sum_names=[["a", "b"]])
     report = json.loads(path.read_text())
     assert path.parent.name == "post_analysis" and path.with_suffix(".txt").is_file()
 
@@ -306,18 +309,19 @@ def test_without_a_default_run_the_baseline_is_chosen_once():
 
 
 def test_the_train_command_writes_a_folder_per_group(tmp_path):
+    store = Store(tmp_path, "E")
     for mode, box, pnl in [("a", 1, 1.0), ("a", 2, 2.0), ("b", 1, 3.0), ("b", 2, -1.0)]:
-        write_run(tmp_path, f"{mode}{box}", {"mode": mode, "box": box}, {d: [pnl] for d in days("2026-01-01", 21)})
+        write_run(store, f"{mode}{box}", {"mode": mode, "box": box}, {d: [pnl] for d in days("2026-01-01", 21)})
     s = wf.WalkForwardSettings(window=["expanding"], history={"2d": ["1d", "never"]},
                                train_history="3d", retrain="1w", resamples=200)
-    paths = wf.run_train(tmp_path, s, SelectionSettings(neighbors=False), {"mode": "a", "box": 1})
-    assert len(paths) == 2 and all(p.parent == tmp_path / "post_analysis" / "train" for p in paths)
-    assert not list((tmp_path / "post_analysis" / "train").glob("*.tmp-*"))
+    paths = wf.run_train(store, s, SelectionSettings(neighbors=False), {"mode": "a", "box": 1})
+    assert len(paths) == 2 and all(p.parent == store.analysis_dir / "post_analysis" / "train" for p in paths)
+    assert not list((store.analysis_dir / "post_analysis" / "train").glob("*.tmp-*"))
     by_mode = {}
     for p in paths:
         assert sorted(f.name for f in p.iterdir()) == sorted(wf.TRAIN_FILES)
         meta = json.loads((p / "meta.json").read_text())
-        assert meta["train_id"] == p.name and meta["env"] == tmp_path.name and meta["runs"] == 2
+        assert meta["train_id"] == p.name and meta["env"] == "E" and meta["runs"] == 2
         assert meta["settings"]["walk_forward"]["retrain"] == "1w"
         by_mode[meta["group"]["mode"]] = (meta, json.loads((p / "summary.json").read_text()), p)
 

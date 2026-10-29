@@ -20,7 +20,7 @@ What is not in it: libraries outside the package (qate and the rest), which
 were never part of the revision, and a module imported dynamically, by a
 string, which the import statements do not name.
 
-The commit it ran from is still recorded, in `meta.json` as `strategy_commit`:
+The commit it ran from is still recorded, in the run's meta as `strategy_commit`:
 `<sha>`, `<sha>+dirty.<hash>` with uncommitted changes, or the distribution's
 `name==version`. It is provenance, not identity. It was the revision once, and
 folders written then carry a commit as their `strategy_rev`; `enoshima

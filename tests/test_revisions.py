@@ -1,26 +1,33 @@
-"""Folders recorded at a commit take their source revision; two halves of one run become one."""
+"""Runs recorded at a commit take their source revision; two halves of one run become one."""
 
 import subprocess
 from pathlib import Path
 
 import pytest
 import test_weekly
-from test_weekly import W02, W03, run, weeks_range
+from test_run_end_to_end import RunRef
+from test_weekly import W02, W03, run, use, weeks_range
 
 import enoshima.runner
-from enoshima import revisions, run_dir, weekly
+from enoshima import revisions, weekly
 from enoshima.strategy_env import strategy_rev
 
 REPO = Path(__file__).resolve().parent.parent
 make_env = test_weekly.make_env  # the fixture, shared
 
 
-def folders(env) -> list[Path]:
-    return sorted(p for p in (Path(env.work_dir) / run_dir.RUN_LOG_DIR).iterdir())
+def folders(env) -> list[RunRef]:
+    """Every run of the env, finished or not, but for one set aside by a merge."""
+    store = use(env)
+    return [RunRef(store, r) for r in store.all_run_ids()]
 
 
-def weeks_of(path: Path) -> list[str]:
-    return [w.key for w in weekly.on_disk(path.parent.parent, path.name)]
+def weeks_of(ref: RunRef) -> list[str]:
+    return [w.key for w in weekly.on_disk(ref.store, ref.name)]
+
+
+def meta_of(ref: RunRef, week: str | None = None) -> dict:
+    return ref.store.read_run(ref.name)["meta"] if week is None else ref.store.read_part(ref.name, week)["meta"]
 
 
 def two_halves(env, monkeypatch, first="aaaaaaaaaaaa+dirty.11111111", second="aaaaaaaaaaaa+dirty.22222222"):
@@ -29,7 +36,7 @@ def two_halves(env, monkeypatch, first="aaaaaaaaaaaa+dirty.11111111", second="aa
     run(env, weeks_range(W02, W03))
     monkeypatch.setattr(enoshima.runner, "strategy_rev", lambda module, variant: second)
     run(env, weeks_range(W03, W03))
-    meta = {run_dir.read_json(p, run_dir.META)["strategy_rev"]: p.name for p in folders(env)}
+    meta = {meta_of(p)["strategy_rev"]: p.name for p in folders(env)}
     return meta[first], meta[second]
 
 
@@ -37,43 +44,46 @@ def test_a_merge_needs_the_two_revisions_shown_to_be_one_source(make_env, monkey
     env = make_env("env")
     older, newer = two_halves(env, monkeypatch)
     with pytest.raises(ValueError, match="--unverified"):
-        revisions.merge(env.work_dir, older, newer, apply=True)
+        revisions.merge(use(env), older, newer, apply=True)
     assert len(folders(env)) == 2  # nothing moved
 
 
 def test_an_unverified_merge_joins_the_halves_and_says_so(make_env, monkeypatch):
     env = make_env("env")
     older, newer = two_halves(env, monkeypatch)
-    assert revisions.merge(env.work_dir, older, newer, unverified=True) == 1  # a dry run counts
+    assert revisions.merge(use(env), older, newer, unverified=True) == 1  # a dry run counts
     assert len(folders(env)) == 2
 
-    assert revisions.merge(env.work_dir, older, newer, unverified=True, apply=True) == 1
-    target = run_dir.run_dir(env.work_dir, newer)
+    assert revisions.merge(use(env), older, newer, unverified=True, apply=True) == 1
+    store = use(env)
+    target = RunRef(store, newer)
     assert weeks_of(target) == ["2026-W02", "2026-W03"]
-    assert run_dir.is_complete(target)  # the root is rebuilt over both weeks
-    copied = run_dir.read_json(run_dir.week_dir(env.work_dir, newer, "2026-W02"), run_dir.META)
+    assert store.is_complete(newer)  # the run's row is rebuilt over both weeks
+    copied = meta_of(target, "2026-W02")
     assert copied["merged_from"] == {"run_id": older, "strategy_rev": "aaaaaaaaaaaa+dirty.11111111", "verified": False}
-    assert run_dir.read_json(target, run_dir.META)["merged"][0]["weeks"] == ["2026-W02"]
+    assert meta_of(target)["merged"][0]["weeks"] == ["2026-W02"]
     # the source is set aside, not deleted, and no longer listed
-    assert (target.parent / f"{older}{revisions.MERGED_SUFFIX}").is_dir()
-    assert [p.name for p in run_dir.iter_complete(env.work_dir)] == [newer]
+    assert store.parts(f"{older}{revisions.MERGED_SUFFIX}") == ["2026-W02", "2026-W03"]
+    assert store.run_ids() == [newer] and store.all_run_ids() == [newer]
 
 
 def test_a_merge_refuses_a_shared_week_that_differs(make_env, monkeypatch):
     env = make_env("env")
     older, newer = two_halves(env, monkeypatch)
-    trades = run_dir.week_dir(env.work_dir, older, "2026-W03") / run_dir.TRADES
-    trades.write_text(trades.read_text() + trades.read_text().splitlines()[-1] + "\n")
+    store = use(env)
+    part = store.read_part(older, "2026-W03")
+    trades = store.read_part_trades(older, "2026-W03")
+    store.write_part(older, "2026-W03", part["meta"], part["summary"], trades + trades[-1:])
     with pytest.raises(ValueError, match="2026-W03 differs"):
-        revisions.merge(env.work_dir, older, newer, unverified=True, apply=True)
+        revisions.merge(use(env), older, newer, unverified=True, apply=True)
 
 
 def test_a_merge_of_one_source_under_two_names_needs_no_flag(make_env, monkeypatch):
     env = make_env("env")
     older, newer = two_halves(env, monkeypatch)
     monkeypatch.setattr(revisions, "source_of", lambda meta: "src.000000000000")
-    revisions.merge(env.work_dir, older, newer, apply=True)
-    copied = run_dir.read_json(run_dir.week_dir(env.work_dir, newer, "2026-W02"), run_dir.META)
+    revisions.merge(use(env), older, newer, apply=True)
+    copied = meta_of(RunRef(use(env), newer), "2026-W02")
     assert copied["merged_from"]["verified"] is True
 
 
@@ -89,23 +99,23 @@ def _clean_commit() -> str:
     return head
 
 
-def test_a_folder_recorded_at_a_commit_moves_to_the_source_revision_and_is_reused(make_env, monkeypatch):
+def test_a_run_recorded_at_a_commit_moves_to_the_source_revision_and_is_reused(make_env, monkeypatch):
     commit = _clean_commit()
     env = make_env("env")
     monkeypatch.setattr(enoshima.runner, "strategy_rev", lambda module, variant: commit)
     run(env, weeks_range(W02, W02))
     [old] = folders(env)
-    recorded = run_dir.read_json(old, run_dir.META)["strategy_commit"]
+    recorded = meta_of(old)["strategy_commit"]
 
-    report = revisions.migrate(env.work_dir, apply=True)
+    report = revisions.migrate(use(env), apply=True)
     [new] = folders(env)
     assert report.renamed == [(old.name, new.name)]
-    meta = run_dir.read_json(new, run_dir.META)
+    meta = meta_of(new)
     assert meta["strategy_rev"] == strategy_rev("example.strategy", "v1")
     assert meta["strategy_commit"] == recorded and meta["id"] == new.name  # provenance kept as it was
 
-    # A run of the same source today lands in that folder and replays nothing it holds.
-    monkeypatch.undo()
+    # A run of the same source today lands in that run and replays nothing it holds.
+    monkeypatch.setattr(enoshima.runner, "strategy_rev", strategy_rev)
     runner = run(env, weeks_range(W02, W03))
     assert [p.name for p in folders(env)] == [new.name]
     assert weeks_of(new) == ["2026-W02", "2026-W03"]
@@ -116,5 +126,5 @@ def test_a_dirty_revision_is_left_as_it_is(make_env, monkeypatch):
     env = make_env("env")
     monkeypatch.setattr(enoshima.runner, "strategy_rev", lambda module, variant: "aaaaaaaaaaaa+dirty.11111111")
     run(env, weeks_range(W02, W02))
-    report = revisions.migrate(env.work_dir, apply=True)
+    report = revisions.migrate(use(env), apply=True)
     assert not report.renamed and len(report.skipped) == 1

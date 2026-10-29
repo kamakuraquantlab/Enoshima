@@ -13,9 +13,8 @@ Channel ──► Trader ──► Strategy ──► BacktestGateway
                  │                         │
                  └──── BacktestRuntime ◄───┘
                           │ report_order / report_metrics / report_pnl
-                          ├──► ResultReporter   evaluations, the run's result (always)
-                          ├──► DatalakeReporter completed BAR metrics (always)
-                          └──► InfluxReporter   metrics, orders, PnL (if enoshima.json asks)
+                          ├──► ResultReporter   evaluations, trades, the run's result
+                          └──► RecordReporter   fills, PnL updates, bars, metrics
 ```
 
 It differs from `Runtime` where a replay differs from a live run:
@@ -44,9 +43,11 @@ stops early. Its overlap is there only to see the week's trades closed, so
   The strategy does not see that event, and the channel is closed as on any
   other exit.
 
-Reporters are terminal sinks. Evaluation results write directly through the
-optional InfluxDB writer owned by the run; they do not masquerade as strategy
-metrics and re-enter this dispatch.
+Reporters are terminal sinks. Evaluation results go directly to the run's
+`RecordReporter`; they do not masquerade as strategy metrics and re-enter this
+dispatch. Nothing is written while the replay runs: the runner writes a
+finished backtest's trades and records to the lake (`lake`), and a failed one
+writes nothing.
 """
 
 from logging import getLogger
@@ -60,7 +61,7 @@ from qate.trading.reporter import Reporter
 from qate.trading.strategy import Strategy
 from qate.trading.trader import Trader
 
-from .influx import UNRECORDED_MEASUREMENTS
+from .records import UNRECORDED_MEASUREMENTS
 from .result import ResultReporter
 from .run_log import BacktestLog
 
@@ -110,7 +111,7 @@ class BacktestRuntime(EventQueue):
     ):
         """`opens_until`, given, is when open orders stop filling: see `OverlapGateway`."""
         self.channel = channel
-        # Nothing records these (see `influx.UNRECORDED_MEASUREMENTS`); a
+        # Nothing records these (see `records.UNRECORDED_MEASUREMENTS`); a
         # strategy that asks `wants_metric` need not build them. A copy per
         # strategy, built from a tuple because `frozenset(a_frozenset)` hands
         # back the same object: one set read by every thread of a sweep, for

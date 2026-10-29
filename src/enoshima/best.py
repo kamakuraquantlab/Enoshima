@@ -1,6 +1,6 @@
 """An environment's recommendations: one per range and per group of parameter sets.
 
-`recommend` reads every finished run folder under `run_log/`, and
+`recommend` reads every finished run of the environment from the lake, and
 
 1. groups them by strategy and range -- two runs over different days, or of
    different variants or revisions of the strategy, are not measuring the
@@ -20,18 +20,19 @@ recommendation follows a change to the rule without a replay. Neighbours come
 from the values the group's runs actually took, so an older range is judged by
 the grid it was run on.
 
-The result goes to `best_result/<batch_id>/`: `selection.json` with every
-group, and a copy of each recommended run's `meta.json` as `<run_id>.json`.
+The result goes to `best_result/<batch_id>/` in the environment's analysis
+folder in the lake (`lake.Store.analysis_dir`): `selection.json` with every
+group, and each recommended run's meta as `<run_id>.json`.
 """
 
 import json
-import shutil
 from logging import getLogger
 from pathlib import Path
 
 from qate.util.dt_range import DtRange
 
-from . import run_dir, selection
+from . import selection
+from .lake import Store
 from .ledger import GROUPINGS
 
 LOG = getLogger(__name__)
@@ -40,23 +41,23 @@ BEST_RESULT_DIR = "best_result"
 SELECTION_FILE = "selection.json"
 
 
-def load_runs(root: Path, grouping: str | None = "month") -> list[dict]:
-    """Every finished, non-temporary run folder with a pnl5 figure, as `selection` reads it.
+def load_runs(store: Store, grouping: str | None = "month") -> list[dict]:
+    """Every finished, non-temporary run with a pnl5 figure, as `selection` reads it.
 
     `periods` and `trade_pnl5` are keyed by `grouping`, a calendar one of
     `ledger.GROUPINGS`: month for `selection`. With `grouping` None, `result`
     carries the run's `trades` instead, for `post_analysis` to cut its own windows.
     """
     runs = []
-    for path in run_dir.iter_complete(root):
+    for run_id in store.run_ids():
         try:
-            meta = run_dir.read_json(path, run_dir.META)
-            summary = run_dir.read_json(path, run_dir.SUMMARY)
+            run = store.read_run(run_id)
+            meta, summary = run["meta"], run["summary"]
             if "pnl5" not in summary or not meta.get("start_str") or not meta.get("end_str"):
                 continue
             if meta.get("is_temporary_run"):
                 continue  # a one-off look at a set, not a candidate
-            trades = run_dir.read_trades(path)
+            trades = store.trades(run_id)
             if grouping is None:
                 result = {**summary, "trades": trades}
             else:
@@ -64,12 +65,11 @@ def load_runs(root: Path, grouping: str | None = "month") -> list[dict]:
                 trade_pnl5 = {}
                 for t in trades:
                     trade_pnl5.setdefault(key_of(t), []).append(t.pnl_change5)
-                result = {**summary, "periods": run_dir.read_json(path, run_dir.grouping_file(grouping)),
-                          "trade_pnl5": trade_pnl5}
+                result = {**summary, "periods": store.grouping(run_id, grouping), "trade_pnl5": trade_pnl5}
         except (json.JSONDecodeError, OSError, TypeError, ValueError) as e:
-            LOG.error(f"Could not read {path}: {e}")
+            LOG.error(f"Could not read run {run_id} of {store.env}: {e}")
             continue
-        runs.append({**meta, "run_id": path.name, "result": result})
+        runs.append({**meta, "run_id": run_id, "result": result})
     return runs
 
 
@@ -118,9 +118,9 @@ def group(runs: list[dict], group_by: list[str] | None) -> dict[tuple, dict[tupl
     return out
 
 
-def recommend(root: Path, batch_id: int, settings: selection.SelectionSettings) -> list[dict]:
-    """Choose for every range and group under `root`, write `best_result/<batch_id>/`, and return the groups."""
-    runs = load_runs(root)
+def recommend(store: Store, batch_id: int, settings: selection.SelectionSettings) -> list[dict]:
+    """Choose for every range and group of `store`'s runs, write `best_result/<batch_id>/`, and return the groups."""
+    runs = load_runs(store)
     out = []
     for (strategy, start_str, end_str), groups in sorted(group(runs, settings.group_by).items(),
                                                          key=lambda kv: tuple(str(k) for k in kv[0])):
@@ -139,14 +139,15 @@ def recommend(root: Path, batch_id: int, settings: selection.SelectionSettings) 
                 **choice,
             })
 
-    best_dir = Path(root) / BEST_RESULT_DIR / str(batch_id)
+    best_dir = Path(store.analysis_dir) / BEST_RESULT_DIR / str(batch_id)
     best_dir.mkdir(parents=True, exist_ok=True)
     (best_dir / SELECTION_FILE).write_text(json.dumps({"settings": out[0]["settings"] if out else None,
                                                        "groups": out}, indent=2))
     for g in out:
         if g["recommended_run_id"]:
-            shutil.copyfile(run_dir.run_dir(root, g["recommended_run_id"]) / run_dir.META,
-                            best_dir / f"{g['recommended_run_id']}.json")
+            meta = next(r for r in runs if r["run_id"] == g["recommended_run_id"])
+            meta = {k: v for k, v in meta.items() if k not in ("run_id", "result")}
+            (best_dir / f"{g['recommended_run_id']}.json").write_text(json.dumps(meta, indent=2))
     for g in out:
         _log(g)
     LOG.info(f"Saved {best_dir}: {sum(1 for g in out if g['recommended_run_id'])} recommended "
