@@ -19,9 +19,9 @@ hase.bronze ──► Loader ──► SharedBuffer ──► Channel ──► 
 Reading is `hase.bronze`'s job: it is asked for a market-day and hands back
 qate's `Trade`s and `OrderBook`s. Nothing here opens a file, knows a path, or
 asks komachi anything. This module decides *when* to read, tags what comes back
-with its event type, and hands out one `Channel` per backtest. `Channel` is the chunked counterpart of
-`qate.trading.replay.ReplayQueue`: the same "the strategy's own events come first"
-rule, over a buffer that is refilled rather than a fixed list.
+with its event type, and hands out one `Channel` per backtest. `Channel` is the
+`qate.core.ev_q.EventQueue` a backtest runs on: the strategy's own events come
+first, then the shared buffer, which is refilled chunk by chunk.
 """
 
 import threading
@@ -326,7 +326,7 @@ class SharedBuffer:
 class Channel(EventQueue):
     """One backtest's view of the shared buffer, plus its own trading events.
 
-    Order matters and is the same rule `qate.trading.replay.ReplayQueue` documents: an
+    Order matters: an
     order response has to reach the strategy before the next market event does,
     or the strategy is shown a new book while still believing an order is open.
     """

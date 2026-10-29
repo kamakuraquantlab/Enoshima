@@ -463,16 +463,16 @@ def test_a_range_with_no_data_is_reported_not_silently_empty(run_env, caplog):
 
 def test_each_backtest_gets_its_own_skip_set():
     """One set read by every thread per event made a free-threaded sweep 2.4x slower."""
+    from qate.core.ev_q import EventQueue
     from qate.core.model import ExchangeName
-    from qate.trading.replay import ReplayQueue
     from qate.trading.strategy import Strategy
 
     from enoshima.backtest import BacktestRuntime
     from enoshima.records import UNRECORDED_MEASUREMENTS
 
     a, b = Strategy(), Strategy()
-    BacktestRuntime(a, [ExchangeName.GMO], ReplayQueue([]))
-    BacktestRuntime(b, [ExchangeName.GMO], ReplayQueue([]))
+    BacktestRuntime(a, [ExchangeName.GMO], EventQueue())
+    BacktestRuntime(b, [ExchangeName.GMO], EventQueue())
     assert a.skip_measurements == b.skip_measurements == UNRECORDED_MEASUREMENTS
     assert a.skip_measurements is not b.skip_measurements
     assert a.skip_measurements is not UNRECORDED_MEASUREMENTS
