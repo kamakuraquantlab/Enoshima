@@ -8,8 +8,8 @@ A run is served as the files its folder once held -- `meta.json`,
 from its trades -- and its records as `orders.csv`, `pnl.csv`, `bars.csv` and
 `metrics.csv`. The one change it makes is deleting a run's files when asked.
 `/api/results` with a `start` and an `end` gives each run's `result` over
-those JST days instead: `weekly.summarize` of its trades closed in them, as
-`select` would have it from the same trades.
+those JST days instead: `weekly.summarize` of its trades closed in them, the
+function a weekly run's row is built with.
 The one other read is `/api/prices`, a market's recorded trades through hase,
 beside a run's equity.
 
