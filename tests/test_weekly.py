@@ -494,6 +494,15 @@ def test_a_week_stops_as_soon_as_its_last_position_is_closed(make_env, monkeypat
     assert ts > W02.dt_range.end_ts
 
 
+def test_a_week_that_stops_early_leaves_no_loader_holding_its_data(make_env):
+    """Every week stops before its data runs out; its chunk loader must not wait on, holding two chunks."""
+    import threading
+
+    env = make_env("env")
+    run(env, weeks_range(W02, W04))
+    assert [t for t in threading.enumerate() if t.name == "chunk-loader"] == []
+
+
 def test_no_open_fills_in_the_overlap():
     """An add-on filled there would move a week's position's `open_ts` into the next week.
 

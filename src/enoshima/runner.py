@@ -293,23 +293,31 @@ class Runner:
         self._warn_about_gaps(data_source, markets)
 
         n_batches = (len(combos) + self.max_concurrency - 1) // self.max_concurrency
-        for i in range(0, len(combos), self.max_concurrency):
-            batch_num = i // self.max_concurrency + 1
+        try:
+            for i in range(0, len(combos), self.max_concurrency):
+                batch_num = i // self.max_concurrency + 1
+                data_source.reset()
+
+                backtests = []
+                for params in combos[i : i + self.max_concurrency]:
+                    backtest = self._create_backtest(data_source, params, dt_range, week)
+                    if backtest:
+                        backtests.append(backtest)
+
+                if not backtests:
+                    LOG.info(f"Batch {batch_num}/{n_batches}: nothing to do, every result exists")
+                    continue
+
+                LOG.info(f"Batch {batch_num}/{n_batches}: running {len(backtests)} backtest(s)")
+                self._run_batch(backtests, data_source)
+                LOG.info(f"Batch {batch_num}/{n_batches}: done")
+        finally:
+            # The chunk-loader thread outlives a batch whose backtests all
+            # stopped early -- a week's do, once its positions are closed: it
+            # waits for a request that is not coming, holding the chunk it
+            # loaded ahead and the one before. One left per week held about
+            # 4 GB a week of a BTC sweep until the kernel killed it.
             data_source.reset()
-
-            backtests = []
-            for params in combos[i : i + self.max_concurrency]:
-                backtest = self._create_backtest(data_source, params, dt_range, week)
-                if backtest:
-                    backtests.append(backtest)
-
-            if not backtests:
-                LOG.info(f"Batch {batch_num}/{n_batches}: nothing to do, every result exists")
-                continue
-
-            LOG.info(f"Batch {batch_num}/{n_batches}: running {len(backtests)} backtest(s)")
-            self._run_batch(backtests, data_source)
-            LOG.info(f"Batch {batch_num}/{n_batches}: done")
 
     def _warn_about_gaps(self, data_source: DataSource, markets) -> None:
         missing = data_source.check_coverage(markets)
