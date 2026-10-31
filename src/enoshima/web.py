@@ -8,8 +8,8 @@ A run is served as the files its folder once held -- `meta.json`,
 from its trades -- and its records as `orders.csv`, `pnl.csv`, `bars.csv` and
 `metrics.csv`. The one change it makes is deleting a run's files when asked.
 `/api/results` with a `start` and an `end` gives each run's `result` over
-those JST days instead: `weekly.summarize` of its trades closed in them, the
-function a weekly run's row is built with.
+those JST days instead: `weekly.summarize` of its trades closed in them and
+its fills' slippage there, the function a weekly run's row is built with.
 The one other read is `/api/prices`, a market's recorded trades through hase,
 beside a run's equity.
 
@@ -55,7 +55,7 @@ from enoshima.best import BEST_RESULT_DIR, SELECTION_FILE
 from enoshima.lake import Store
 from enoshima.ledger import GROUPINGS, SUFFIXES
 from enoshima.post_analysis import walk_forward
-from enoshima.weekly import summarize
+from enoshima.weekly import RATES, summarize
 
 LOG = getLogger(__name__)
 
@@ -255,25 +255,51 @@ class Window:
             self.last is None or end >= self.last.isoformat())
 
 
-# The figures that are per order: a trade row does not say which orders made it.
+# The figures that are averages over orders, not trades.
 PER_ORDER = ("slippage", "slippage_rate")
 
 
 @lru_cache(maxsize=1024)
-def _close_ordered(env, run_id, written):
-    """A run's trades in close order, and their close times. `written` is its row's mtime, so a re-run is re-read."""
-    trades = _store(env).trades(run_id)
-    return [t.close_ts for t in trades], trades
+def _window_inputs(env, run_id, written):
+    """A run's trades in close order with their close times, and its fills in time order as
+    (times, slippages, notionals), or None if it recorded none. `written` is its row's mtime,
+    so a re-run is re-read.
+    """
+    store = _store(env)
+    trades = store.trades(run_id)
+    orders = store.records(lake.ORDER, run_id)
+    fills = None
+    if orders is not None:
+        ts, slippage, price, size = (orders.column(c).to_numpy(zero_copy_only=False).astype(float)
+                                     for c in ("ts", "SLIPPAGE", "EXEC_PRICE", "EXEC_SIZE"))
+        order = np.argsort(ts, kind="stable")
+        fills = ts[order], slippage[order], (price * size)[order]
+    return [t.close_ts for t in trades], trades, fills
+
+
+def _order_stats(fills, start, end):
+    """`Evaluation.order_stats` of the fills in [start, end): its counters, from the recorded fills."""
+    ts, slippage, notional = fills
+    keep = slice(np.searchsorted(ts, start), np.searchsorted(ts, end))
+    slippage, notional = slippage[keep], notional[keep]
+    stats = {}
+    for s, rate in RATES.items():
+        extra = slippage + notional * rate
+        stats.update({f"order_cnt{s}": len(extra), f"order_slippage{s}": float(extra.sum()),
+                      f"order_slippage_rate{s}": float((extra / notional).sum())})
+    return stats
 
 
 def _window_summary(store, run_id, window):
-    """The run's summary over `window`: `summarize` of the trades that closed in it, as the run page narrows."""
-    closes, trades = _close_ordered(store.env, run_id, store.path(lake.RUN, run_id).stat().st_mtime_ns)
+    """The run's summary over `window`: `summarize` of the trades that closed in it, as the run page
+    narrows, with the slippage of the fills in it."""
+    closes, trades, fills = _window_inputs(store.env, run_id, store.path(lake.RUN, run_id).stat().st_mtime_ns)
     start, end = window.bounds()
-    summary = summarize(trades[bisect.bisect_left(closes, start):bisect.bisect_left(closes, end)], {})
-    for name in PER_ORDER:
-        for s in SUFFIXES:
-            summary[f"{name}{s}"] = None
+    trades = trades[bisect.bisect_left(closes, start):bisect.bisect_left(closes, end)]
+    summary = summarize(trades, {} if fills is None else _order_stats(fills, start, end))
+    if fills is None and trades:
+        # A run imported from before the lake recorded no fills: its slippage is unknown, not zero.
+        summary.update({f"{name}{s}": None for name in PER_ORDER for s in SUFFIXES})
     return summary
 
 

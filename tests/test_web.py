@@ -94,14 +94,21 @@ def test_results_over_a_date_range_are_summarized_from_the_trades_closed_in_it(t
 
     trades = [trade(at("2026-01-05", 8), 1.0), trade(at("2026-01-06", 23), -2.0), trade(at("2026-01-07", 0), 4.0)]
     meta = {"start_ts": 1, "start_str": "2026-01-05 00:00:00", "end_str": "2026-01-07 23:59:59"}
-    make_run(tmp_path, "ENV", "aaa", meta, {"pnl5": 3.0, "slippage5": 0.1}, trades)
+    # Two fills on the 6th, each 100 notional: 1.0 and 3.0 of slippage; one on the 5th.
+    orders = lake.table_of({"ts": [at("2026-01-05", 7), at("2026-01-06", 22), at("2026-01-06", 23)],
+                            "SLIPPAGE": [9.0, 1.0, 3.0], "EXEC_PRICE": [100.0] * 3, "EXEC_SIZE": [1.0] * 3})
+    make_run(tmp_path, "ENV", "aaa", meta, {"pnl5": 3.0, "slippage5": 0.1}, trades, {lake.ORDER: orders})
     client = web.app.test_client()
 
     whole = client.get("/api/results").json[0]
     assert whole["result"] == {"pnl5": 3.0, "slippage5": 0.1} and "range_covered" not in whole
     one_day = client.get("/api/results?start=2026-01-06&end=2026-01-06").json[0]["result"]
-    assert one_day == {**web.summarize(trades[1:2], {}), **{f"{n}{s}": None for n in web.PER_ORDER for s in "0 5 10".split()}}
-    assert one_day["pnl5"] == -2.0 and one_day["slippage5"] is None, "a trade row does not say which orders made it"
+    assert one_day["pnl5"] == -2.0 and one_day == pytest.approx({**web.summarize(trades[1:2], {}), **{
+        f"slippage{s}": 2.0 + 100 * rate for s, rate in web.RATES.items()}, **{
+        f"slippage_rate{s}": 0.02 + rate for s, rate in web.RATES.items()}}), "the fills on the day, as Evaluation averages them"
+    # A run imported from before the lake recorded no fills: its slippage is unknown, not zero.
+    make_run(tmp_path, "OLD", "bbb", meta, {}, trades)
+    assert client.get("/api/results?env=OLD&start=2026-01-06").json[0]["result"]["slippage5"] is None
     rows = client.get("/api/results?start=2026-01-06").json
     assert rows[0]["result"]["pnl_cnt5"] == 2 and rows[0]["range_covered"]
     assert not client.get("/api/results?start=2026-01-01&end=2026-01-06").json[0]["range_covered"]

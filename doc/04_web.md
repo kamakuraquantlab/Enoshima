@@ -46,10 +46,11 @@ The dates beside the filter summarize every run over those JST days instead:
 each `result.*` is `summarize` of the run's trades that closed in them, the
 way the run page narrows to a range, and `range covered` says whether the
 run's own range holds every day of it -- a run that does not is summarized
-over fewer days than its neighbours. The per-order slippage averages are
-blank there, as a trade row does not say which orders made it. The first range
-of an env reads every run's trades, about a tenth of a second a run; later
-ones are kept in memory.
+over fewer days than its neighbours. The slippage averages are over the
+fills recorded in those days (`BacktestOrder`), as `Evaluation` averages a
+run's; a run imported from before the lake recorded none, and has them blank.
+The first range of an env reads every run's trades and fills, about a fifth of
+a second a run; later ones are kept in memory.
 
 **charts** on a row opens the run: equity at each slippage with its drawdown
 and the traded market's price, the distribution of trade PnL, holding time
