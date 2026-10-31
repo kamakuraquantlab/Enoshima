@@ -85,6 +85,31 @@ def test_run_detail_and_files(tmp_path):
     assert client.get("/api/runs/NOWHERE/aaa").status_code == 404
 
 
+def test_results_over_a_date_range_are_summarized_from_the_trades_closed_in_it(tmp_path):
+    def at(day, hour):  # epoch seconds of a JST time
+        return datetime.fromisoformat(f"{day}T{hour:02d}:00:00+09:00").timestamp()
+
+    def trade(close, change):
+        return Trade(close, close - 60, "GMO", "BTC_JPY", "long", 1.0, 1.0, change, 0.0, change, change, change)
+
+    trades = [trade(at("2026-01-05", 8), 1.0), trade(at("2026-01-06", 23), -2.0), trade(at("2026-01-07", 0), 4.0)]
+    meta = {"start_ts": 1, "start_str": "2026-01-05 00:00:00", "end_str": "2026-01-07 23:59:59"}
+    make_run(tmp_path, "ENV", "aaa", meta, {"pnl5": 3.0, "slippage5": 0.1}, trades)
+    client = web.app.test_client()
+
+    whole = client.get("/api/results").json[0]
+    assert whole["result"] == {"pnl5": 3.0, "slippage5": 0.1} and "range_covered" not in whole
+    one_day = client.get("/api/results?start=2026-01-06&end=2026-01-06").json[0]["result"]
+    assert one_day == {**web.summarize(trades[1:2], {}), **{f"{n}{s}": None for n in web.PER_ORDER for s in "0 5 10".split()}}
+    assert one_day["pnl5"] == -2.0 and one_day["slippage5"] is None, "a trade row does not say which orders made it"
+    rows = client.get("/api/results?start=2026-01-06").json
+    assert rows[0]["result"]["pnl_cnt5"] == 2 and rows[0]["range_covered"]
+    assert not client.get("/api/results?start=2026-01-01&end=2026-01-06").json[0]["range_covered"]
+    assert client.get("/api/results?start=2026-02-01").json[0]["result"]["pnl_cnt5"] == 0
+    assert client.get("/api/results?start=2026-01-07&end=2026-01-06").status_code == 400
+    assert client.get("/api/results?start=yesterday").status_code == 400
+
+
 def test_a_run_links_to_its_strategy_s_dashboard(monkeypatch, tmp_path):
     monkeypatch.setattr(web, "GRAFANA_DASHBOARDS", web._dashboards({"dashboards": [{
         "match": {"trading.module_name": "example.strategy"},

@@ -42,6 +42,15 @@ browser. `recommended in` lists the `select` batches whose `best_result/`
 chose the run. Enable Delete to tick runs and delete their files in the lake,
 after confirming.
 
+The dates beside the filter summarize every run over those JST days instead:
+each `result.*` is `summarize` of the run's trades that closed in them, the
+way the run page narrows to a range, and `range covered` says whether the
+run's own range holds every day of it -- a run that does not is summarized
+over fewer days than its neighbours. The per-order slippage averages are
+blank there, as a trade row does not say which orders made it. The first range
+of an env reads every run's trades, about a tenth of a second a run; later
+ones are kept in memory.
+
 **charts** on a row opens the run: equity at each slippage with its drawdown
 and the traded market's price, the distribution of trade PnL, holding time
 against PnL, every grouping (`by_<grouping>.json`) as bars and a table, and a weekday ×
@@ -105,6 +114,7 @@ The page is `web/` (React), served from `web/dist`. Behind it:
 |---|---|
 | `GET /api/envs` | env names with a finished run in the lake |
 | `GET /api/results[?env=NAME]` | every finished run: its meta, its summary as `result`, `source` (the env), `recommended_in`, `walk_forward`, `grafana_url` |
+| `GET /api/results?env=NAME&start=YYYY-MM-DD&end=YYYY-MM-DD` | the same, each `result` over the trades closed in those JST days (either may be left out), and `range_covered` |
 | `GET /api/runs/<env>/<run_id>?source=S` | a run's meta, summary, file list and `grafana_url` |
 | `GET /api/runs/<env>/<run_id>/files/<name>?source=S` | `meta.json`, `summary.json`, `trades.csv`, a `by_*.json`, or the records as `orders.csv`, `pnl.csv`, `bars.csv`, `metrics.csv`; nothing else |
 | `GET /api/runs/<env>/<run_id>/walk-forward?source=S` | the run against every rule of its group's newest training |

@@ -56,6 +56,10 @@ export default function App() {
   const [deleting, setDeleting] = useState(false)
   const [selectedIdxs, setSelectedIdxs] = useState(new Set())
   const [visibleRows, setVisibleRows] = useState([])
+  // The table's date range, JST days 'YYYY-MM-DD' or '' for open; the runs summarized over it, or null.
+  const [range, setRange] = useState({ start: '', end: '' })
+  const [rangeResults, setRangeResults] = useState(null)
+  const [rangeLoading, setRangeLoading] = useState(false)
   useEffect(() => {
     const controller = new AbortController()
     setLoading(true); setError(''); setSelectedIdxs(new Set())
@@ -88,7 +92,22 @@ export default function App() {
   }, [])
   const envs = [...new Set([...allResults, ...allTrainings].map(row => row.env_name))].sort()
   const selectedEnv = env || envs[0] || ''
-  const results = allResults.filter(row => row.env_name === selectedEnv)
+  const ranged = Boolean(range.start || range.end)
+  useEffect(() => {
+    setRangeResults(null); setSelectedIdxs(new Set())
+    if (!ranged || !selectedEnv) return
+    const controller = new AbortController()
+    setRangeLoading(true); setError('')
+    fetchResults(controller.signal, { env: selectedEnv, ...range }).then(setRangeResults).catch(e => {
+      if (e.name !== 'AbortError') setError(e.message)
+    }).finally(() => { if (!controller.signal.aborted) setRangeLoading(false) })
+    return () => controller.abort()
+  }, [ranged, range.start, range.end, selectedEnv, refresh])
+  const envResults = allResults.filter(row => row.env_name === selectedEnv)
+  const results = ranged ? rangeResults ?? [] : envResults
+  // The inputs' bounds: the env's runs' first and last days.
+  const firstDay = envResults.reduce((m, r) => (r.start_str && (!m || r.start_str < m) ? r.start_str : m), '').slice(0, 10)
+  const lastDay = envResults.reduce((m, r) => (r.end_str && r.end_str > m ? r.end_str : m), '').slice(0, 10)
   const trainings = allTrainings.filter(row => row.env_name === selectedEnv)
   const listHash = (p, name) => `#/${p}/${encodeURIComponent(name)}`
   const toDelete = visibleRows.filter(r => selectedIdxs.has(r._rowIdx)).map(r => results[r._rowIdx]).filter(Boolean)
@@ -127,6 +146,15 @@ export default function App() {
         <button key={p} className={`page-nav-btn${page === p ? ' page-nav-active' : ''}`} onClick={() => { window.location.hash = listHash(p, selectedEnv) }}>{text}</button>)}</nav>
       <div className="app-controls"><input aria-label="Filter results by keyword" type="search" className="search-input" placeholder="Filter by keyword…" value={search} onChange={e => setSearch(e.target.value)} />
         {search && <button className="sort-clear" onClick={() => setSearch('')}>Clear filter</button>}
+        {page === 'results' && <div className="range-bar" role="group" aria-label="Summarize results over a date range" title="Each run's result over the trades closed in these JST days">
+          <span className="range-label">Closed (JST)</span>
+          <input type="date" aria-label="From" value={range.start} min={firstDay || undefined} max={range.end || lastDay || undefined}
+            onChange={e => setRange(r => ({ ...r, start: e.target.value }))} />
+          <span className="range-sep">→</span>
+          <input type="date" aria-label="To" value={range.end} min={range.start || firstDay || undefined} max={lastDay || undefined}
+            onChange={e => setRange(r => ({ ...r, end: e.target.value }))} />
+          {ranged && <button className="sort-clear" onClick={() => setRange({ start: '', end: '' })}>Whole runs</button>}
+        </div>}
         <button className="btn-disable-delete" disabled={loading || deleting} onClick={() => setRefresh(v => v+1)}>Refresh</button>
         {page === 'results' && <button className="btn-enable-delete" disabled={deleting} onClick={() => { setDeleteMode(v => !v); setSelectedIdxs(new Set()) }}>{deleteMode ? 'Disable Delete' : 'Enable Delete'}</button>}
         {page === 'results' && deleteMode && <button className="btn-bulk-delete" disabled={loading || deleting || !toDelete.length} onClick={removeSelected}>{deleting ? 'Deleting…' : `Delete (${toDelete.length})`}</button>}
@@ -134,7 +162,7 @@ export default function App() {
     </header>
     <nav className="env-tabs" aria-label="Environments">{envs.map(name => <button key={name} className={`env-tab${selectedEnv === name ? ' env-tab-active' : ''}`} disabled={deleting} onClick={() => { window.location.hash = listHash(page, name) }}>{name}</button>)}</nav>
     <main className="app-main">{error && <div role="alert" className="alert-error">{error}</div>}
-      {loading ? <div className="loading">Loading…</div> : page === 'training' ? <TrainingsTable trainings={trainings} href={trainingHash} /> : <ResultsTable key={selectedEnv} results={results} search={search} onSearch={setSearch} deleteMode={deleteMode} selectedIdxs={selectedIdxs} onToggleRow={toggleRow} onToggleAll={toggleAll} onVisibleRowsChange={setVisibleRows} runHref={runHash} walkForwardHref={walkForwardHash} />}
+      {loading || (page === 'results' && rangeLoading) ? <div className="loading">{loading ? 'Loading…' : 'Summarizing the range…'}</div> : page === 'training' ? <TrainingsTable trainings={trainings} href={trainingHash} /> : <ResultsTable key={selectedEnv} results={results} search={search} onSearch={setSearch} deleteMode={deleteMode} selectedIdxs={selectedIdxs} onToggleRow={toggleRow} onToggleAll={toggleAll} onVisibleRowsChange={setVisibleRows} runHref={runHash} walkForwardHref={walkForwardHash} />}
     </main>
   </div>
 }

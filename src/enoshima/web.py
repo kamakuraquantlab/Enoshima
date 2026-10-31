@@ -7,6 +7,9 @@ A run is served as the files its folder once held -- `meta.json`,
 `summary.json`, `trades.csv` and `by_<grouping>.json`, the groupings computed
 from its trades -- and its records as `orders.csv`, `pnl.csv`, `bars.csv` and
 `metrics.csv`. The one change it makes is deleting a run's files when asked.
+`/api/results` with a `start` and an `end` gives each run's `result` over
+those JST days instead: `weekly.summarize` of its trades closed in them, as
+`select` would have it from the same trades.
 The one other read is `/api/prices`, a market's recorded trades through hase,
 beside a run's equity.
 
@@ -26,13 +29,14 @@ The page is `web/` in a checkout, built to `web/dist` with
 `npm run build --prefix web`; this module serves it from there.
 """
 
+import bisect
 import csv
 import io
 import json
 import math
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from logging import getLogger
 from pathlib import Path
@@ -49,8 +53,9 @@ from qate_env.env_name import EnvName
 from enoshima import lake
 from enoshima.best import BEST_RESULT_DIR, SELECTION_FILE
 from enoshima.lake import Store
-from enoshima.ledger import GROUPINGS
+from enoshima.ledger import GROUPINGS, SUFFIXES
 from enoshima.post_analysis import walk_forward
+from enoshima.weekly import summarize
 
 LOG = getLogger(__name__)
 
@@ -219,7 +224,60 @@ def _walk_forward_columns(train_id, against):
     return {"train_id": train_id, "best_pnl5": best and best.get("pnl5"), "best_rule": best and best.get("label")}
 
 
-def _iter_run_logs(env_filter=None):
+@dataclass(frozen=True)
+class Window:
+    """JST days `first` to `last`, both included: a range the table's results are summarized over."""
+
+    first: date | None
+    last: date | None
+
+    @classmethod
+    def from_args(cls, args):
+        """From `start` and `end` (`YYYY-MM-DD`, either may be left out), or None for the whole run."""
+        first, last = (date.fromisoformat(args[k]) if args.get(k) else None for k in ("start", "end"))
+        if first is None and last is None:
+            return None
+        if first and last and last < first:
+            raise ValueError("end before start")
+        return cls(first, last)
+
+    def bounds(self):
+        """[start_ts, end_ts) in epoch seconds."""
+        def midnight(day):
+            return datetime.combine(day, datetime.min.time(), JST).timestamp()
+        return (midnight(self.first) if self.first else float("-inf"),
+                midnight(self.last + timedelta(days=1)) if self.last else float("inf"))
+
+    def covered_by(self, meta):
+        """Whether the run's own range holds every day of the window."""
+        start, end = str(meta.get("start_str") or "")[:10], str(meta.get("end_str") or "")[:10]
+        return bool(start and end) and (self.first is None or start <= self.first.isoformat()) and (
+            self.last is None or end >= self.last.isoformat())
+
+
+# The figures that are per order: a trade row does not say which orders made it.
+PER_ORDER = ("slippage", "slippage_rate")
+
+
+@lru_cache(maxsize=1024)
+def _close_ordered(env, run_id, written):
+    """A run's trades in close order, and their close times. `written` is its row's mtime, so a re-run is re-read."""
+    trades = _store(env).trades(run_id)
+    return [t.close_ts for t in trades], trades
+
+
+def _window_summary(store, run_id, window):
+    """The run's summary over `window`: `summarize` of the trades that closed in it, as the run page narrows."""
+    closes, trades = _close_ordered(store.env, run_id, store.path(lake.RUN, run_id).stat().st_mtime_ns)
+    start, end = window.bounds()
+    summary = summarize(trades[bisect.bisect_left(closes, start):bisect.bisect_left(closes, end)], {})
+    for name in PER_ORDER:
+        for s in SUFFIXES:
+            summary[f"{name}{s}"] = None
+    return summary
+
+
+def _iter_run_logs(env_filter=None, window=None):
     for env in _envs():
         if env_filter and env != env_filter:
             continue
@@ -232,7 +290,11 @@ def _iter_run_logs(env_filter=None):
                 data, summary = run["meta"], run["summary"]
                 if not isinstance(data, dict) or not isinstance(summary, dict):
                     continue
-                data["result"] = summary
+                if window is not None:
+                    data["result"] = _window_summary(store, run_id, window)
+                    data["range_covered"] = window.covered_by(data)
+                else:
+                    data["result"] = summary
                 data["run_id"] = run_id
                 data["env_name"] = env
                 data["source"] = env  # the page names a run by source and id; the env is its last segment
@@ -367,12 +429,17 @@ def api_envs():
 
 @app.get("/api/results")
 def api_results():
+    """Every finished run, newest first; with `start` and/or `end`, each `result` is over those JST days."""
     def timestamp(row):
         value = row.get("start_ts")
         return value if isinstance(value, (int, float)) else 0
 
+    try:
+        window = Window.from_args(request.args)
+    except ValueError:
+        return jsonify(error="Give start and end as YYYY-MM-DD, end not before start"), 400
     return jsonify(
-        sorted(_iter_run_logs(request.args.get("env")), key=timestamp, reverse=True)
+        sorted(_iter_run_logs(request.args.get("env"), window), key=timestamp, reverse=True)
     )
 
 

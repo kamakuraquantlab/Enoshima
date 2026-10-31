@@ -5,9 +5,11 @@ async function fail(response, fallback) {
   throw new Error(body.error || fallback)
 }
 
-export async function fetchResults(signal) {
-  const response = await fetch(`${BASE}api/results`, { signal })
-  if (!response.ok) throw new Error('Could not load results. Check the API and the data lake.')
+// With a range ({env, start, end}, JST dates), each run's result is over the trades closed in it.
+export async function fetchResults(signal, range) {
+  const query = range ? `?${new URLSearchParams(Object.entries(range).filter(([, v]) => v))}` : ''
+  const response = await fetch(`${BASE}api/results${query}`, { signal })
+  if (!response.ok) await fail(response, 'Could not load results. Check the API and the data lake.')
   return response.json()
 }
 

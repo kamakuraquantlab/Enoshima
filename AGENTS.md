@@ -330,7 +330,9 @@ but it is easy to break from here:
   a new dataset is served once it is added there and not before. Whatever the
   page shows is computed in the browser from those or read from them; a figure
   the page needs that the lake does not hold belongs in the command that writes
-  it, not in a second computation here. It deletes a run's files when asked and
+  it, not in a second computation here. A date range on the table is the one
+  figure it computes, and with `weekly.summarize` over the run's trades, as
+  any window is. It deletes a run's files when asked and
   changes nothing else. Flask is the `web` extra so that the engine
   installs no web server: `cli.cmd_web` imports `enoshima.web` only when run.
 - **A strategy is imported by module name, and is the user's to make importable**
