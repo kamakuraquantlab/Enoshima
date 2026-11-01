@@ -413,6 +413,11 @@ export default function RunView({ target, onBack }) {
     setRange(lo <= first && hi >= last ? null : [lo, hi])
   }, [first, last])
   const onZoom = useCallback((startMs, endMs) => select(startMs / 1000, endMs / 1000), [select])
+  // Opened from the table with its date range: start narrowed to those JST days, as the table summarized them.
+  useEffect(() => {
+    if (!all.length || !(target.from || target.to)) return
+    select(target.from ? jstMidnight(target.from) : first, target.to ? jstMidnight(target.to) + 86399 : last)
+  }, [all, target.from, target.to])
   // A trade is in the range if it closed in it, as the equity curve plots it.
   const sorted = useMemo(() => (range ? all.filter(t => t.close_ts >= range[0] && t.close_ts <= range[1]) : all), [all, range])
   const zoom = useMemo(() => range && [range[0] * 1000, range[1] * 1000], [range])

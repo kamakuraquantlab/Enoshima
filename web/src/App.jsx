@@ -13,17 +13,25 @@ function hashEnv() {
   } catch { return '' }
 }
 
-// #/run/<source>/<run_id>: source is the env name (once the env's folder,
-// e.g. backtest/NAME, whose last component is the env name: such a link still works).
+// #/run/<source>/<run_id>[?from=YYYY-MM-DD&to=YYYY-MM-DD]: source is the env name (once the env's
+// folder, e.g. backtest/NAME, whose last component is the env name: such a link still works). `from`
+// and `to` are the table's date range, JST days, which the run page opens narrowed to.
+const DAY = /^\d{4}-\d{2}-\d{2}$/
 function hashRun() {
   try {
-    const m = window.location.hash.match(/^#\/run\/([^/]+)\/([^/]+)$/)
+    const m = window.location.hash.match(/^#\/run\/([^/?]+)\/([^/?]+)(?:\?(.*))?$/)
     if (!m) return null
     const source = decodeURIComponent(m[1])
-    return { source, env: source.split('/').pop(), runId: decodeURIComponent(m[2]) }
+    const query = new URLSearchParams(m[3] || '')
+    const day = key => (DAY.test(query.get(key) || '') ? query.get(key) : '')
+    return { source, env: source.split('/').pop(), runId: decodeURIComponent(m[2]), from: day('from'), to: day('to') }
   } catch { return null }
 }
-const runHash = row => `#/run/${encodeURIComponent(row.source)}/${encodeURIComponent(row.run_id ?? row.runId)}`
+function runHash(row, range) {
+  const base = `#/run/${encodeURIComponent(row.source)}/${encodeURIComponent(row.run_id ?? row.runId)}`
+  const query = new URLSearchParams(Object.entries({ from: range?.start, to: range?.end }).filter(([, v]) => v))
+  return query.size ? `${base}?${query}` : base
+}
 export default function App() {
   const [allResults, setAllResults] = useState([])
   const [env, setEnv] = useState(hashEnv)
@@ -140,7 +148,7 @@ export default function App() {
     <nav className="env-tabs" aria-label="Environments">{envs.map(name => <button key={name} className={`env-tab${selectedEnv === name ? ' env-tab-active' : ''}`} disabled={deleting} onClick={() => { window.location.hash = listHash(name) }}>{name}</button>)}</nav>
     <main className="app-main">{error && <div role="alert" className="alert-error">{error}</div>}
       {loading || rangeLoading ? <div className="loading">{loading ? 'Loading…' : 'Summarizing the range…'}</div> : <ResultsTable key={selectedEnv} results={results} search={search} onSearch={setSearch}
-        sortKeys={sortKeys} onSortKeys={setSortKeys} hidden={hidden} onHidden={setHidden} onColumnsChange={setColumns} deleteMode={deleteMode} selectedIdxs={selectedIdxs} onToggleRow={toggleRow} onToggleAll={toggleAll} onVisibleRowsChange={setVisibleRows} runHref={runHash} />}
+        sortKeys={sortKeys} onSortKeys={setSortKeys} hidden={hidden} onHidden={setHidden} onColumnsChange={setColumns} deleteMode={deleteMode} selectedIdxs={selectedIdxs} onToggleRow={toggleRow} onToggleAll={toggleAll} onVisibleRowsChange={setVisibleRows} runHref={row => runHash(row, range)} />}
     </main>
   </div>
 }
