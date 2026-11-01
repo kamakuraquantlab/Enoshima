@@ -31,12 +31,11 @@ from qate.util.dt_range import DtRange
 from qate_env.env import Env
 from qate_env.env_name import EnvName
 
-from enoshima import best, lake
+from enoshima import lake
 from enoshima.lake import Store
 from enoshima.ledger import GROUPINGS
 from enoshima.records import TAGS_KEY
 from enoshima.runner import WARMUP_HOURS, Runner
-from enoshima.selection import SelectionSettings
 from enoshima.weekly import WeeklySettings
 
 EXAMPLE_ROOT = Path(__file__).resolve().parent.parent / "example"
@@ -280,48 +279,25 @@ def weekly_sweep(env, dt_range, **kwargs) -> Runner:
     return runner
 
 
-def test_a_run_does_not_choose_and_select_chooses_from_weekly_runs_only(run_env):
+def test_a_run_writes_its_results_and_chooses_nothing(run_env):
     env, dt_range = run_env
     root = store_of(env)
 
-    # A sweep without --weekly is a quick look: its results, and no recommendation.
+    # A sweep without --weekly is a quick look: temporary runs, nothing else.
     Runner(env, dt_range, optimize="grid", fee_rates=FEES, chunk_days=1).run()
-    assert not (root.analysis_dir / "best_result").exists(), "a run writes results; it does not choose"
     assert all(load(p)["is_temporary_run"] for p in run_dirs(env))
-    assert best.recommend(root, 1, SelectionSettings()) == []
+    # Only the Backtest datasets: no recommendation, no analysis folder.
+    assert sorted(p.name for p in (root.root / lake.LAYER).iterdir()) == sorted(
+        f"dataset={d}" for d in lake.DATASETS if (root.root / lake.LAYER / f"dataset={d}").is_dir())
 
     runner = weekly_sweep(env, dt_range)
     combos = runner.param_sets()
     assert len(combos) == 6  # 3 fast periods x 2 slow periods
-    weekly_folders = [p for p in run_dirs(env) if not load(p)["is_temporary_run"]]
-    assert len(weekly_folders) == len(combos)
-
-    groups = best.recommend(root, runner.batch_id, SelectionSettings())
-    # Both parameters are numbers, so the sweep is one group: one recommendation.
-    [group] = groups
-    assert group["group"] == {} and group["runs"] == len(combos)
+    weekly_runs = [p for p in run_dirs(env) if not load(p)["is_temporary_run"]]
+    assert len(weekly_runs) == len(combos)
     # The week of 2026-01-02, clipped to the one day on disk.
-    assert (group["start_str"], group["end_str"]) == ("2026-01-02 00:00:00", "2026-01-02 23:59:59")
-    assert group["method"] == "whole range"   # a day holds no complete month
-
-    # best_result/<batch_id>/ holds the selection, and each recommended run's meta.
-    best_dir = root.analysis_dir / "best_result" / str(runner.batch_id)
-    selection_file = json.loads((best_dir / "selection.json").read_text())
-    assert selection_file["groups"][0]["ranking"][0]["params"] == group["ranking"][0]["params"]
-    copies = sorted(p.name for p in best_dir.iterdir() if p.name != "selection.json")
-    if group["recommended"] is None:
-        assert copies == [] and group["recommended_run_id"] is None
-    else:
-        run_id = group["recommended_run_id"]
-        assert copies == [f"{run_id}.json"]
-        assert load(RunRef(root, run_id))["params"] == group["recommended"]
-        assert json.loads((best_dir / copies[0]).read_text()) == root.read_run(run_id)["meta"]
-
-    # With every safeguard off, selection is the plain pnl5 ranking it replaced.
-    plain = SelectionSettings(score="pnl5", positive_pnl10=False, neighbors=False, train_months=0)
-    [plain_group] = best.recommend(root, runner.batch_id + 1, plain)
-    chosen = load(RunRef(root, plain_group["recommended_run_id"]))
-    assert chosen["result"]["pnl5"] == max(load(p)["result"]["pnl5"] for p in weekly_folders)
+    assert {(load(p)["start_str"], load(p)["end_str"]) for p in weekly_runs} == {
+        ("2026-01-02 00:00:00", "2026-01-02 23:59:59")}
 
 
 def test_a_sweep_in_several_batches_gets_the_same_results_as_one(run_env, tmp_path):
@@ -373,23 +349,16 @@ def test_a_backtest_that_raises_fails_without_stopping_the_others(run_env, monke
     assert all(p["fast_period"] == 40 for p in runner.failed)
 
 
-def test_a_resumed_sweep_ranks_the_combinations_it_skipped(run_env):
-    """The best of a resumed sweep must include results it did not just compute."""
+def test_a_resumed_sweep_keeps_the_runs_it_skipped(run_env):
+    """A sweep run again finds every combination in the lake, under the same ids, and replays none."""
     env, dt_range = run_env
-    root = store_of(env)
 
-    # A first sweep of everything, then a second that skips all of it.
-    first = weekly_sweep(env, dt_range)
-    [best_first] = best.recommend(root, first.batch_id, SelectionSettings())
+    weekly_sweep(env, dt_range)
+    first = {p.name: load(p)["result"] for p in run_dirs(env)}
+    weekly_sweep(env, dt_range)
+    second = {p.name: load(p)["result"] for p in run_dirs(env)}
 
-    second = weekly_sweep(env, dt_range)
-    groups = best.recommend(root, second.batch_id, SelectionSettings())
-
-    assert groups, "a resumed sweep with nothing to run still has a best"
-    [best_second] = groups
-    assert best_second["runs"] == best_first["runs"] == 6
-    assert best_second["recommended_run_id"] == best_first["recommended_run_id"]
-    assert best_second["ranking"][0]["params"] == best_first["ranking"][0]["params"]
+    assert len(first) == 6 and second == first
 
 
 def test_a_backtest_never_reloads_parameters(run_env, monkeypatch):

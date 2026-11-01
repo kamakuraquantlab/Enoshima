@@ -27,8 +27,7 @@ holds every week computed for that environment, strategy and parameter
 set, and a window is whichever of them it covers.
 
 Any other run is temporary (`is_temporary_run`): a quick look at some days,
-kept and listed by `results`, and never a candidate for `select` or
-`walk-forward`, which compare weekly runs.
+kept and listed by `results` and `enoshima web`, beside the weekly runs.
 """
 
 import hashlib
@@ -158,7 +157,7 @@ class BacktestLog(RunLog):
                 "overlap_days": self.weekly.overlap_days,
                 "partial": (self.dt_range.start_str, self.dt_range.end_str) != (whole.start_str, whole.end_str),
             })
-        # Only a weekly run is a candidate for `select` and `walk-forward`; any other is a quick look.
+        # Only a weekly run is a parameter set's lasting record; any other is a quick look.
         data["is_temporary_run"] = self.week_key is None
         data["id"] = self.get_id()
         if self.end_ts is not None:

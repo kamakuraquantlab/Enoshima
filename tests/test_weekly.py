@@ -248,17 +248,15 @@ def test_a_week_whose_files_went_missing_is_refused_not_read_as_empty(make_env):
         weekly.window(folder.store, folder.name, [W02, W03])
 
 
-def test_a_weekly_sweep_is_selected_from_like_any_run(make_env):
-    from enoshima import best
-    from enoshima.selection import SelectionSettings
-
+def test_a_weekly_sweep_s_rows_cover_its_weeks_like_any_run(make_env):
     env = make_env("env")
     runner = Runner(env, weeks_range(W02, W03), optimize="grid", fee_rates=FEES, chunk_days=2, weekly=WeeklySettings())
     runner.run()
     assert not runner.failed
-    [group] = best.recommend(use(env), runner.batch_id, SelectionSettings())
-    assert group["runs"] == 6
-    assert (group["start_str"], group["end_str"]) == ("2026-01-05 00:00:00", "2026-01-18 23:59:59")
+    store = use(env)
+    rows = [store.read_run(run_id)["meta"] for run_id in store.run_ids()]
+    assert len(rows) == 6 and not any(m["is_temporary_run"] for m in rows)
+    assert {(m["start_str"], m["end_str"]) for m in rows} == {("2026-01-05 00:00:00", "2026-01-18 23:59:59")}
 
 
 def test_the_run_id_has_no_dates_but_has_the_preload_and_overlap(make_env):

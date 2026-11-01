@@ -15,12 +15,10 @@ exchange, evaluates what happened, and writes it back to the data lake.
 | `records` | `RecordReporter`: fills, PnL updates, bars and metrics, kept for the lake |
 | `eval` | Turning fills and PnL into Sharpe, drawdown, win rate |
 | `run_log` | A run's provenance (its meta), and why its id is deterministic |
-| `selection` | How a set is chosen from a group: filters, score, grid neighbours, walk-forward |
-| `best` | Which groups get a recommendation: every range, split by categorical parameter |
-| `post_analysis` | Analyses of finished runs: the selection rule's window, history and interval, tested |
 | `legacy` | Importing the run folders of an env written before results moved to the lake |
 | `cli` | The `enoshima` command |
-| `settings` | `enoshima.json`: fees, run sizing, selection and weekly settings, per environment |
+| `settings` | `enoshima.json`: fees, run sizing and weekly settings, per environment |
+| `web` | `enoshima web`: the runs in the lake as a page, replaying nothing (the `web` extra) |
 
 Market data comes from `hase.bronze`, already as qate's `Trade` and `OrderBook`;
 hase in turn asks `komachi` which file holds a market-day. Enoshima reads no

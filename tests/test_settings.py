@@ -34,6 +34,15 @@ def test_an_influx_entry_from_before_the_lake_is_ignored_with_a_warning(tmp_path
     assert "influx" in caplog.text and "data lake" in caplog.text
 
 
+@pytest.mark.parametrize("key", ["selection", "walk_forward"])
+def test_choosing_settings_from_before_are_ignored_with_a_warning(tmp_path, key, caplog):
+    """Enoshima no longer chooses a parameter set; an env that configured it still runs."""
+    write(tmp_path, {"chunk_days": 1, key: {"history": {"1d": ["4h"]}, "anything": True}})
+    assert load_settings(tmp_path).chunk_days == 1
+    assert not hasattr(load_settings(tmp_path), key)
+    assert key in caplog.text and "no longer chooses" in caplog.text
+
+
 @pytest.mark.parametrize("data", [{"infux": {}}, {"weekly": {"preload": 1}}, {"chunk_day": 1}])
 def test_a_misspelling_is_refused_not_ignored(tmp_path, data):
     """A misspelt key must not quietly leave a run with the defaults."""

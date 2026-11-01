@@ -3,12 +3,12 @@
 `ResultReporter` is the reporter every backtest has. It evaluates each fill and
 each closed position, and keeps the closed positions themselves as
 `ledger.Trade`s. Its `get_result` is the run's summary -- the whole-range
-figures a run's summary holds and `select` filters on -- and `trades` is what
+figures a run's summary holds -- and `trades` is what
 its `BacktestTrade` file and its groupings are written from (`lake`).
 
 The trades are kept, in the lake's `BacktestTrade`, because they are what a
-result is evaluated from: with them any grouping or window -- `selection`'s
-walk-forward months among them -- is recomputed without a replay. Fills, PnL
+result is evaluated from: with them any grouping or window is recomputed
+without a replay. Fills, PnL
 updates, bars and other metrics are kept beside them by
 `records.RecordReporter`, for looking at a run. The evaluations hand their own
 `EVAL` metrics to that reporter directly: they are results, not strategy

@@ -4,30 +4,26 @@ Results used to be written into the environment directory:
 
     run_log/<run_id>/meta.json, summary.json, trades.csv, by_*.json
     run_log/<run_id>/weeks/<YYYY-Www>/meta.json, summary.json, trades.csv
-    best_result/<batch_id>/...
-    post_analysis/...
 
-A run now writes to the lake (`lake`), and every reader -- `select`,
-`walk-forward`, `results`, `enoshima web` -- reads from there, so a folder not
-imported is not seen. Importing replays nothing: each week, or a temporary
+A run now writes to the lake (`lake`), and every reader -- `results`,
+`enoshima web` -- reads from there, so a folder not imported is not seen. Importing replays nothing: each week, or a temporary
 run's root, becomes a part with its meta, summary and trades, and each run
 with a `summary.json` its `BacktestRun` row. The run ids are the folders'
 names, the same hash a run computes today, so a weekly run carries on from the
 imported weeks. The orders, PnL updates and bars of those runs were only ever
 in InfluxDB, and the imported parts have none.
 
-`best_result/` and `post_analysis/` are copied into the env's analysis folder
-in the lake as they are.
+Enoshima chooses nothing, so the `best_result/` and `post_analysis/` folders
+an earlier version wrote beside `run_log/` are not its to import; they are
+left where they are.
 
 A run already in the lake is left alone: what is there was written by a
 replay, and is at least as new. The folders are not removed -- Enoshima never
-deletes results; delete `run_log/`, `best_result/` and `post_analysis/` once
-the import looks right. `apply=False`, the default, only reports.
+deletes results; delete `run_log/` once the import looks right. `apply=False`, the default, only reports.
 """
 
 import csv
 import json
-import shutil
 from logging import getLogger
 from pathlib import Path
 
@@ -38,7 +34,6 @@ LOG = getLogger(__name__)
 
 RUN_LOG_DIR = "run_log"
 WEEKS_DIR = "weeks"
-ANALYSIS_DIRS = ("best_result", "post_analysis")
 
 
 def _json(path: Path) -> dict:
@@ -62,8 +57,8 @@ def _complete(path: Path) -> bool:
 
 
 def import_env(work_dir: Path, store: Store, *, apply: bool = False) -> dict:
-    """Import `work_dir`'s run folders and analyses into `store`. Returns what was (or would be) imported."""
-    report = {"runs": 0, "parts": 0, "skipped": 0, "analysis_files": 0}
+    """Import `work_dir`'s run folders into `store`. Returns what was (or would be) imported."""
+    report = {"runs": 0, "parts": 0, "skipped": 0}
     base = Path(work_dir) / RUN_LOG_DIR
     for folder in sorted(base.iterdir()) if base.is_dir() else []:
         # `.tmp-*` was being written, `.old-*` replaced, `.merged` set aside by a merge.
@@ -89,21 +84,9 @@ def import_env(work_dir: Path, store: Store, *, apply: bool = False) -> dict:
         if _complete(folder):
             trades.sort(key=lambda t: t.close_ts)
             store.write_run(run_id, _json(folder / "meta.json"), _json(folder / "summary.json"), trades)
-    for name in ANALYSIS_DIRS:
-        source = Path(work_dir) / name
-        if not source.is_dir():
-            continue
-        for path in sorted(p for p in source.rglob("*") if p.is_file() and ".tmp-" not in str(p)):
-            target = store.analysis_dir / name / path.relative_to(source)
-            if target.exists():
-                continue
-            report["analysis_files"] += 1
-            if apply:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, target)
     LOG.info(
-        f"import-run-log {store.env}: {report['runs']} run(s), {report['parts']} part(s), "
-        f"{report['analysis_files']} analysis file(s); {report['skipped']} already in the lake"
+        f"import-run-log {store.env}: {report['runs']} run(s), {report['parts']} part(s); "
+        f"{report['skipped']} already in the lake"
         f"{'' if apply else ' (dry run)'}"
     )
     return report

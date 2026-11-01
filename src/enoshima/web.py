@@ -1,9 +1,7 @@
 """The results viewer: `enoshima web`, a Flask API and a React page over what runs wrote to the lake.
 
 It reads, and replays nothing. Every env with a finished run in the data lake
-is listed (`lake`): a run is one with its `BacktestRun` row, a training a
-finished `post_analysis/train/<train_id>/` in the env's analysis folder there.
-A run is served as the files its folder once held -- `meta.json`,
+is listed (`lake`): a run is one with its `BacktestRun` row. A run is served as the files its folder once held -- `meta.json`,
 `summary.json`, `trades.csv` and `by_<grouping>.json`, the groupings computed
 from its trades -- and its records as `orders.csv`, `pnl.csv`, `bars.csv` and
 `metrics.csv`. The one change it makes is deleting a run's files when asked.
@@ -32,7 +30,6 @@ The page is `web/` in a checkout, built to `web/dist` with
 import bisect
 import csv
 import io
-import json
 import math
 import re
 from dataclasses import dataclass
@@ -51,10 +48,8 @@ from qate_env.env import Env
 from qate_env.env_name import EnvName
 
 from enoshima import lake
-from enoshima.best import BEST_RESULT_DIR, SELECTION_FILE
 from enoshima.lake import Store
 from enoshima.ledger import GROUPINGS, SUFFIXES
-from enoshima.post_analysis import walk_forward
 from enoshima.weekly import RATES, summarize
 
 LOG = getLogger(__name__)
@@ -99,59 +94,6 @@ def _json_safe(value):
 JSON_FILES = {"meta.json", "summary.json"} | {f"by_{name}.json" for name in GROUPINGS}
 RECORD_FILES = {"orders.csv": lake.ORDER, "pnl.csv": lake.PNL, "bars.csv": lake.BAR, "metrics.csv": lake.METRIC}
 RUN_FILES = JSON_FILES | {"trades.csv"} | set(RECORD_FILES)
-# What `enoshima walk-forward --train` writes per group, under post_analysis/train/<id>/.
-TRAIN_FILES = set(walk_forward.TRAIN_FILES)
-TRAIN_DIR = Path(walk_forward.OUTPUT_DIR) / walk_forward.TRAIN_DIR
-
-
-def _is_finished_dir(path):
-    # A finished training: summary.json is written last, and a whole folder renamed
-    # into place, so a .tmp-* folder is one still being written.
-    return (
-        path.is_dir()
-        and not path.is_symlink()
-        and "." not in path.name
-        and (path / "meta.json").is_file()
-        and (path / "summary.json").is_file()
-    )
-
-
-def _recommendations(store):
-    """run_id -> the batch ids whose best_result recommended it."""
-    out = {}
-    best = store.analysis_dir / BEST_RESULT_DIR
-    if best.is_dir():
-        for batch in best.iterdir():
-            if batch.is_dir():
-                for copy in batch.glob("*.json"):
-                    if copy.name != SELECTION_FILE:
-                        out.setdefault(copy.stem, []).append(batch.name)
-    return {run_id: sorted(batches) for run_id, batches in out.items()}
-
-
-def _run_trainings(store):
-    """run_id -> (train_id, runs.json) of the newest training whose group held that run.
-
-    A training's runs.json compares each walk-forward rule with each of its
-    group's runs held, so it is that run's page; an older one is superseded.
-    """
-    out, created = {}, {}
-    base = store.analysis_dir / TRAIN_DIR
-    if not base.is_dir():
-        return out
-    for path in base.iterdir():
-        if not _is_finished_dir(path) or not (path / "runs.json").is_file():
-            continue
-        try:
-            when = json.loads((path / "meta.json").read_text()).get("created_ts") or 0
-            against = json.loads((path / "runs.json").read_text())
-        except (ValueError, OSError, AttributeError):
-            app.logger.warning("Cannot read training folder: %s", path)
-            continue
-        for run_id in against.get("runs", {}):
-            if when >= created.get(run_id, float("-inf")):
-                out[run_id], created[run_id] = (path.name, against), when
-    return out
 
 
 def _flatten(value, prefix=""):
@@ -217,11 +159,6 @@ def _grafana_url(meta):
             continue
         return f"{url}?{urlencode(query)}" if query else url
     return None
-
-
-def _walk_forward_columns(train_id, against):
-    best = next((r for r in against.get("rules", []) if r.get("key") == against.get("best")), None)
-    return {"train_id": train_id, "best_pnl5": best and best.get("pnl5"), "best_rule": best and best.get("label")}
 
 
 @dataclass(frozen=True)
@@ -308,8 +245,6 @@ def _iter_run_logs(env_filter=None, window=None):
         if env_filter and env != env_filter:
             continue
         store = _store(env)
-        recommended = _recommendations(store)
-        trainings = _run_trainings(store)
         for run_id in store.run_ids():
             try:
                 run = store.read_run(run_id)
@@ -325,9 +260,6 @@ def _iter_run_logs(env_filter=None, window=None):
                 data["env_name"] = env
                 data["source"] = env  # the page names a run by source and id; the env is its last segment
                 data["grafana_url"] = _grafana_url(data)
-                data["recommended_in"] = ",".join(recommended.get(run_id, [])) or None
-                if run_id in trainings:
-                    data["walk_forward"] = _walk_forward_columns(*trainings[run_id])
                 yield _json_safe(data)
             except (ValueError, OSError):
                 LOG.warning(f"Cannot read run {run_id} of {env}")
@@ -347,21 +279,6 @@ def _find_run(env, run_id):
     if not store.is_complete(run_id):
         return None, (jsonify(error="Not found"), 404)
     return store, None
-
-
-def _find_training(env, train_id):
-    """A finished training folder for a request, or an error response."""
-    if env not in _envs():
-        return None, (jsonify(error="Environment not found"), 404)
-    if not _valid_id(train_id):
-        return None, (jsonify(error="Invalid id"), 400)
-    base = (_store(env).analysis_dir / TRAIN_DIR).resolve()
-    path = base / train_id
-    if path.is_symlink() or not path.resolve().is_relative_to(base):
-        return None, (jsonify(error="Invalid path"), 400)
-    if not _is_finished_dir(path):
-        return None, (jsonify(error="Not found"), 404)
-    return path, None
 
 
 def _run_files(store, run_id):
@@ -397,55 +314,6 @@ def _run_file(store, run_id, file_name):
     except (ValueError, OSError) as e:
         LOG.warning(f"Cannot read {file_name} of run {run_id}: {e}")
         return jsonify(error="Could not read run"), 400
-
-
-def _training_detail(path):
-    """A training folder's meta and summary, and which of its files it has."""
-    try:
-        meta = json.loads((path / "meta.json").read_text())
-        summary = json.loads((path / "summary.json").read_text())
-    except (ValueError, OSError):
-        return jsonify(error="Could not read folder"), 400
-    files = sorted(p.name for p in path.iterdir() if p.name in TRAIN_FILES)
-    return jsonify(_json_safe({"train_id": path.name, "meta": meta, "summary": summary, "files": files}))
-
-
-def _training_file(path, file_name):
-    if file_name not in TRAIN_FILES:
-        return jsonify(error="Not a served file"), 400
-    target = path / file_name
-    if target.is_symlink() or not target.is_file():
-        return jsonify(error="File not found"), 404
-    if file_name.endswith(".json"):
-        try:
-            return jsonify(_json_safe(json.loads(target.read_text())))
-        except (ValueError, OSError):
-            return jsonify(error="Could not read file"), 400
-    return send_from_directory(path, file_name, mimetype="text/csv")
-
-
-def _iter_trainings(env_filter=None):
-    for env in _envs():
-        if env_filter and env != env_filter:
-            continue
-        base = _store(env).analysis_dir / TRAIN_DIR
-        if not base.is_dir():
-            continue
-        for path in sorted(base.iterdir()):
-            if not _is_finished_dir(path):
-                continue
-            try:
-                data = json.loads((path / "meta.json").read_text())
-                summary = json.loads((path / "summary.json").read_text())
-                if not isinstance(data, dict) or not isinstance(summary, dict):
-                    continue
-                data["result"] = summary
-                data["train_id"] = path.name
-                data["env_name"] = env
-                data["source"] = env  # the page names a run by source and id; the env is its last segment
-                yield _json_safe(data)
-            except (ValueError, OSError):
-                LOG.warning(f"Cannot read training folder: {path}")
 
 
 @app.get("/api/envs")
@@ -489,48 +357,6 @@ def api_run(env, run_id):
 def api_run_file(env, run_id, file_name):
     store, error = _find_run(env, run_id)
     return error or _run_file(store, run_id, file_name)
-
-
-@app.get("/api/runs/<env>/<run_id>/walk-forward")
-def api_run_walk_forward(env, run_id):
-    """The walk-forward rules against this run held: the newest training of its group, cut to this run."""
-    store, error = _find_run(env, run_id)
-    if error:
-        return error
-    found = _run_trainings(store).get(run_id)
-    if found is None:
-        return jsonify(error="No walk-forward training includes this run"), 404
-    train_id, against = found
-    try:
-        meta = json.loads((store.analysis_dir / TRAIN_DIR / train_id / "meta.json").read_text())
-    except (ValueError, OSError):
-        return jsonify(error="Could not read training"), 400
-    held = against["runs"][run_id]
-    rules = [{**rule, "held": held.get("rules", {}).get(rule.get("key"))} for rule in against.get("rules", [])]
-    return jsonify(_json_safe({"train_id": train_id, "run_id": run_id, "meta": meta, "params": held.get("params"),
-                               "best": against.get("best"), "rules": rules}))
-
-
-@app.get("/api/trainings")
-def api_trainings():
-    """Every finished walk-forward training, meta.json with summary.json as `result`, newest first."""
-    def created(row):
-        value = row.get("created_ts")
-        return value if isinstance(value, (int, float)) else 0
-
-    return jsonify(sorted(_iter_trainings(request.args.get("env")), key=created, reverse=True))
-
-
-@app.get("/api/trainings/<env>/<train_id>")
-def api_training(env, train_id):
-    path, error = _find_training(env, train_id)
-    return error or _training_detail(path)
-
-
-@app.get("/api/trainings/<env>/<train_id>/files/<file_name>")
-def api_training_file(env, train_id, file_name):
-    path, error = _find_training(env, train_id)
-    return error or _training_file(path, file_name)
 
 
 @app.delete("/api/results/<env>/<run_id>")

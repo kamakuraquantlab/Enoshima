@@ -40,7 +40,7 @@ After each week the run's `BacktestRun` row is rebuilt from all of its weeks
 (`weekly.rebuild`). See `weekly`.
 
 Any other run is temporary: a quick look at some days, with its own summary,
-and not a candidate for `enoshima select`.
+and its range and revision in its id.
 
 ## Where a run writes
 
@@ -51,8 +51,8 @@ then the run's row. Nothing goes to the environment directory but `env.log`.
 ## Choosing is not part of a run
 
 A run writes results and its summaries, and nothing else. Recommending a
-parameter set -- `enoshima select` -- and testing the rule that does it --
-`enoshima walk-forward` -- are asked for, when there are results to choose from.
+parameter set from them, and testing how often to choose again, is not
+Enoshima's: whatever does it reads the lake, and needs no replay.
 """
 
 import datetime as dt
@@ -132,7 +132,7 @@ class Runner:
         self.max_concurrency = max_concurrency
         self.force = force
         self.store = lake.Store(lake_root or lake.lake_root(), str(env.name))
-        self.batch_id = self._next_batch_id(self.store.analysis_dir)
+        self.batch_id = self._next_batch_id()
         # The parameter sets whose backtest raised. A run with any is a failed
         # run, whatever else it computed: `enoshima run` exits non-zero.
         self.failed: list[dict] = []
@@ -148,26 +148,18 @@ class Runner:
         fees.register(self.fee_rates)
 
     @staticmethod
-    def _next_batch_id(analysis_dir: Path) -> int:
-        """A unix timestamp, advanced until it names a batch that does not exist.
+    def _next_batch_id() -> int:
+        """A unix timestamp, and never one this process has issued already.
 
-        The id groups one sweep's runs together and names its `best_result`
-        folder, so two sweeps sharing an id would overwrite each other's
-        choice. A bare
-        `int(time.time())` collides whenever two runs start inside the same
-        second, which is ordinary when they are launched from a script.
-
-        Only `select` writes a `best_result` folder, so a run leaves nothing
-        on disk to advance past; the last id this process issued covers the
-        common case of two runs started one after the other.
+        The id groups one sweep's runs together, recorded in each part's meta.
+        A bare `int(time.time())` collides whenever two runs start inside the
+        same second, which is ordinary when they are launched from a script;
+        the last id this process issued covers the common case of two runs
+        started one after the other.
         """
         global _last_batch_id
-        best_root = Path(analysis_dir) / "best_result"
-        batch_id = max(int(time.time()), _last_batch_id + 1)
-        while (best_root / str(batch_id)).exists():
-            batch_id += 1
-        _last_batch_id = batch_id
-        return batch_id
+        _last_batch_id = max(int(time.time()), _last_batch_id + 1)
+        return _last_batch_id
 
     def param_sets(self) -> list[dict]:
         if self.optimize == MODE_GRID:

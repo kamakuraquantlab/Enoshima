@@ -71,8 +71,8 @@ a week grows to full without `--force`. A day missing *between* the first and
 last is not clipped; it replays as empty, with the usual warning.
 
 The root is never the current run's result. It is the weeks', so its range is
-the first week's Monday to the last week's Sunday, and `select`,
-`walk-forward` and `results` read it like any other run. For that range
+the first week's Monday to the last week's Sunday, and `results`, `enoshima
+web` and any reader of the lake read it like any other run. For that range
 to be true the weeks must be contiguous: a run fills every gap between the
 weeks on disk and the weeks asked for (`span`), and a run whose weeks are not
 contiguous -- a week that failed -- is left without its `BacktestRun` row until

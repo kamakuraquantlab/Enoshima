@@ -8,9 +8,7 @@ is the map; each part has its own page:
 | Page | Covers |
 |---|---|
 | [01_weekly_run.md](01_weekly_run.md) | The cumulative weekly run: preload, overlap, which week a trade belongs to, how weeks are stored and stitched |
-| [02_selection.md](02_selection.md) | `enoshima select`: filters, score, neighbour smoothing, groups, its walk-forward over months |
-| [03_walk_forward.md](03_walk_forward.md) | `enoshima walk-forward`: testing how often to choose again, on how much history (X, Y), and `--train` |
-| [04_web.md](04_web.md) | `enoshima web`: every run and training as a page, and links to a dashboard |
+| [04_web.md](04_web.md) | `enoshima web`: every run as a page, and links to a dashboard |
 
 ## What it is
 
@@ -76,7 +74,7 @@ data lake.
 |---|---|
 | `strategy_config.json` | The strategy's `Config`: market and order size. The live runner reads the same file |
 | `strategy_param_grid.json` | Strategy module and variant, each parameter's `default_value`, and the `values` a sweep tries |
-| `enoshima.json` | How this env is backtested: fees, weekly preload and overlap, selection and walk-forward rules, memory. Optional |
+| `enoshima.json` | How this env is backtested: fees, weekly preload and overlap, memory. Optional |
 
 ```json
 {
@@ -106,8 +104,6 @@ silently change what a run does.
 | Key | Is | Detail |
 |---|---|---|
 | `weekly` | `preload_days`, `overlap_days` (1 and 1) | [01_weekly_run.md](01_weekly_run.md) |
-| `selection` | how `select` filters, scores, smooths and groups | [02_selection.md](02_selection.md) |
-| `walk_forward` | the rules `walk-forward` tests, and `--train`'s settings | [03_walk_forward.md](03_walk_forward.md) |
 | `fee_rates` | what each traded market charges, by market id; a traded market without one refuses the run | below |
 | `chunk_days` | days loaded at once (2); `--chunk-days` overrides it | memory |
 | `max_concurrency` | parameter sets sharing one pass over the data (16); `--max-concurrency` overrides it | speed |
@@ -136,8 +132,8 @@ so stating one keeps the folders of runs made before rates were stated.
 Monday to Sunday JST, and each week is replayed on its own with a preload before
 it and an overlap after it. Weeks already on disk are skipped, so extending a
 year by a month replays only that month's weeks. The run's folder has no dates
-in its id and grows with every run. Only weekly runs are candidates for `select`
-and `walk-forward`. See [01_weekly_run.md](01_weekly_run.md).
+in its id and grows with every run: it is a parameter set's lasting record.
+See [01_weekly_run.md](01_weekly_run.md).
 
 ```bash
 enoshima run --env NAME --from 2026-01-01 --to 2026-12-31 --optimize grid --weekly
@@ -145,7 +141,7 @@ enoshima run --env NAME --from 2026-01-01 --to 2026-12-31 --optimize grid --week
 
 **Temporary** (no `--weekly`) is a quick look at some days: one continuous
 replay of the range. It is kept and listed by `results`, with the range in
-its id, and it is never a candidate for a recommendation.
+its id.
 
 ```bash
 enoshima run --env NAME --from 2026-09-01 --to 2026-09-01
@@ -178,10 +174,7 @@ the `research/` layer. Nothing but `env.log` goes to the environment directory.
 ├── dataset=BacktestOrder/...                             every fill
 ├── dataset=BacktestPnl/...                               every PnL update, open and close, with open_ts
 ├── dataset=BacktestBar/...                               the strategy's completed bars and indicators
-├── dataset=BacktestMetric/...                            any other metric it reports, and EVAL
-└── enoshima/<env>/
-    ├── best_result/<batch_id>/                           `select`'s recommendations (02)
-    └── post_analysis/                                    `walk-forward`'s table and `--train` folders (03)
+└── dataset=BacktestMetric/...                            any other metric it reports, and EVAL
 ```
 
 `run_id` is the deterministic hash of the env, the strategy and variant, the
@@ -207,7 +200,8 @@ WHERE env = 'EXAMPLE_BACKTEST' ORDER BY pnl5 DESC
 written whole, its data files first and its `BacktestPart` row last, and the
 run's row is rebuilt from its parts after; a reader refuses a part one of
 whose files has gone. Any window or grouping can be recomputed from the trades
-without a replay, which is what `select` and `walk-forward` do. A grouping row
+without a replay; so can a run's curve at each slippage from its `BacktestPnl`
+close updates, which carry `PNL`, `FEE`, `notional` and `open_cost`. A grouping row
 has `trades` and, per slippage N, `winsN`, `pnlN`, `peakN`, `troughN` and `ddN`
 (worst drawdown). Nothing from the warmup is recorded, and a weekly part's
 orders and PnL are those of the positions it opened (01).
@@ -215,7 +209,7 @@ orders and PnL are those of the positions it opened (01).
 `enoshima results --env NAME` lists the recorded runs, best first, in `env.log`;
 `enoshima web` shows every env's as a page ([04_web.md](04_web.md)). No command
 deletes results, and the viewer deletes only a run it is asked to. To clear an
-env's, delete its `env=<env>` folder in each dataset and its `enoshima/<env>/`.
+env's, delete its `env=<env>` folder in each dataset.
 
 A run is written to the lake only after it has finished: a run that fails
 writes nothing. InfluxDB is not written; a loader from the lake into InfluxDB
@@ -223,21 +217,22 @@ for dashboards is a separate tool.
 
 ### Results from before the lake
 
-Results used to be written into the environment, as `run_log/`, `best_result/`
-and `post_analysis/`. `enoshima import-run-log --env NAME` reports what it
+Results used to be written into the environment, as `run_log/`.
+`enoshima import-run-log --env NAME` reports what it
 would bring into the lake, and `--apply` does it: each run folder's weeks (or
 its root, for a temporary run) become parts with their meta, summary and
 trades, keeping their run ids, so a weekly run carries on from them. Their
 orders and PnL updates were only in InfluxDB, so imported parts have none.
 Nothing in the environment is removed; delete the folders once the import
-looks right. `enoshima.json`'s old `"influx"` entry is ignored, with a warning.
+looks right. `enoshima.json`'s old `"influx"`, `"selection"` and
+`"walk_forward"` entries are ignored, with a warning. The `best_result/` and
+`post_analysis/` folders an earlier version wrote were choices among results,
+not results, and are not imported.
 
 ## Choosing a parameter set
 
-A run does not choose. `enoshima select` reads every weekly run and
-recommends a parameter set per range and per group. It filters and scores on
-several figures, smooths over grid neighbours, and tests its choice month by
-month out of sample ([02_selection.md](02_selection.md)).
-`enoshima walk-forward` tests the next question with the same ranking: whether
-choosing again every Y on the last X of history beats holding one set
-([03_walk_forward.md](03_walk_forward.md)).
+Enoshima does not choose. It runs backtests, writes their results to the
+lake, and shows them. Which parameter set to trade, and how often to choose
+again, is a question for whatever reads the lake: everything it needs --
+every run's parameters, summary, trades and PnL updates -- is there, and
+answering it needs no replay.

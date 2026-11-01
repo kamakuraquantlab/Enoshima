@@ -708,19 +708,5 @@ body {
   .run-view { padding: 12px 16px; }
 }
 
-/* A run against its group's walk-forward rules: one row per rule, the best outlined. */
-.wf-rule { display: grid; grid-template-columns: minmax(300px, 1fr) minmax(0, 1.4fr) minmax(0, 1.4fr); gap: 16px; align-items: start; }
-.wf-rule-stats { display: flex; flex-direction: column; gap: 6px; }
-.wf-rule-stats h2 { font-size: 13px; font-weight: 600; color: #f0efec; }
-.wf-rule-stats .group-table { margin-top: 4px; }
-.wf-rule-chart { min-width: 0; }
-.wf-best { border-color: #3987e5; box-shadow: 0 0 0 1px #3987e5 inset; }
-.wf-best-badge {
-  margin-left: 8px; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600;
-  background: #3987e5; color: #0f1117; vertical-align: middle;
-}
-.wf-best-row td { background: #172235; color: #f0efec; }
-.wf-best-row td:first-child { box-shadow: 3px 0 0 #3987e5 inset; }
 .group-table a { color: #a5b4fc; text-decoration: none; }
 .group-table a:hover { text-decoration: underline; }
-@media (max-width: 1100px) { .wf-rule { grid-template-columns: 1fr; } }

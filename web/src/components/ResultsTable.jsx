@@ -12,9 +12,9 @@ const HIDDEN_LS_KEY = 'enoshima_hidden_cols'
 const SORT_LS_KEY = 'enoshima_sort_keys'
 
 const PINNED_COLS = [
-  'start_ts', 'batch_id', 'recommended_in',
+  'start_ts', 'batch_id',
   'env_name', 'param_set_id', 'start_str', 'end_str', 'range_covered',
-  'result.pnl5', 'walk_forward.best_pnl5', 'walk_forward.best_rule', 'result.pnl_cnt0',
+  'result.pnl5', 'result.pnl_cnt0',
   'result.sharpe_ratio_annualized0', 'result.max_drawdown0',
   'execution_time', 'git_rev',
 ]
@@ -50,12 +50,12 @@ function saveSortKeys(keys) {
 }
 
 function colLabel(col) {
-  return col.replace(/^walk_forward\./, 'wf ').replace(/^(result|params|config|trading)\./, '').replaceAll('_', ' ')
+  return col.replace(/^(result|params|config|trading)\./, '').replaceAll('_', ' ')
 }
 
 export default function ResultsTable({
   results, search, onSearch,
-  deleteMode, selectedIdxs, onToggleRow, onToggleAll, onVisibleRowsChange, runHref, walkForwardHref,
+  deleteMode, selectedIdxs, onToggleRow, onToggleAll, onVisibleRowsChange, runHref,
 }) {
   // sortKeys: [{col, asc}, ...] — head = primary sort
   const [sortKeys, setSortKeys] = useState(loadSortKeys)
@@ -73,7 +73,7 @@ export default function ResultsTable({
     const seen = new Set()
     for (const r of flat) {
       for (const k of Object.keys(r)) {
-        if (k !== '_rowIdx' && k !== 'run_id' && k !== 'source' && k !== 'walk_forward.train_id' && k !== 'grafana_url') seen.add(k)
+        if (k !== '_rowIdx' && k !== 'run_id' && k !== 'source' && k !== 'grafana_url') seen.add(k)
       }
     }
     return [...seen].sort((a, b) => {
@@ -195,7 +195,6 @@ export default function ResultsTable({
                 </th>
               )}
               <th className="th-open" title="Open the run's charts" />
-              <th className="th-open" title="Open the run against its group's walk-forward rules" />
               {hasGrafana && <th className="th-grafana" title="Open in Grafana">↗</th>}
               {visibleCols.map(col => {
                 const keyIdx = sortKeys.findIndex(k => k.col === col)
@@ -261,12 +260,6 @@ export default function ResultsTable({
                       href={runHref(results[row._rowIdx])} target="_blank" rel="noreferrer"
                       onClick={e => e.stopPropagation()}>charts</a>
                   </td>
-                  <td className="td-open">
-                    {row['walk_forward.train_id'] != null &&
-                      <a className="open-run" title="This run against its group's walk-forward rules, in a new tab"
-                        href={walkForwardHref(results[row._rowIdx])} target="_blank" rel="noreferrer"
-                        onClick={e => e.stopPropagation()}>walk-forward</a>}
-                  </td>
                   {hasGrafana && <td className="td-grafana">
                     <a
                       hidden={!row.grafana_url}
@@ -284,7 +277,7 @@ export default function ResultsTable({
                     const isActiveCol = activeCell?.col === col
                     const isActive = isActiveRow && isActiveCol
                     const cls = [
-                      col === 'result.pnl5' || col === 'walk_forward.best_pnl5' ? 'cell-pnl' : '',
+                      col === 'result.pnl5' ? 'cell-pnl' : '',
                       col === 'batch_id' ? 'cell-batch-id' : '',
                       isActiveCol ? 'cell-col-active' : '',
                       isActive ? 'cell-active' : '',

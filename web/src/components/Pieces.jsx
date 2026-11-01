@@ -1,6 +1,6 @@
 import { flatten, formatValue } from '../utils/flatten'
 
-// The page furniture RunView and TrainingView share.
+// The page furniture of RunView.
 
 export function Panel({ title, note, actions, children, wide }) {
   return <section className={`panel${wide ? ' panel-wide' : ''}`}>

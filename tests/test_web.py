@@ -27,10 +27,6 @@ def make_run(root, env, run_id, meta, summary, trades=(), records=None):
     return store
 
 
-def analysis(root, env):
-    return Store(root, env).analysis_dir
-
-
 def test_layouts_and_schema(tmp_path):
     make_run(tmp_path, "NEW", "aaa", {"start_ts": 20, "param_set_id": "NEW_1"},
              {"pnl5": 5, "sharpe_ratio_annualized5": float("inf")})
@@ -49,18 +45,6 @@ def test_layouts_and_schema(tmp_path):
     assert client.get("/api/results?env=OLD").json[0]["source"] == "OLD"
     assert client.get("/api/results?env=absent").json == []
     assert client.post("/api/backtest/NEW/execute", json={}).status_code == 404
-
-
-def test_a_recommended_run_is_marked(tmp_path):
-    make_run(tmp_path, "ENV", "aaa", {"start_ts": 2}, {})
-    make_run(tmp_path, "ENV", "bbb", {"start_ts": 1}, {})
-    for batch in ("100", "200"):
-        best = analysis(tmp_path, "ENV") / "best_result" / batch
-        best.mkdir(parents=True)
-        (best / "selection.json").write_text("{}")
-        (best / "aaa.json").write_text("{}")
-    rows = web.app.test_client().get("/api/results").json
-    assert {r["run_id"]: r["recommended_in"] for r in rows} == {"aaa": "100,200", "bbb": None}
 
 
 def test_run_detail_and_files(tmp_path):
@@ -164,77 +148,6 @@ def test_delete_a_run_and_nothing_else(tmp_path):
     assert client.delete("/api/results/ENV/aaa?source=ENV").status_code == 204
     assert not any(store.run_dir(d, "aaa").exists() for d in lake.DATASETS)
     assert other.run_ids() == ["bbb"] and elsewhere.run_ids() == ["aaa"]
-
-
-def make_training(root, env, train_id, meta, summary, extra=None):
-    path = analysis(root, env) / "post_analysis/train" / train_id
-    path.mkdir(parents=True)
-    (path / "meta.json").write_text(json.dumps(meta))
-    (path / "summary.json").write_text(json.dumps(summary))
-    for name, content in (extra or {}).items():
-        (path / name).write_text(content)
-    return path
-
-
-def test_trainings_are_listed_and_served(tmp_path):
-    make_run(tmp_path, "ENV", "aaa", {}, {})
-    make_training(tmp_path, "ENV", "train_1_0", {"created_ts": 1}, {"trained": {"pnl5": 1.0}})
-    make_training(
-        tmp_path, "ENV", "train_2_0", {"created_ts": 2, "group": {"mode": "a"}},
-        {"significance": {"p_sign": float("nan")}},
-        {"folds.json": "[]", "curve.csv": "ts,series,trades,pnl0,pnl5,pnl10\n0,trained,1,1,1,1\n", "x.txt": "no"},
-    )
-    partial = analysis(tmp_path, "ENV") / "post_analysis/train/train_3_0.tmp-9"
-    partial.mkdir()
-    (partial / "meta.json").write_text("{}")
-    (partial / "summary.json").write_text("{}")
-
-    client = web.app.test_client()
-    rows = client.get("/api/trainings").json
-    assert [r["train_id"] for r in rows] == ["train_2_0", "train_1_0"]
-    assert rows[0]["source"] == "ENV" and rows[0]["result"]["significance"]["p_sign"] is None
-    assert client.get("/api/trainings?env=OTHER").json == []
-
-    detail = client.get("/api/trainings/ENV/train_2_0?source=ENV").json
-    assert detail["train_id"] == "train_2_0" and detail["meta"]["group"] == {"mode": "a"}
-    assert detail["files"] == ["curve.csv", "folds.json", "meta.json", "summary.json"]
-    assert client.get("/api/trainings/ENV/train_2_0/files/folds.json").json == []
-    assert client.get("/api/trainings/ENV/train_2_0/files/curve.csv").data.startswith(b"ts,series")
-    assert client.get("/api/trainings/ENV/train_2_0/files/x.txt").status_code == 400
-    assert client.get("/api/trainings/ENV/train_1_0/files/folds.json").status_code == 404
-    assert client.get("/api/trainings/ENV/train_3_0.tmp-9").status_code == 400
-    assert client.get("/api/trainings/ENV/zzz").status_code == 404
-    # A run is not a training, nor the reverse.
-    assert client.get("/api/trainings/ENV/aaa").status_code == 404
-    assert client.get("/api/runs/ENV/train_1_0").status_code == 404
-
-
-def test_a_run_links_to_the_newest_training_of_its_group(tmp_path):
-    make_run(tmp_path, "ENV", "aaa", {"start_ts": 2}, {"pnl5": 1.0})
-    make_run(tmp_path, "ENV", "bbb", {"start_ts": 1}, {"pnl5": 1.0})
-
-    def against(best_pnl5):
-        rules = [{"key": "rolling_3d_4h", "label": "rolling 3d, every 4h", "from": "2026-01-04 00:00", "pnl5": 1.0},
-                 {"key": "rolling_1w_1d", "label": "rolling 1w, every 1d", "from": "2026-01-08 00:00",
-                  "pnl5": best_pnl5}]
-        held = {"rules": {"rolling_3d_4h": {"pnl5": 3.0}, "rolling_1w_1d": {"pnl5": 2.0}}}
-        return json.dumps({"best": "rolling_1w_1d", "rules": rules, "runs": {"aaa": {"params": {"x": 1}, **held}}})
-
-    make_training(tmp_path, "ENV", "train_1_0", {"created_ts": 1}, {}, {"runs.json": against(5.0)})
-    make_training(tmp_path, "ENV", "train_2_0", {"created_ts": 2}, {}, {"runs.json": against(7.0)})
-
-    client = web.app.test_client()
-    rows = {r["run_id"]: r for r in client.get("/api/results").json}
-    assert rows["aaa"]["walk_forward"] == {"train_id": "train_2_0", "best_pnl5": 7.0,
-                                           "best_rule": "rolling 1w, every 1d"}
-    assert "walk_forward" not in rows["bbb"]
-
-    got = client.get("/api/runs/ENV/aaa/walk-forward").json
-    assert got["train_id"] == "train_2_0" and got["params"] == {"x": 1} and got["best"] == "rolling_1w_1d"
-    assert [(r["key"], r["held"]["pnl5"]) for r in got["rules"]] == [("rolling_3d_4h", 3.0), ("rolling_1w_1d", 2.0)]
-    assert client.get("/api/runs/ENV/bbb/walk-forward").status_code == 404
-    assert client.get("/api/runs/ENV/zzz/walk-forward").status_code == 404
-    assert client.get("/api/trainings/ENV/train_2_0/files/runs.json").json["best"] == "rolling_1w_1d"
 
 
 def test_prices_are_the_last_trade_of_each_step(monkeypatch):

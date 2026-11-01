@@ -14,7 +14,7 @@ trades in time order.
 
 For a grouping that follows the calendar (month, week, day) that is the
 group's equity curve from its start, and consecutive groups combine exactly --
-`selection.window_stats` recomputes any run of months' drawdown from them. For
+any run of months' drawdown is recomputed from them. For
 one that collects trades from scattered times (weekday, hour, holding time,
 side) it is the curve of a strategy that traded only in that group: useful, and
 not combinable across groups.

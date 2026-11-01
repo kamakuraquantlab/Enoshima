@@ -10,7 +10,12 @@ a simulated exchange, and write the results back to the data lake the bronze
 came from.
 
 It also serves what it wrote: `enoshima web` (`enoshima.web`, the page in
-`web/`, the `web` extra) shows every run and training in the lake as a page.
+`web/`, the `web` extra) shows every run in the lake as a page.
+
+It does **not choose**. Recommending a parameter set from a sweep, and testing
+how often to choose again (selection, walk-forward), is research on what the
+lake holds; it was here once and was moved out. A run writes results; the page
+shows them; nothing here ranks them.
 
 It is **not** the seller's backtest operations tooling. The queue that launches
 runs from a web page and any production strategy's Grafana dashboard stayed
@@ -102,12 +107,14 @@ but it is easy to break from here:
 - **Every result is in the data lake, and none in the env.** `research/`
   holds one dataset per kind -- `BacktestRun`, `BacktestPart`, `BacktestTrade`,
   `BacktestOrder`, `BacktestPnl`, `BacktestBar`, `BacktestMetric` -- each
-  partitioned `env=<env>/run_id=<id>/` (and `part=<part>/` but the run's row),
-  and `research/enoshima/<env>/` holds what `select` and `walk-forward` write.
+  partitioned `env=<env>/run_id=<id>/` (and `part=<part>/` but the run's row).
   The env directory holds definitions and `env.log`. Any window or grouping is
   recomputed from `BacktestTrade` without a replay; `BacktestRun` keeps each
-  `ledger.GROUPINGS` of a run's trades as `by_<name>` because `select` reads
-  every run's months. The names are not `Backtest_Bar` and `Backtest_Pnl`: those
+  `ledger.GROUPINGS` of a run's trades as `by_<name>`, so a reader comparing
+  every run's months need not read every trade. A `BacktestPnl` close update
+  carries `PNL`, `FEE`, `notional` and `open_cost`, which is all a trade's
+  `pnl_change{0,5,10}` is computed from; keep it that way, since a reader of
+  the lake may take a run's curve from it. The names are not `Backtest_Bar` and `Backtest_Pnl`: those
   are earlier tools' datasets in the same layer, partitioned by strategy and
   market, and two layouts must not share a dataset directory. There was once a
   parquet copy of the *whole* metric stream under `result/` (`timeseries.py`);
@@ -117,7 +124,7 @@ but it is easy to break from here:
   run's, writes each data file under a temporary name and renames it, removes
   any file of an earlier write it has no rows for, and writes the part's
   `BacktestPart` row last; the run's `BacktestRun` row follows, and it is what
-  "finished" means to the skip check, `select` and the viewer. A part's row
+  "finished" means to the skip check, the viewer and any reader of the lake. A part's row
   records each file's row count, and a reader refuses a part whose files do not
   match it: a lake's housekeeping may delete old `data.parquet` files outside
   bronze, and a part missing its trades must not read as a part that traded
@@ -190,7 +197,7 @@ but it is easy to break from here:
   are its parts, `part=<YYYY-Www>`, each written whole, and its `BacktestRun`
   row is rebuilt from all of them (`weekly.rebuild`) -- never the current run's
   result -- over the first Monday to the last Sunday. That is what lets
-  `select` and `walk-forward` read it unchanged, and why a run fills the gap
+  any reader treat it as one run over its range, and why a run fills the gap
   between the weeks on disk and the weeks asked for, and a run with a gap
   has no row. A week is byte-identical whichever run computed it,
   and `tests/test_weekly.py` holds it: do not let state cross from one
@@ -208,7 +215,7 @@ but it is easy to break from here:
   package it imports, followed through the import statements, with each
   package's `__init__.py` -- spelt `src.<12 hex>`. A change to what the variant
   runs must be a new run id, or a weekly run would stitch weeks of two versions
-  together; `best.group` ranks one revision at a time. A change that does not
+  together, and a reader comparing runs could not tell the two apart. A change that does not
   reach the variant -- a new `vNNN.py` beside it, a test, a note -- must not
   be: it was the checkout's commit once, and every experiment committed moved
   every older variant's results to a new run id. The commit is still recorded,
@@ -228,9 +235,9 @@ but it is easy to break from here:
   list: nothing is deleted. Both are dry runs without `--apply`.
 - **Results from before the lake are imported, not replayed** (`legacy`).
   `enoshima import-run-log` turns an env's `run_log/` folders into parts and
-  rows under their own run ids, and copies `best_result/` and `post_analysis/`
-  into the env's analysis folder; a dry run without `--apply`, and it removes
-  nothing.
+  rows under their own run ids; a dry run without `--apply`, and it removes
+  nothing. The `best_result/` and `post_analysis/` folders an earlier version
+  wrote beside them were choices, not results, and are not imported.
 - **A backtest's fee rates are `enoshima.json`'s `fee_rates`** (`fees`). qate
   reads a rate off the market's `ExchangeAdapter`, which only a venue package
   registers, and a backtest installs none -- so every fill was once costed at
@@ -251,31 +258,17 @@ but it is easy to break from here:
   `get_param_set_id` once; do not put it back on `Strategy`.
 - **A re-run replaces; it never adds.** The lake's files are the run's id, so a
   `--force` re-run, or a week run again, replaces what was there. The batch id
-  is recorded in each part's meta and names `best_result/<batch_id>/`, never
-  the run's id, which must stay deterministic for a sweep to resume.
-- **A run does not choose.** `enoshima run` writes results and summaries;
-  `select` and `walk-forward` run only when asked. Only weekly runs are
-  candidates: any other run is temporary (`is_temporary_run`), a quick look at
-  some days, with the range and revision in its id.
-- **A recommendation is per range and per group, from every run in the lake**, not
-  per batch (`best.recommend`). Runs are grouped by strategy and range, then by
-  `group_by` -- the categorical parameters by default -- and each group is
-  ranked alone. A resumed sweep must be able to pick a best from results it did
-  not just compute, and a categorical value is a different way of trading, to
-  be compared on its own merits rather than outranked on a box size's figures.
-  `enoshima select` reruns it from the lake. `enoshima walk-forward`
-  (`post_analysis.walk_forward`) tests the rule's own window, history and
-  reselection interval to the hour, every rule on the same test hours; it reuses
-  `selection.rank` and must not grow a second way of choosing. Its rules are
-  `enoshima.json`'s `"walk_forward"`, not flags; `history` maps each history to
-  its own intervals, because an interval is only sensible against a history.
-  `--train` ranks the rules' out-of-sample curves, and a no-switching baseline,
-  with that same `selection.rank`, and is compared with the baseline only out
-  of sample. There each rule starts when its own history allows, and a
-  retraining ranks only the rules that traded its whole window; do not align
-  them on the longest history, which held a 3d rule back by two months. Its
-  folders under the env's analysis folder's `post_analysis/train/` are written whole, `summary.json` last,
-  and a results viewer may read them -- add to their files rather than rename.
+  is recorded in each part's meta, never the run's id, which must stay
+  deterministic for a sweep to resume.
+- **Nothing here chooses.** `enoshima run` writes results and summaries, and
+  there is no command that ranks them: `select` and `walk-forward` were here,
+  with `selection`, `best` and `post_analysis`, and were moved out, with
+  `enoshima.json`'s `"selection"` and `"walk_forward"` -- now accepted and
+  ignored with a warning (`settings.RETIRED`). Do not add a recommendation, a
+  score or a ranking back to the CLI, the lake or the viewer. A weekly run is a
+  parameter set's lasting record; any other run is temporary
+  (`is_temporary_run`), a quick look at some days, with the range and revision
+  in its id.
 - **A single run uses the defaults in `strategy_param_grid.json`.** An optimize
   sweep expands the values in that same file, so there is one source of parameter
   definitions.
@@ -293,8 +286,9 @@ but it is easy to break from here:
 - **A run takes its environment's lock and logs there**, so never point one at
   an environment a live process is running from; copy the definition instead.
 - **`enoshima.json` refuses unknown keys.** A misspelt `"weekly"` silently
-  ignored would run with the defaults with nothing to say so. `"influx"`, a
-  key that was, is the one ignored, with a warning (`settings.RETIRED`).
+  ignored would run with the defaults with nothing to say so. `"influx"`,
+  `"selection"` and `"walk_forward"`, keys that were, are ignored with a
+  warning (`settings.RETIRED`).
 - **The strategy's `Config` class is resolved from the strategy module**, by
   `qate_env.trading_env.resolve_config_class`. There is no `desc.json` and no index of
   any kind; the map that used to be one went stale whenever code moved. Do not
@@ -305,28 +299,14 @@ but it is easy to break from here:
   recorded `"config": null` for two commits. `tests/test_run_end_to_end.py` now
   holds the provenance fields, because a result you cannot attribute to a
   configuration is not a result.
-- **`select` does not take the highest `pnl5`.** Ranking on `pnl0` selects
-  for strategies whose edge is thinnest, and ranking on any one figure selects
-  for the set that is exceptional on it. `selection` filters (no loss at pnl10
-  by default), scores each set by its mean percentile on pnl5, pnl10, dd5 and
-  `top_share5` (how much of its winnings its best 5% of trades made), smooths
-  each figure over its grid neighbours, and walk-forward tests the choice on JST
-  months from each run's `by_month` grouping and its trades. The window expands:
-  each choice uses every month before it, and the set recommended is chosen on
-  the whole range. On three trend-following sweeps a rolling six months chose on noise,
-  and the pnl5-only score kept choosing the deepest drawdowns; both remain as
-  settings (`"window": "rolling"`, `"score": "pnl5"`), not as defaults. The out-of-sample total is the honest figure; an in-sample
-  best is not one. `selection` works only from recorded runs: it must never need
-  a replay. `best_result/<batch_id>/` holds `selection.json` and, for each
-  group where a set passed the filters, its meta as `<run_id>.json`.
 - **Never delete a user's results.** There is no `clean` command: a user who
   wants them gone deletes the env's folders in the lake. An earlier version
   pruned run logs older than seven days automatically, on every run.
 - **The viewer reads only what the commands write.** `web.py` serves a run
   as the files its folder once held -- `meta.json`, `summary.json`,
   `trades.csv` and `by_*.json`, read from the run's rows and trades -- its
-  records as `orders.csv`, `pnl.csv`, `bars.csv` and `metrics.csv`, and a
-  training's `TRAIN_FILES`, named from `lake`, `ledger` and `walk_forward`, so
+  records as `orders.csv`, `pnl.csv`, `bars.csv` and `metrics.csv`, named
+  from `lake` and `ledger`, so
   a new dataset is served once it is added there and not before. Whatever the
   page shows is computed in the browser from those or read from them; a figure
   the page needs that the lake does not hold belongs in the command that writes
@@ -353,6 +333,7 @@ but it is easy to break from here:
 | The viewer's pages and the API that serves runs from the lake | here, `web.py` and `web/` |
 | A result dataset's layout in the lake | here, `lake.py` |
 | A strategy's dashboard, or its link from the viewer | the strategy's repository, and the `ENOSHIMA_API` env |
+| Choosing a parameter set from results: selection, walk-forward, a ranking | not here: a reader of the lake |
 
 The example strategy is documentation. Keep it the most ordinary thing that works
 and keep it honest about losing money; it is there to show the contract, not an

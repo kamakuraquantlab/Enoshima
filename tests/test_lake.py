@@ -56,7 +56,6 @@ def test_the_layout_is_the_research_layer_by_env_run_and_part(tmp_path):
     assert store.path(lake.TRADE, "abc", "2026-W04") == (
         tmp_path / "research" / "dataset=BacktestTrade" / "env=ENV" / "run_id=abc" / "part=2026-W04" / "data.parquet")
     assert store.path(lake.RUN, "abc") == tmp_path / "research/dataset=BacktestRun/env=ENV/run_id=abc/data.parquet"
-    assert store.analysis_dir == tmp_path / "research" / "enoshima" / "ENV"
     store.write_part("abc", WHOLE, {}, {}, [])
     store.write_run("abc", {}, {}, [])
     Store(tmp_path, "OTHER").write_part("x", WHOLE, {}, {}, [])   # parts only: not a finished run
@@ -137,19 +136,19 @@ def test_run_folders_from_before_the_lake_are_imported(tmp_path):
     write_folder(weekly / "weeks/2026-W04", {"week": "2026-W04"}, {"pnl5": 1.0}, [trade(t, 1.0)])
     write_folder(weekly / "weeks/2026-W05", {"week": "2026-W05"}, {"pnl5": 2.0}, [trade(t + 7 * 86400, 2.0)])
     write_folder(work_dir / "run_log/old.merged", {}, {}, [])   # set aside: not imported
-    (work_dir / "best_result/7").mkdir(parents=True)
+    (work_dir / "best_result/7").mkdir(parents=True)   # an earlier version's choice: not imported
     (work_dir / "best_result/7/selection.json").write_text("{}")
 
     assert legacy.import_env(work_dir, store)["runs"] == 2   # a dry run writes nothing
     assert store.all_run_ids() == []
 
     report = legacy.import_env(work_dir, store, apply=True)
-    assert (report["runs"], report["parts"], report["analysis_files"]) == (2, 3, 1)
+    assert (report["runs"], report["parts"]) == (2, 3)
     assert store.run_ids() == ["tmp1", "wk1"]
     assert store.parts("tmp1") == [WHOLE] and store.parts("wk1") == ["2026-W04", "2026-W05"]
     assert [x.pnl_change5 for x in store.trades("wk1")] == [1.0, 2.0]   # the weeks', not the root's copy
     assert store.read_run("wk1")["meta"] == {"id": "wk1", "mode": "weekly"}
-    assert (store.analysis_dir / "best_result/7/selection.json").is_file()
+    assert not list((tmp_path / "lake").rglob("selection.json"))
     # The folders are left; a second import finds everything in the lake.
     assert (work_dir / "run_log/wk1/trades.csv").is_file()
     assert legacy.import_env(work_dir, store, apply=True)["skipped"] == 2

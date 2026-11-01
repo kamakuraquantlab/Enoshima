@@ -5,8 +5,6 @@ Run as: `enoshima <command>`, or from a checkout
 
 ```
 enoshima run     --env NAME --from 2026-06-01 --to 2026-06-10 [--weekly]
-enoshima select  --env NAME
-enoshima walk-forward --env NAME [--train]
 enoshima results --env NAME
 enoshima migrate-revisions --env NAME [--apply]
 enoshima merge   --env NAME --from RUN_ID --into RUN_ID [--unverified] [--apply]
@@ -19,16 +17,13 @@ replays the ISO weeks (Monday to Sunday, JST) that cover the range, each on
 its own, as far as there is data for them, and reuses every week already
 computed, so a range extended later replays only its new weeks
 (`enoshima.weekly`). A run without `--weekly` is a quick look at some days:
-it has its summary, and is never a candidate for `select`.
+it has its summary, with its range and revision in its id.
 
-A run writes results; it does not choose. `select` recommends from the weekly
-runs already written -- after a sweep, or after a change to the rule in
-`enoshima.json` -- without replaying anything. `walk-forward` tests
-the rule itself: how each window, history and reselection interval in
-`enoshima.json`'s `"walk_forward"` would have done out of sample, and with
-`--train` chooses among them every month against a baseline that never
-switches (`enoshima.post_analysis.walk_forward`). `results` exists so
-that what a run produced can be found and read without reading the source;
+A run writes results; it does not choose. Choosing a parameter set from them,
+and testing how often to choose again, is research done on what the lake
+holds, and is not Enoshima's: it runs backtests and shows their results.
+`results` exists so that what a run produced can be found and read without
+reading the source;
 `web` serves the same results as a page (`enoshima.web`, the `web` extra).
 `import-run-log` brings an env's run folders from before the lake into it
 (`enoshima.legacy`).
@@ -39,8 +34,7 @@ a flag here:
 - **The data** is wherever komachi says it is: `ROOT_PATH` in komachi's settings
   file. `komachi local` lists it; to replay another tree, change it there.
 - **The output** is the data lake, under the same root as the data: the
-  `research/` layer's `Backtest*` datasets, partitioned by env and run id, and
-  `research/enoshima/<env>/` for what `select` and `walk-forward` write
+  `research/` layer's `Backtest*` datasets, partitioned by env and run id
   (`enoshima.lake`). The environment directory keeps its definition and `env.log`.
 - **The strategy and variant** are `strategy_param_grid.json`'s. The strategy module is
   imported by name, so it must be installed or on `PYTHONPATH`.
@@ -68,12 +62,10 @@ from qate_env import sys_env
 from qate_env.env import Env
 from qate_env.env_name import EnvName
 
-from enoshima import best, legacy, revisions
+from enoshima import legacy, revisions
 from enoshima.lake import Store
-from enoshima.post_analysis import walk_forward
 from enoshima.runner import Runner
 from enoshima.settings import SETTINGS_FILE, load_settings
-from enoshima.strategy_env import STRATEGY_PARAM_GRID_FILE, StrategyParamGrid
 
 LOG = getLogger(__name__)
 
@@ -121,55 +113,6 @@ def cmd_run(args) -> int:
     return 0
 
 
-def cmd_select(args) -> int:
-    env = Env(sys_env.get_env_root_dir(), args.env)
-    env.enter()
-    try:
-        settings = load_settings(env.work_dir)
-        store = Store.of(str(env.name))
-        groups = best.recommend(store, Runner._next_batch_id(store.analysis_dir), settings.selection)
-        if not groups:
-            LOG.warning(f"No results with a pnl5 figure for {args.env}")
-            return 1
-    except Exception:
-        LOG.exception("Select failed")
-        return 1
-    finally:
-        env.leave()
-    return 0
-
-
-def _grid_defaults(env: Env) -> dict:
-    definition = env.load_object(STRATEGY_PARAM_GRID_FILE, StrategyParamGrid)
-    return {p["name"]: p["default_value"] for p in (definition.params if definition else []) if "default_value" in p}
-
-
-def cmd_walk_forward(args) -> int:
-    env = Env(sys_env.get_env_root_dir(), args.env)
-    env.enter()
-    try:
-        settings = load_settings(env.work_dir)
-        wf = settings.walk_forward
-        store = Store.of(str(env.name))
-        if args.train:
-            if args.sum:
-                LOG.warning("--sum adds rules' totals across groups; --train ignores it")
-            found = walk_forward.run_train(store, wf, settings.selection, _grid_defaults(env))
-        else:
-            test_from = walk_forward.parse_time(wf.test_from) if wf.test_from else None
-            found = walk_forward.run(store, wf.rules(), settings.selection, test_from,
-                                     [p.split("+") for p in args.sum])
-        if not found:
-            LOG.warning(f"No results with a pnl5 figure, or none long enough, for {args.env}")
-            return 1
-    except Exception:
-        LOG.exception("Walk-forward failed")
-        return 1
-    finally:
-        env.leave()
-    return 0
-
-
 def cmd_results(args) -> int:
     env = Env(sys_env.get_env_root_dir(), args.env)
     env.visit()
@@ -185,7 +128,7 @@ def cmd_results(args) -> int:
         LOG.info(f"No runs recorded for {args.env}")
         return 1
 
-    # Best first, on the middle slippage assumption -- see Runner.post_analysis.
+    # Best first, on the middle slippage assumption.
     rows.sort(key=lambda r: r.get("result", {}).get("pnl5") or float("-inf"), reverse=True)
     LOG.info(f"{'pnl5':>12s} {'trades':>7s} {'sharpe':>8s}  {'range':23s} params")
     for row in rows[: args.limit]:
@@ -298,20 +241,6 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--force", action="store_true", help="re-run what already has a result (with --weekly: the weeks asked for)")
     run.set_defaults(func=cmd_run)
 
-    select = sub.add_parser("select", help="recommend from the recorded runs again, replaying nothing")
-    select.add_argument("--env", required=True, type=EnvName)
-    select.set_defaults(func=cmd_select)
-
-    wf = sub.add_parser("walk-forward", help="test the selection rule's window, history and reselection "
-                        f"interval, as {SETTINGS_FILE}'s walk_forward lists them")
-    wf.add_argument("--env", required=True, type=EnvName)
-    wf.add_argument("--train", action="store_true",
-                    help="choose a rule every retrain interval, against a baseline that never switches, and "
-                         "write post_analysis/train/")
-    wf.add_argument("--sum", action="append", default=[],
-                    help="groups traded side by side, values joined by +; repeatable")
-    wf.set_defaults(func=cmd_walk_forward)
-
     results = sub.add_parser("results", help="list recorded runs, best first")
     results.add_argument("--env", required=True, type=EnvName)
     results.add_argument("--limit", type=int, default=25)
@@ -344,14 +273,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     imp = sub.add_parser(
         "import-run-log",
-        help="copy the env's run_log/, best_result/ and post_analysis/ folders, from before results moved "
+        help="copy the env's run_log/ folders, from before results moved "
         "to the data lake, into it; a dry run without --apply",
     )
     imp.add_argument("--env", required=True, type=EnvName)
     imp.add_argument("--apply", action="store_true", help="write to the lake, rather than only report")
     imp.set_defaults(func=cmd_import_run_log)
 
-    web = sub.add_parser("web", help="serve the recorded runs and trainings as a page, replaying nothing")
+    web = sub.add_parser("web", help="serve the recorded runs as a page, replaying nothing")
     web.add_argument("--setup", action="store_true", help="create the viewer's own env, ENOSHIMA_API")
     web.set_defaults(func=cmd_web)
 

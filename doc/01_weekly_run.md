@@ -5,9 +5,9 @@ enoshima run --env NAME --from 2026-01-01 --to 2026-12-31 --optimize grid --week
 enoshima run --env NAME --from 2026-01-01 --to 2027-01-31 --optimize grid --weekly   # replays only January's weeks
 ```
 
-This is how Enoshima is mainly used, and the only kind of run that
-[selection](02_selection.md) and [walk-forward](03_walk_forward.md) read. The
-module docstring (`enoshima.weekly`) is the reference.
+This is how Enoshima is mainly used: a weekly run is a parameter set's
+lasting record, grown by every run. The module docstring (`enoshima.weekly`)
+is the reference.
 
 ## The idea: a backtest that accumulates
 
@@ -112,8 +112,8 @@ research/dataset=BacktestOrder/..., BacktestPnl/, ...        bars and metrics be
 - **The run's row is never the current run's result.** It is rebuilt
   (`weekly.rebuild`) from all the weeks on disk, over the first week's start to
   the last week's end (a partial week's own end). A weekly run therefore looks
-  like any other run, and `results`, `select` and `walk-forward` read it
-  unchanged.
+  like any other run, and `results`, `enoshima web` and any reader of the
+  lake read it unchanged.
 - **No gaps.** To keep the run's range true, a run also replays the weeks
   between those on disk and those asked for: with weeks 1–10 on disk and week
   30 asked for, it replays 11–30. A run whose weeks have a gap (a week that
@@ -122,10 +122,8 @@ research/dataset=BacktestOrder/..., BacktestPnl/, ...        bars and metrics be
 - **A new strategy revision is a new run id**, so weeks of two versions of the
   code are never put together.
 
-The run's trades and its by-month grouping are what
-[selection](02_selection.md) ranks and walks forward on, and
-[walk-forward](03_walk_forward.md) cuts its hourly windows from the same
-trades. Neither replays anything.
+The run's trades, its PnL updates and its by-month grouping are what a
+comparison of parameter sets is made from, without replaying anything.
 
 ## Checking it
 

@@ -12,7 +12,6 @@ the environment directory holds definitions and `env.log`, not results.
     research/dataset=BacktestBar/...
     research/dataset=BacktestMetric/...
 
-    research/enoshima/<env>/best_result/, post_analysis/    what select and walk-forward write
 
 | dataset | one row per | from |
 |---|---|---|
@@ -49,7 +48,7 @@ of sixteen digits is a hex string, not a number.
 `all` for a temporary one. A part is written whole, its data files first and
 its `BacktestPart` row last, and only that row says it is finished; the
 run's `BacktestRun` row is rebuilt from its parts after (`weekly.rebuild`) and
-is what "the run is complete" means to `select`, `results` and `enoshima web`.
+is what "the run is complete" means to `results`, `enoshima web` and any reader of the lake.
 A part's row records how many rows each of its files holds, and a reader
 refuses a part whose files are not all there: a file removed from under a
 finished part would otherwise read as a part that traded nothing.
@@ -62,7 +61,7 @@ of its own and every nested meta value (`params`, `config`, ...) as JSON text,
 so the view answers `SELECT run_id, pnl5 FROM backtestrun WHERE env = ...`
 without parsing. `BacktestRun` also holds the run's trades grouped by each of
 `ledger.GROUPINGS`, as `by_<name>` JSON -- what the folder's `by_*.json` were:
-`select` reads every run's months, and a weekly run's trades run to millions. The record datasets' columns are their metrics' tag and field
+a reader comparing every run's months need not read trades that run to millions. The record datasets' columns are their metrics' tag and field
 names; `BacktestBar`'s are whatever the strategy put in its bars. Which of
 them were tags is in each file's Parquet metadata (`records.TAGS_KEY`).
 """
@@ -94,7 +93,6 @@ DATASETS = (RUN, PART, *DATA)
 
 WHOLE = "all"  # the one part of a temporary run
 FILE = "data.parquet"
-ANALYSIS_DIR = "enoshima"
 
 _TRADE_SCHEMA = pa.schema(
     [(name, pa.string() if name in ("exchange", "symbol", "side") else pa.float64()) for name in TRADE_COLUMNS]
@@ -240,11 +238,6 @@ class Store:
         base = self.run_dir(dataset, run_id)
         return (base if part is None else base / f"part={part}") / FILE
 
-    @property
-    def analysis_dir(self) -> Path:
-        """Where `select` and `walk-forward` write: `best_result/` and `post_analysis/`."""
-        return self.root / LAYER / ANALYSIS_DIR / self.env
-
     # ------------------------------------------------------------- writing
 
     def write_part(self, run_id: str, part: str, meta: dict, summary: dict, trades: list[Trade],
@@ -387,7 +380,7 @@ class Store:
         """Every part's trades, in close order, as one replay reports them.
 
         One read of all the parts' files rather than one per part: a weekly run
-        of seventy weeks is seventy files, and `select` reads every run's.
+        of seventy weeks is seventy files, and a reader of a sweep reads every run's.
         """
         parts = self.parts(run_id)
         if not parts:

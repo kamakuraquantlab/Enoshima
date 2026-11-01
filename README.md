@@ -24,8 +24,6 @@ out whether an idea would have worked.
 |---|---|
 | [doc/00_overview.md](doc/00_overview.md) | The whole picture: reading from hase, the environment and its configs, weekly and temporary runs, where results go |
 | [doc/01_weekly_run.md](doc/01_weekly_run.md) | The cumulative weekly run: preload, overlap, which week a trade belongs to, how weeks are saved |
-| [doc/02_selection.md](doc/02_selection.md) | `enoshima select`: filters, score, neighbour smoothing, groups, and its settings |
-| [doc/03_walk_forward.md](doc/03_walk_forward.md) | `enoshima walk-forward`: choosing again every Y on X of history, and `--train` |
 | [doc/04_web.md](doc/04_web.md) | `enoshima web`: the results viewer, its env, dashboard links and API |
 
 ## Where the data comes from
@@ -75,16 +73,19 @@ tail -f example/env/EXAMPLE_BACKTEST/env.log
 It loses money, and it is supposed to: a crossover that crosses 1,292 times in a
 day pays the spread 1,292 times. That is the first thing a backtest is for.
 
-A run without `--weekly` like this one is a quick look: kept, listed by
-`results`, and never a candidate for `select`. The main use is weekly
+A run without `--weekly` like this one is a quick look: kept and listed by
+`results`, with its range in its id. The main use is weekly
 ([doc/01_weekly_run.md](doc/01_weekly_run.md)): sweep the grid in
-`strategy_param_grid.json` over whole weeks, then choose when you ask to:
+`strategy_param_grid.json` over whole weeks, and every later run adds the
+weeks it has data for:
 
 ```bash
 enoshima run --env EXAMPLE_BACKTEST --from 2026-09-01 --to 2026-09-30 --optimize grid --weekly
 enoshima results --env EXAMPLE_BACKTEST
-enoshima select --env EXAMPLE_BACKTEST
 ```
+
+Enoshima runs backtests and shows their results; it does not choose among
+them. Which parameter set to trade is a question for whatever reads the lake.
 
 `results` writes its table to `env.log` too:
 
@@ -141,10 +142,8 @@ described in [the overview](doc/00_overview.md#the-environment).
 | Command | Does |
 |---|---|
 | `enoshima run` | Run a backtest, or a parameter sweep; `--weekly` for the cumulative weekly run |
-| `enoshima select` | Recommend from the recorded weekly runs, per range and group |
-| `enoshima walk-forward` | Test the selection rule's window, history and reselection interval; `--train` chooses among them monthly against no switching |
 | `enoshima results` | Recorded runs for an environment, best first |
-| `enoshima web` | Every env's runs and trainings as a page, replaying nothing (the `web` extra) |
+| `enoshima web` | Every env's runs as a page, replaying nothing (the `web` extra) |
 | `enoshima import-run-log` | Bring an env's results from before the lake into it |
 
 Results go back to the data lake the data came from, under `research/`, one
@@ -171,7 +170,7 @@ If a run is killed by the OOM reaper, lower `chunk_days` before anything else.
 
 Runs are also resumable. A run log's id is a hash of the environment, the strategy
 and its revision, the parameters and the range (weekly: the preload and overlap), so a sweep that dies part way through resumes where it
-stopped, and the combinations it skips are still ranked when it picks a best.
+stopped, and the combinations it skips keep their results.
 
 ## Running on free-threaded Python
 
