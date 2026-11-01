@@ -1,6 +1,7 @@
-import { useState, useEffect, lazy, Suspense } from 'react'
+import { useState, useEffect, useCallback, lazy, Suspense } from 'react'
 import { fetchResults, deleteResult } from './api'
-import ResultsTable from './components/ResultsTable'
+import ResultsTable, { loadHidden, saveHidden, loadSortKeys, saveSortKeys } from './components/ResultsTable'
+import ControlsModal from './components/ControlsModal'
 // The charts are most of the bundle; the table does not wait for them.
 const RunView = lazy(() => import('./components/RunView'))
 
@@ -35,6 +36,13 @@ export default function App() {
   const [deleting, setDeleting] = useState(false)
   const [selectedIdxs, setSelectedIdxs] = useState(new Set())
   const [visibleRows, setVisibleRows] = useState([])
+  // Sorting ([{col, asc}], head first) and hidden columns, kept in the browser; set from the header or the controls.
+  const [sortKeys, setSortKeysState] = useState(loadSortKeys)
+  const [hidden, setHiddenState] = useState(loadHidden)
+  const [columns, setColumns] = useState([])
+  const [showControls, setShowControls] = useState(false)
+  const setSortKeys = useCallback(keys => { setSortKeysState(keys); saveSortKeys(keys) }, [])
+  const setHidden = useCallback(set => { setHiddenState(set); saveHidden(set) }, [])
   // The table's date range, JST days 'YYYY-MM-DD' or '' for open; the runs summarized over it, or null.
   const [range, setRange] = useState({ start: '', end: '' })
   const [rangeResults, setRangeResults] = useState(null)
@@ -103,28 +111,36 @@ export default function App() {
     <header className="app-header"><div className="app-title"><span className="app-logo">▲</span><h1>Enoshima</h1><span className="app-subtitle">Enoshima results</span></div></header>
     <main className="app-main"><Suspense fallback={<div className="loading">Loading…</div>}><RunView target={run} onBack={() => { window.location.hash = `#/results/${encodeURIComponent(run.env)}` }} /></Suspense></main>
   </div>
+  const shownRange = ranged ? `${range.start || firstDay || '…'} → ${range.end || lastDay || '…'}`
+    : firstDay ? `${firstDay} → ${lastDay} (whole runs)` : 'whole runs'
   return <div className="app">
     <header className="app-header"><div className="app-title"><span className="app-logo">▲</span><h1>Enoshima</h1><span className="app-subtitle">Enoshima results</span></div>
-      <span className="app-subtitle">{results.length} runs</span>
-      <div className="app-controls"><input aria-label="Filter results by keyword" type="search" className="search-input" placeholder="Filter by keyword…" value={search} onChange={e => setSearch(e.target.value)} />
+      <div className="app-controls">
+        <input aria-label="Filter results by keyword" type="search" className="search-input" placeholder="Filter by keyword…" value={search} onChange={e => setSearch(e.target.value)} />
         {search && <button className="sort-clear" onClick={() => setSearch('')}>Clear filter</button>}
-        {<div className="range-bar" role="group" aria-label="Summarize results over a date range" title="Each run's result over the trades closed in these JST days">
-          <span className="range-label">Closed (JST)</span>
-          <input type="date" aria-label="From" value={range.start} min={firstDay || undefined} max={range.end || lastDay || undefined}
-            onChange={e => setRange(r => ({ ...r, start: e.target.value }))} />
-          <span className="range-sep">→</span>
-          <input type="date" aria-label="To" value={range.end} min={range.start || firstDay || undefined} max={lastDay || undefined}
-            onChange={e => setRange(r => ({ ...r, end: e.target.value }))} />
-          {ranged && <button className="sort-clear" onClick={() => setRange({ start: '', end: '' })}>Whole runs</button>}
-        </div>}
-        <button className="btn-disable-delete" disabled={loading || deleting} onClick={() => setRefresh(v => v+1)}>Refresh</button>
-        {<button className="btn-enable-delete" disabled={deleting} onClick={() => { setDeleteMode(v => !v); setSelectedIdxs(new Set()) }}>{deleteMode ? 'Disable Delete' : 'Enable Delete'}</button>}
+        <span className="result-count" aria-live="polite">{visibleRows.length} / {results.length} results</span>
+        <button className={`range-readout${ranged ? ' range-readout-on' : ''}`} onClick={() => setShowControls(true)}
+          title="Each run's result is over the trades closed in these JST days. Change it in Controls.">
+          <span className="range-label">Closed (JST)</span> {shownRange}
+        </button>
+        <span className="header-spacer" />
         {deleteMode && <button className="btn-bulk-delete" disabled={loading || deleting || !toDelete.length} onClick={removeSelected}>{deleting ? 'Deleting…' : `Delete (${toDelete.length})`}</button>}
+        <button className="btn-controls" onClick={() => setShowControls(true)} aria-haspopup="dialog">
+          Controls{sortKeys.length || hidden.size || deleteMode ? ' •' : ''}
+        </button>
       </div>
     </header>
+    {showControls && <ControlsModal onClose={() => setShowControls(false)}
+      onRefresh={() => setRefresh(v => v + 1)} refreshing={loading || deleting}
+      sortKeys={sortKeys} onSortKeys={setSortKeys} columns={columns}
+      range={range} onRange={setRange} firstDay={firstDay} lastDay={lastDay}
+      deleteMode={deleteMode} onDeleteMode={on => { setDeleteMode(on); setSelectedIdxs(new Set()) }}
+      deleteCount={toDelete.length} deleting={deleting} onDelete={removeSelected}
+      hidden={hidden} onHidden={setHidden} />}
     <nav className="env-tabs" aria-label="Environments">{envs.map(name => <button key={name} className={`env-tab${selectedEnv === name ? ' env-tab-active' : ''}`} disabled={deleting} onClick={() => { window.location.hash = listHash(name) }}>{name}</button>)}</nav>
     <main className="app-main">{error && <div role="alert" className="alert-error">{error}</div>}
-      {loading || rangeLoading ? <div className="loading">{loading ? 'Loading…' : 'Summarizing the range…'}</div> : <ResultsTable key={selectedEnv} results={results} search={search} onSearch={setSearch} deleteMode={deleteMode} selectedIdxs={selectedIdxs} onToggleRow={toggleRow} onToggleAll={toggleAll} onVisibleRowsChange={setVisibleRows} runHref={runHash} />}
+      {loading || rangeLoading ? <div className="loading">{loading ? 'Loading…' : 'Summarizing the range…'}</div> : <ResultsTable key={selectedEnv} results={results} search={search} onSearch={setSearch}
+        sortKeys={sortKeys} onSortKeys={setSortKeys} hidden={hidden} onHidden={setHidden} onColumnsChange={setColumns} deleteMode={deleteMode} selectedIdxs={selectedIdxs} onToggleRow={toggleRow} onToggleAll={toggleAll} onVisibleRowsChange={setVisibleRows} runHref={runHash} />}
     </main>
   </div>
 }

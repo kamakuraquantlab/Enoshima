@@ -19,21 +19,21 @@ const PINNED_COLS = [
   'execution_time', 'git_rev',
 ]
 
-function loadHidden() {
+export function loadHidden() {
   try {
     const s = localStorage.getItem(HIDDEN_LS_KEY)
     return s ? new Set(JSON.parse(s)) : new Set()
   } catch { return new Set() }
 }
 
-function saveHidden(set) {
+export function saveHidden(set) {
   try {
     if (set.size === 0) localStorage.removeItem(HIDDEN_LS_KEY)
     else localStorage.setItem(HIDDEN_LS_KEY, JSON.stringify([...set]))
   } catch {}
 }
 
-function loadSortKeys() {
+export function loadSortKeys() {
   try {
     const value = JSON.parse(localStorage.getItem(SORT_LS_KEY) || '[]')
     return Array.isArray(value)
@@ -42,24 +42,49 @@ function loadSortKeys() {
   } catch { return [] }
 }
 
-function saveSortKeys(keys) {
+export function saveSortKeys(keys) {
   try {
     if (keys.length === 0) localStorage.removeItem(SORT_LS_KEY)
     else localStorage.setItem(SORT_LS_KEY, JSON.stringify(keys))
   } catch {}
 }
 
-function colLabel(col) {
+export function colLabel(col) {
   return col.replace(/^(result|params|config|trading)\./, '').replaceAll('_', ' ')
 }
 
+// A header click sorts by that column first, or flips it if it already is: [{col, asc}, ...], head = primary.
+export function sortedBy(prev, col) {
+  const idx = prev.findIndex(k => k.col === col)
+  if (idx === -1) return [{ col, asc: false }, ...prev]
+  return [{ col, asc: !prev[idx].asc }, ...prev.filter((_, i) => i !== idx)]
+}
+
+// The table's columns: pinned first, then parameters, then the rest by name.
+export function columnsOf(flat) {
+  const seen = new Set()
+  for (const r of flat) {
+    for (const k of Object.keys(r)) {
+      if (k !== '_rowIdx' && k !== 'run_id' && k !== 'source' && k !== 'grafana_url') seen.add(k)
+    }
+  }
+  return [...seen].sort((a, b) => {
+    const ai = PINNED_COLS.indexOf(a), bi = PINNED_COLS.indexOf(b)
+    if (ai !== -1 && bi !== -1) return ai - bi
+    if (ai !== -1) return -1
+    if (bi !== -1) return 1
+    const ap = a.startsWith('params.'), bp = b.startsWith('params.')
+    if (ap && !bp) return -1
+    if (!ap && bp) return 1
+    return a.localeCompare(b)
+  })
+}
+
+// Sorting and hidden columns are the page's (App), set from the header or the controls.
 export default function ResultsTable({
-  results, search, onSearch,
-  deleteMode, selectedIdxs, onToggleRow, onToggleAll, onVisibleRowsChange, runHref,
+  results, search, onSearch, sortKeys, onSortKeys, hidden, onHidden,
+  deleteMode, selectedIdxs, onToggleRow, onToggleAll, onVisibleRowsChange, onColumnsChange, runHref,
 }) {
-  // sortKeys: [{col, asc}, ...] — head = primary sort
-  const [sortKeys, setSortKeys] = useState(loadSortKeys)
-  const [hidden, setHidden] = useState(loadHidden)
   const [activeCell, setActiveCell] = useState(null)
 
   const headerCheckRef = useRef(null)
@@ -69,56 +94,20 @@ export default function ResultsTable({
     [results]
   )
 
-  const allCols = useMemo(() => {
-    const seen = new Set()
-    for (const r of flat) {
-      for (const k of Object.keys(r)) {
-        if (k !== '_rowIdx' && k !== 'run_id' && k !== 'source' && k !== 'grafana_url') seen.add(k)
-      }
-    }
-    return [...seen].sort((a, b) => {
-      const ai = PINNED_COLS.indexOf(a), bi = PINNED_COLS.indexOf(b)
-      if (ai !== -1 && bi !== -1) return ai - bi
-      if (ai !== -1) return -1
-      if (bi !== -1) return 1
-      const ap = a.startsWith('params.'), bp = b.startsWith('params.')
-      if (ap && !bp) return -1
-      if (!ap && bp) return 1
-      return a.localeCompare(b)
-    })
-  }, [flat])
+  const allCols = useMemo(() => columnsOf(flat), [flat])
+  useEffect(() => { onColumnsChange?.(allCols) }, [allCols, onColumnsChange])
 
   // A link only where grafana_dashboard.json in the API's env has a dashboard for the run.
   const hasGrafana = useMemo(() => flat.some(r => r.grafana_url), [flat])
 
   const visibleCols = useMemo(() => allCols.filter(c => !hidden.has(c)), [allCols, hidden])
-  const hiddenCols  = useMemo(() => allCols.filter(c =>  hidden.has(c)), [allCols, hidden])
 
   const hideCol = (col) => {
     const next = new Set(hidden); next.add(col)
-    setHidden(next); saveHidden(next)
+    onHidden(next)
   }
 
-  const showCol = (col) => {
-    const next = new Set(hidden); next.delete(col)
-    setHidden(next); saveHidden(next)
-  }
-
-  const handleSort = (col) => {
-    setSortKeys(prev => {
-      const idx = prev.findIndex(k => k.col === col)
-      if (idx === -1) {
-        const next = [{ col, asc: false }, ...prev]
-        saveSortKeys(next)
-        return next
-      }
-      const entry = prev[idx]
-      const rest = prev.filter((_, i) => i !== idx)
-      const next = [{ col, asc: !entry.asc }, ...rest]
-      saveSortKeys(next)
-      return next
-    })
-  }
+  const handleSort = (col) => onSortKeys(sortedBy(sortKeys, col))
 
   const filtered = useMemo(() => {
     if (!search.trim()) return flat
@@ -159,27 +148,6 @@ export default function ResultsTable({
 
   return (
     <div className="table-wrap">
-      <div className="table-toolbar">
-        <span className="result-count">{sorted.length} / {results.length} results</span>
-        {sortKeys.length > 0 && (
-          <span className="sort-status">
-            <span className="sort-status-label">sorted by</span>
-            {sortKeys.map((k, i) => (
-              <span key={k.col} className="sort-chip">
-                {i > 0 && <span className="sort-chip-sep">›</span>}
-                <span className="sort-chip-col">{colLabel(k.col)}</span>
-                <span className="sort-chip-dir">{k.asc ? '↑' : '↓'}</span>
-              </span>
-            ))}
-            <button
-              className="sort-clear"
-              onClick={() => { setSortKeys([]); saveSortKeys([]) }}
-              title="Clear sort"
-            >✕</button>
-          </span>
-        )}
-      </div>
-
       <div className="table-scroll" onClick={e => { if (e.target === e.currentTarget) setActiveCell(null) }}>
         <table className="results-table">
           <thead>
@@ -303,18 +271,6 @@ export default function ResultsTable({
           </tbody>
         </table>
       </div>
-
-      {hiddenCols.length > 0 && (
-        <div className="hidden-badges">
-          <span className="hidden-badges-label">Hidden:</span>
-          {hiddenCols.map(col => (
-            <button key={col} className="col-badge" onClick={() => showCol(col)} title={`Restore ${col}`}>
-              {col.replace(/^(result|params|config|trading)\./, '')}
-              <span className="badge-restore">+</span>
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   )
 }
