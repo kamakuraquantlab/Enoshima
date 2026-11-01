@@ -764,17 +764,13 @@ body {
   .header-spacer { display: none; }
   .range-readout { white-space: normal; }
 }
+/* The header wraps at every width: a row of controls wider than the screen made the page wider,
+   and the table's own scroll box then moved with the page instead of showing more of the table. */
 .app-header { flex-wrap: wrap; }
+.app-controls { flex-wrap: wrap; min-width: 0; }
+.app-controls .search-input { flex: 0 1 260px; min-width: 120px; }
 @media (max-width: 600px) {
-  .app-controls { width: 100%; flex-wrap: wrap; justify-content: flex-start; }
+  .app-controls { width: 100%; justify-content: flex-start; }
   .app-controls .search-input { flex: 1; min-width: 0; width: auto; }
 }
 
-/* ── Touch screens: the table widens the page instead of scrolling inside a viewport-wide box ──
-   A pinch-zoom does not lay the page out again, so a table scrolled within a box as wide as the
-   first screen could neither be zoomed out to whole nor panned to its right: the box moved, and
-   the table's hidden part stayed hidden inside it. Here the page is as wide as the table. */
-@media (pointer: coarse), (max-width: 600px) {
-  .table-wrap { width: max-content; min-width: 100%; }
-  .table-scroll { overflow-x: visible; }
-}
