@@ -26,7 +26,6 @@ body {
 .app-title { display: flex; align-items: center; gap: 8px; }
 .app-logo { color: #7c3aed; font-size: 18px; }
 .app-title h1 { font-size: 15px; font-weight: 600; color: #f0f4ff; letter-spacing: 0.02em; }
-.app-subtitle { color: #64748b; font-size: 12px; }
 
 .app-controls {
   display: flex;

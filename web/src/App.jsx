@@ -116,13 +116,13 @@ export default function App() {
     finally { setSelectedIdxs(new Set()); setDeleting(false); setRefresh(v => v+1) }
   }
   if (run) return <div className="app">
-    <header className="app-header"><div className="app-title"><span className="app-logo">▲</span><h1>Enoshima</h1><span className="app-subtitle">Enoshima results</span></div></header>
+    <header className="app-header"><div className="app-title"><span className="app-logo">▲</span><h1>Enoshima</h1></div></header>
     <main className="app-main"><Suspense fallback={<div className="loading">Loading…</div>}><RunView target={run} onBack={() => { window.location.hash = `#/results/${encodeURIComponent(run.env)}` }} /></Suspense></main>
   </div>
   const shownRange = ranged ? `${range.start || firstDay || '…'} → ${range.end || lastDay || '…'}`
     : firstDay ? `${firstDay} → ${lastDay} (whole runs)` : 'whole runs'
   return <div className="app">
-    <header className="app-header"><div className="app-title"><span className="app-logo">▲</span><h1>Enoshima</h1><span className="app-subtitle">Enoshima results</span></div>
+    <header className="app-header"><div className="app-title"><span className="app-logo">▲</span><h1>Enoshima</h1></div>
       <div className="app-controls">
         <input aria-label="Filter results by keyword" type="search" className="search-input" placeholder="Filter by keyword…" value={search} onChange={e => setSearch(e.target.value)} />
         {search && <button className="sort-clear" onClick={() => setSearch('')}>Clear filter</button>}
