@@ -119,11 +119,11 @@ export default function App() {
         <input aria-label="Filter results by keyword" type="search" className="search-input" placeholder="Filter by keyword…" value={search} onChange={e => setSearch(e.target.value)} />
         {search && <button className="sort-clear" onClick={() => setSearch('')}>Clear filter</button>}
         <span className="result-count" aria-live="polite">{visibleRows.length} / {results.length} results</span>
+        <span className="header-spacer" />
         <button className={`range-readout${ranged ? ' range-readout-on' : ''}`} onClick={() => setShowControls(true)}
           title="Each run's result is over the trades closed in these JST days. Change it in Controls.">
           <span className="range-label">Closed (JST)</span> {shownRange}
         </button>
-        <span className="header-spacer" />
         {deleteMode && <button className="btn-bulk-delete" disabled={loading || deleting || !toDelete.length} onClick={removeSelected}>{deleting ? 'Deleting…' : `Delete (${toDelete.length})`}</button>}
         <button className="btn-controls" onClick={() => setShowControls(true)} aria-haspopup="dialog">
           Controls{sortKeys.length || hidden.size || deleteMode ? ' •' : ''}
