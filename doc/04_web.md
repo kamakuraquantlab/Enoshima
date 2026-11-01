@@ -34,13 +34,25 @@ read env folders is ignored. Both files are read once at start.
 ## What it shows
 
 **The table** is every finished run, newest first: its meta flattened into
-columns, and its summary as `result.*`. Envs are tabs; a keyword search
-checks every field; clicking a batch id filters by it; headers sort on several
-columns; × hides a column, and the hidden ones and the sort are kept in the
-browser. Enable Delete to tick runs and delete their files in the lake,
-after confirming.
+columns, and its summary as `result.*`. Envs are tabs. The header holds the
+keyword filter, which checks every field (clicking a batch id filters by it),
+the count of rows shown, and the date range in force, read-only; it wraps on
+a narrow screen. **Controls** opens a modal with the rest, each taking effect
+as it is changed:
 
-The dates beside the filter summarize every run over those JST days instead:
+- **Sorting**, on several columns in order: flip, reorder, remove, add a
+  column, clear. A header click still sorts by that column first.
+- **Date range**, below.
+- **Delete**: enable it to tick runs, then delete their files in the lake,
+  after confirming; `Delete (n)` shows in the header while it is on.
+- **Columns**: hide or show each, with a finder and Show all; × on a header
+  hides that column too.
+- **Refresh** reads the lake again.
+
+The sort and the hidden columns are kept in the browser, and a dot on
+Controls says either is set, or delete is on.
+
+A date range summarizes every run over those JST days instead:
 each `result.*` is `summarize` of the run's trades that closed in them, the
 way the run page narrows to a range, and `range covered` says whether the
 run's own range holds every day of it -- a run that does not is summarized
@@ -58,7 +70,9 @@ pnl10 switch applies to the whole page. The slider under the drawdown is the
 page's range: sliding it, scrolling on the equity chart or picking dates
 narrows every tile, chart and grouping to the trades closed in it, recomputed
 the way `summarize` computes the whole run's. The Summary panel stays the
-run's summary.
+run's summary. Opened from a table with a date range, the link carries it
+(`#/run/<env>/<run_id>?from=YYYY-MM-DD&to=YYYY-MM-DD`) and the page starts
+narrowed to those days, as the table summarized them; Whole run clears it.
 
 The price is the market's last recorded trade per step, read through hase, the
 step the finest that keeps a range to 5,000 points: four hours for a year, five
