@@ -769,3 +769,12 @@ body {
   .app-controls { width: 100%; flex-wrap: wrap; justify-content: flex-start; }
   .app-controls .search-input { flex: 1; min-width: 0; width: auto; }
 }
+
+/* ── Touch screens: the table widens the page instead of scrolling inside a viewport-wide box ──
+   A pinch-zoom does not lay the page out again, so a table scrolled within a box as wide as the
+   first screen could neither be zoomed out to whole nor panned to its right: the box moved, and
+   the table's hidden part stayed hidden inside it. Here the page is as wide as the table. */
+@media (pointer: coarse), (max-width: 600px) {
+  .table-wrap { width: max-content; min-width: 100%; }
+  .table-scroll { overflow-x: visible; }
+}
