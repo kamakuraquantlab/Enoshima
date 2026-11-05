@@ -460,4 +460,4 @@ def serve(env: Env) -> None:
     LAKE_ROOT = lake.lake_root()
     GRAFANA_DASHBOARDS = _dashboards(env.load_object(GRAFANA_FILE))
     LOG.info(f"Serving {LAKE_ROOT} on port {config.port}, {len(GRAFANA_DASHBOARDS)} dashboard(s)")
-    app.run(host="0.0.0.0", port=config.port, debug=False)
+    app.run(host="127.0.0.1", port=config.port, debug=False)
