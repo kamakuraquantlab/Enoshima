@@ -325,7 +325,7 @@ but it is easy to break from here:
 |---|---|
 | A generic indicator, chart, risk rule, or store | `qate`, not here |
 | Anything about the run directory, its files, or credentials | `qate-env`, not here |
-| A venue, or anything that connects | `k2-exchanges`, and not on a backtest's path |
+| A venue, or anything that connects | a venue package, never on a backtest's path |
 | A production strategy | its own private repository |
 | A way of reading recorded data, or converting it to qate objects | `hase` |
 | Where a file lives, or whether a day is complete | `komachi` |
@@ -347,8 +347,8 @@ python3 -m build && cd dist && unzip -q *.whl
 grep -rniE 'AKIA|s3://|BEGIN [A-Z ]*PRIVATE KEY|/home/|api[_-]?key *=' .
 ```
 
-The scan is on the wheel: what ships is the wheel. `k2-exchanges`' AGENTS.md
-carries the list of private ecosystem names to add to the pattern — that list
+The scan is on the wheel: what ships is the wheel. Add the names of any
+private repositories and strategies of your own to the pattern; that list
 cannot live in a public file.
 
 The failure this catches is usually not a leaked credential. It is a public
